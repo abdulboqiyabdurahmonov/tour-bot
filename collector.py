@@ -1,5 +1,15 @@
 import os
-import psycopg2
+# было
+# import psycopg2
+# conn = psycopg2.connect(os.environ["DATABASE_URL"])
+
+# стало
+import psycopg
+
+DATABASE_URL = os.environ["DATABASE_URL"]
+conn = psycopg.connect(DATABASE_URL)
+cur = conn.cursor()
+
 from psycopg2.extras import RealDictCursor
 # collector.py (фрагмент вверху файла)
 import db_init  # noqa: F401  # просто импорт выполняет main() если запустить напрямую? нет
