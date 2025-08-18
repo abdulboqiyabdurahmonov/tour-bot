@@ -22,7 +22,11 @@ if not creds_json:
     raise RuntimeError("GOOGLE_SHEETS_CREDENTIALS не задан")
 
 creds_dict = json.loads(creds_json)
-creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(creds)
 sheet = gc.open(SHEET_NAME).sheet1  # первая вкладка
 
@@ -61,6 +65,16 @@ async def tours_cmd(message: types.Message):
         response += f"🌍 {row['Текст']}\n💰 {row.get('Цена', 'не указана')}\n🔗 {row.get('Ссылка','')}\n\n"
 
     await message.answer(response.strip())
+
+# --- debug команда ---
+@dp.message(Command("debug"))
+async def debug_cmd(message: types.Message):
+    rows = sheet.get_all_records()
+    if not rows:
+        await message.answer("Таблица пустая ❌")
+    else:
+        preview = "\n".join([str(r) for r in rows[:3]])  # первые 3 строки
+        await message.answer(f"Нашёл {len(rows)} строк.\nПример:\n{preview}")
 
 # --- FastAPI ---
 app = FastAPI()
