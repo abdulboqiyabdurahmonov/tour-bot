@@ -1,5 +1,6 @@
-# db_init.py
-import os, psycopg2
+import os
+import psycopg
+from psycopg.rows import dict_row
 
 DDL = """
 CREATE TABLE IF NOT EXISTS channels (
