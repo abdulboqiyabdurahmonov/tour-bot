@@ -67,3 +67,6 @@ def get_all_tours():
             cur.execute("SELECT * FROM tours")
             return cur.fetchall()
 
+if __name__ == "__main__":
+    from pprint import pprint
+    pprint(get_all_tours())
