@@ -7,9 +7,6 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from dotenv import load_dotenv
-load_dotenv()
-
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 
