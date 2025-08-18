@@ -1,32 +1,44 @@
 import os
-import asyncio
-from telethon import TelegramClient, events
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-CHANNELS = [c.strip() for c in (os.getenv("CHANNELS", "")).split(",") if c.strip()]
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# берем локальный файл сессии, который ты закоммитил: tour_session.session
-client = TelegramClient("tour_session", API_ID, API_HASH)
+def init_db():
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS tours (
+        id SERIAL PRIMARY KEY,
+        country TEXT,
+        city TEXT,
+        hotel TEXT,
+        price INTEGER,
+        dates TEXT,
+        description TEXT
+    )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
-@client.on(events.NewMessage(chats=CHANNELS if CHANNELS else None))
-async def handler(event):
-    try:
-        text = event.raw_text or ""
-        chat = (await event.get_chat())
-        title = getattr(chat, "title", str(chat))
-        print(f"[{title}] {text[:200].replace('\\n',' ')}")
-        # тут дальше парсишь цены/направления и пишешь в таблицу/кэш
-    except Exception as e:
-        print("handler error:", e)
-
-async def main():
-    await client.connect()
-    if not await client.is_user_authorized():
-        print("❌ Сессия не авторизована (tour_session.session не подходит). Останов.")
-        return
-    print("✅ Collector online. Listening…")
-    await client.run_until_disconnected()
+def add_test_tours():
+    tours = [
+        ("Турция", "Анталья", "Hotel Sun", 550, "20.08–30.08", "Море, all inclusive"),
+        ("Египет", "Хургада", "Red Sea Resort", 480, "22.08–29.08", "Песчаный пляж, 4*"),
+        ("ОАЭ", "Дубай", "Palm Hotel", 850, "25.08–01.09", "Город + пляж"),
+    ]
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    cur = conn.cursor()
+    cur.executemany("""
+        INSERT INTO tours (country, city, hotel, price, dates, description)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, tours)
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("✅ Тестовые туры добавлены!")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    init_db()
+    add_test_tours()
