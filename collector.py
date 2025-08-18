@@ -3,6 +3,7 @@
 import os
 import psycopg
 from psycopg.rows import dict_row
+from db_init import get_conn
 
 # Берём строку подключения из переменной окружения Render/Heroku и т.п.
 DATABASE_URL = os.environ["DATABASE_URL"]  # пример: postgres://USER:PASSWORD@HOST:PORT/DB
