@@ -1,6 +1,11 @@
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
+# collector.py (фрагмент вверху файла)
+import db_init  # noqa: F401  # просто импорт выполняет main() если запустить напрямую? нет
+# лучше явно вызвать:
+from db_init import main as init_db
+init_db()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
