@@ -1,27 +1,30 @@
 import os
 import asyncio
+from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from fastapi import FastAPI
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
-from aiohttp import web
 
+# === ENV ===
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = "supersecret"  # придумай строку сам
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret")  # можешь переопределить в Render
 PORT = int(os.getenv("PORT", 8080))
 
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
+
+# === Aiogram core ===
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- handlers ---
+# === Handlers ===
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer("Привет! Я тур-бот 🤖\nПиши /tours чтобы увидеть примеры туров.")
 
 @dp.message(Command("tours"))
 async def tours_cmd(message: types.Message):
-    # пока заглушка: выводим список из 3 туров
+    # Заглушка — позже подменим на реальные данные из Collector
     tours = [
         "🇹🇷 Анталия — 500$ за 7 ночей",
         "🇹🇭 Пхукет — 800$ за 10 ночей",
@@ -29,17 +32,33 @@ async def tours_cmd(message: types.Message):
     ]
     await message.answer("\n".join(tours))
 
-# --- fastapi for Render ---
+# === FastAPI app ===
 app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "tour-bot"}
 
 @app.on_event("startup")
 async def on_startup():
-    # выставляем вебхук на Render URL
-    render_url = os.getenv("RENDER_EXTERNAL_URL")  # Render сам задаёт
-    webhook_url = f"{render_url}{WEBHOOK_PATH}"
-    await bot.set_webhook(webhook_url, secret_token=WEBHOOK_SECRET)
+    # Формируем абсолютный URL для вебхука на Render
+    # Render сам пробрасывает RENDER_EXTERNAL_URL
+    base = os.getenv("RENDER_EXTERNAL_URL")
+    if not base:
+        # fallback: локально / на нестандартных платформах
+        base = os.getenv("PUBLIC_URL", f"http://0.0.0.0:{PORT}")
+    webhook_url = f"{base}{WEBHOOK_PATH}"
+    # Переставим вебхук (перезапишет старый, это норм)
+    await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
     print(f"✅ Webhook set: {webhook_url}")
 
-aio_app = web.Application()
-SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(aio_app, path=WEBHOOK_PATH)
-app.mount("/", web.AppRunner(aio_app))
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    # Проверяем секрет X-Telegram-Bot-Api-Secret-Token
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        return Response(status_code=403)
+    data = await request.json()
+    # Валидируем Update и отдаём его диспетчеру
+    update = types.Update.model_validate(data)
+    await dp.feed_update(bot, update)
+    return {"ok": True}
