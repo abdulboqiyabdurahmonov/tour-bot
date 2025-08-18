@@ -10,21 +10,35 @@ def get_conn():
     return psycopg.connect(DATABASE_URL, sslmode="require")
 
 def init_db():
-    # создаём таблицу, если её нет
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS tours (
-                    id SERIAL PRIMARY KEY,
-                    country     TEXT,
-                    city        TEXT,
-                    hotel       TEXT,
-                    price       INTEGER,
-                    dates       TEXT,
-                    description TEXT
-                )
-            """)
-            conn.commit()
+    with get_conn() as conn, conn.cursor() as cur:
+        # основная таблица
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tours (
+                id SERIAL PRIMARY KEY,
+                country     TEXT,
+                city        TEXT,
+                hotel       TEXT,
+                price       INTEGER,
+                dates       TEXT,
+                description TEXT
+            )
+        """)
+        # новые поля-источник
+        cur.execute("""ALTER TABLE tours ADD COLUMN IF NOT EXISTS source_chat TEXT""")
+        cur.execute("""ALTER TABLE tours ADD COLUMN IF NOT EXISTS message_id BIGINT""")
+        cur.execute("""ALTER TABLE tours ADD COLUMN IF NOT EXISTS posted_at TIMESTAMPTZ""")
+        cur.execute("""ALTER TABLE tours ADD COLUMN IF NOT EXISTS source_url TEXT""")
+        # уникальность на сообщение
+        cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS tours_source_unique
+                       ON tours(source_chat, message_id)""")
+        # чекпоинты по каналам (чтобы не гонять старые посты)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                chat TEXT PRIMARY KEY,
+                last_id BIGINT
+            )
+        """)
+        conn.commit()
 
 def seed_test():
     # тестовые данные (можно выключить переменной SEED_TEST_TOURS=0)
