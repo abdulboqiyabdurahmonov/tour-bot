@@ -4,7 +4,6 @@ gspread
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
-aiogram==3.*
 fastapi
 uvicorn
 aiohttp
