@@ -8,3 +8,4 @@ aiogram==3.*
 fastapi
 uvicorn
 aiohttp
+psycopg[binary]==3.1.19
