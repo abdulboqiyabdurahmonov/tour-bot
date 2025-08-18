@@ -10,7 +10,8 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 conn = psycopg.connect(DATABASE_URL)
 cur = conn.cursor()
 
-from psycopg2.extras import RealDictCursor
+from psycopg.rows import dict_row
+
 # collector.py (фрагмент вверху файла)
 import db_init  # noqa: F401  # просто импорт выполняет main() если запустить напрямую? нет
 # лучше явно вызвать:
