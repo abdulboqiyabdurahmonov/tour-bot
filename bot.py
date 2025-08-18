@@ -1,37 +1,40 @@
 import os
-import asyncio
+import json
 from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+import gspread
+from google.oauth2.service_account import Credentials
 
-# --- Config ---
+# --- ENV ---
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret")
 PORT = int(os.getenv("PORT", 8080))
+SHEET_NAME = os.getenv("SHEET_NAME", "Tours")
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
+
+# --- Google Sheets auth ---
+creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+if not creds_json:
+    raise RuntimeError("GOOGLE_SHEETS_CREDENTIALS не задан")
+
+creds_dict = json.loads(creds_json)
+creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+gc = gspread.authorize(creds)
+sheet = gc.open(SHEET_NAME).sheet1  # первая вкладка
 
 # --- Aiogram ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# === Примерная база туров (заглушка) ===
-TOURS = [
-    {"title": "Анталия", "price": "500$", "nights": 7},
-    {"title": "Пхукет", "price": "800$", "nights": 10},
-    {"title": "Шарм-эль-Шейх", "price": "450$", "nights": 7},
-    {"title": "Бодрум", "price": "600$", "nights": 7},
-    {"title": "Бали", "price": "1200$", "nights": 12},
-]
-
-# --- Handlers ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
         "Привет! Я тур-бот 🤖\n"
-        "Напиши /tours <страна/город>, и я найду подходящие предложения.\n\n"
+        "Напиши /tours <страна/город>, и я найду туры из базы.\n\n"
         "Пример: /tours Турция"
     )
 
@@ -43,17 +46,21 @@ async def tours_cmd(message: types.Message):
         return
 
     query = args[1].lower()
-    results = [t for t in TOURS if query in t["title"].lower()]
+
+    # читаем все строки из таблицы
+    rows = sheet.get_all_records()
+    results = [row for row in rows if query in row["Текст"].lower()]
 
     if not results:
-        await message.answer("❌ Ничего не найдено. Попробуй другой запрос.")
+        await message.answer("❌ Ничего не найдено.")
         return
 
+    # формируем ответ
     response = "🔎 Нашёл такие туры:\n\n"
-    for t in results:
-        response += f"🌍 {t['title']} — {t['price']} за {t['nights']} ночей\n"
+    for row in results[:5]:  # максимум 5
+        response += f"🌍 {row['Текст']}\n💰 {row.get('Цена', 'не указана')}\n🔗 {row.get('Ссылка','')}\n\n"
 
-    await message.answer(response)
+    await message.answer(response.strip())
 
 # --- FastAPI ---
 app = FastAPI()
@@ -64,15 +71,9 @@ async def root():
 
 @app.on_event("startup")
 async def on_startup():
-    base = os.getenv("RENDER_EXTERNAL_URL")
-    if not base:
-        base = os.getenv("PUBLIC_URL", f"http://0.0.0.0:{PORT}")
+    base = os.getenv("RENDER_EXTERNAL_URL", f"http://0.0.0.0:{PORT}")
     webhook_url = f"{base}{WEBHOOK_PATH}"
-
-    await bot.set_webhook(
-        url=webhook_url,
-        secret_token=WEBHOOK_SECRET
-    )
+    await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
     print(f"✅ Webhook set: {webhook_url}")
 
 @app.post(WEBHOOK_PATH)
