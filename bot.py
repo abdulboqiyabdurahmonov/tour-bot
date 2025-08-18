@@ -17,22 +17,43 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# === Примерная база туров (заглушка) ===
+TOURS = [
+    {"title": "Анталия", "price": "500$", "nights": 7},
+    {"title": "Пхукет", "price": "800$", "nights": 10},
+    {"title": "Шарм-эль-Шейх", "price": "450$", "nights": 7},
+    {"title": "Бодрум", "price": "600$", "nights": 7},
+    {"title": "Бали", "price": "1200$", "nights": 12},
+]
+
 # --- Handlers ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
         "Привет! Я тур-бот 🤖\n"
-        "Пиши /tours чтобы увидеть примеры туров."
+        "Напиши /tours <страна/город>, и я найду подходящие предложения.\n\n"
+        "Пример: /tours Турция"
     )
 
 @dp.message(Command("tours"))
 async def tours_cmd(message: types.Message):
-    tours = [
-        "🇹🇷 Анталия — 500$ за 7 ночей",
-        "🇹🇭 Пхукет — 800$ за 10 ночей",
-        "🇪🇬 Шарм-эль-Шейх — 450$ за 7 ночей"
-    ]
-    await message.answer("\n".join(tours))
+    args = message.text.split(maxsplit=1)
+    if len(args) == 1:
+        await message.answer("Укажи страну или город после команды.\nНапример: `/tours Турция`")
+        return
+
+    query = args[1].lower()
+    results = [t for t in TOURS if query in t["title"].lower()]
+
+    if not results:
+        await message.answer("❌ Ничего не найдено. Попробуй другой запрос.")
+        return
+
+    response = "🔎 Нашёл такие туры:\n\n"
+    for t in results:
+        response += f"🌍 {t['title']} — {t['price']} за {t['nights']} ночей\n"
+
+    await message.answer(response)
 
 # --- FastAPI ---
 app = FastAPI()
