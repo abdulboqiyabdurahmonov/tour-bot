@@ -13,9 +13,6 @@ from aiogram.filters import Command
 from aiogram.types import Message
 import asyncio
 
-from dotenv import load_dotenv
-load_dotenv()
-
 # ===== ENV =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SHEETS_SPREADSHEET_ID = os.getenv("SHEETS_SPREADSHEET_ID")
