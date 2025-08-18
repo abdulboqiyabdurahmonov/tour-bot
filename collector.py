@@ -60,3 +60,10 @@ if __name__ == "__main__":
     init_db()
     if os.getenv("SEED_TOURS", "0") == "1":
         add_test_tours()
+
+def get_all_tours():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM tours")
+            return cur.fetchall()
+
