@@ -24,20 +24,23 @@ dp = Dispatcher()
 async def start_cmd(message: types.Message):
     await message.answer(
         "Привет! Я тур-бот 🤖\n"
-        "Напиши /tours <страна/город> или просто название города, и я найду туры.\n\n"
+        "Напиши /tours <страна/город> или просто название города, и я найду свежие туры (за последние 24 часа).\n\n"
         "Пример: /tours Турция или просто Турция"
     )
 
 
 async def search_tours(query: str):
-    """Поиск туров в базе"""
+    """Поиск туров в базе только за последние 24 часа"""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT country, city, price, description, source_url, posted_at
             FROM tours
-            WHERE (country IS NOT NULL AND lower(country) LIKE %s)
-               OR (city IS NOT NULL AND lower(city) LIKE %s)
+            WHERE posted_at >= NOW() - INTERVAL '24 hours'
+              AND (
+                   (country IS NOT NULL AND lower(country) LIKE %s)
+                OR (city IS NOT NULL AND lower(city) LIKE %s)
+              )
             ORDER BY price ASC
             LIMIT 5
             """,
@@ -60,10 +63,10 @@ async def tours_cmd(message: types.Message):
     results = await search_tours(query)
 
     if not results:
-        await message.answer("❌ Ничего не найдено.")
+        await message.answer("❌ Ничего не найдено за последние 24 часа.")
         return
 
-    response = "🔎 Нашёл такие туры:\n\n"
+    response = "🔎 Нашёл такие туры за последние 24 часа:\n\n"
     for row in results:
         response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
         response += f"💰 {row['price']} $\n"
@@ -83,10 +86,10 @@ async def handle_plain_text(message: types.Message):
     results = await search_tours(query)
 
     if not results:
-        await message.answer("❌ Ничего не найдено.")
+        await message.answer("❌ Ничего не найдено за последние 24 часа.")
         return
 
-    response = "🔎 Нашёл такие туры:\n\n"
+    response = "🔎 Нашёл такие туры за последние 24 часа:\n\n"
     for row in results:
         response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
         response += f"💰 {row['price']} $\n"
@@ -100,9 +103,9 @@ async def handle_plain_text(message: types.Message):
 @dp.message(Command("debug"))
 async def debug_cmd(message: types.Message):
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT count(*) AS cnt FROM tours")
+        cur.execute("SELECT count(*) AS cnt FROM tours WHERE posted_at >= NOW() - INTERVAL '24 hours'")
         cnt = cur.fetchone()["cnt"]
-    await message.answer(f"В базе сейчас {cnt} туров ✅")
+    await message.answer(f"В базе {cnt} туров за последние 24 часа ✅")
 
 
 # -------------------- FASTAPI --------------------
