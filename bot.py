@@ -4,61 +4,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 
 from psycopg.rows import dict_row
-from db_init import get_conn  # та же функция get_conn, что и в collector.py
-
-# --- ENV ---
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret")
-PORT = int(os.getenv("PORT", 8080))
-
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
-
-# --- Aiogram ---
-bot = Bot(token=TOKEN)
-dp = Dispatcher()   # dp должен быть объявлен здесь
-
-# Дальше можно спокойно писать хэндлеры:
-@dp.message(Command("start"))
-async def start_cmd(message: types.Message):
-    await message.answer("Привет! Я тур-бот 🤖 ...")
-
-@dp.message(F.text)
-async def handle_plain_text(message: types.Message):
-    query = message.text.strip().lower()
-
-    if not query:
-        return
-
-    # читаем туры из Postgres
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            SELECT country, city, price, description, source_url, posted_at
-            FROM tours
-            WHERE (country IS NOT NULL AND lower(country) LIKE %s)
-               OR (city IS NOT NULL AND lower(city) LIKE %s)
-            ORDER BY posted_at DESC
-            LIMIT 5
-            """,
-            (f"%{query}%", f"%{query}%"),
-        )
-        results = cur.fetchall()
-
-    if not results:
-        await message.answer("❌ Ничего не найдено.")
-        return
-
-    response = "🔎 Нашёл такие туры:\n\n"
-    for row in results:
-        response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
-        response += f"💰 {row['price']} $\n"
-        if row.get("source_url"):
-            response += f"🔗 {row['source_url']}\n"
-        response += f"📝 {row['description'][:200]}...\n\n"
-
-    await message.answer(response.strip())
+from db_init import get_conn
 
 # --- ENV ---
 TOKEN = os.getenv("BOT_TOKEN")
@@ -73,15 +19,31 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-
 # -------------------- HANDLERS --------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
         "Привет! Я тур-бот 🤖\n"
-        "Напиши /tours <страна/город>, и я найду туры из базы.\n\n"
-        "Пример: /tours Турция"
+        "Напиши /tours <страна/город> или просто название города, и я найду туры.\n\n"
+        "Пример: /tours Турция или просто Турция"
     )
+
+
+async def search_tours(query: str):
+    """Поиск туров в базе"""
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT country, city, price, description, source_url, posted_at
+            FROM tours
+            WHERE (country IS NOT NULL AND lower(country) LIKE %s)
+               OR (city IS NOT NULL AND lower(city) LIKE %s)
+            ORDER BY posted_at DESC
+            LIMIT 5
+            """,
+            (f"%{query}%", f"%{query}%"),
+        )
+        return cur.fetchall()
 
 
 @dp.message(Command("tours"))
@@ -95,31 +57,39 @@ async def tours_cmd(message: types.Message):
         return
 
     query = args[1].lower()
-
-    # читаем туры из Postgres
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            SELECT country, city, price, description, source_url, posted_at
-            FROM tours
-            WHERE (country IS NOT NULL AND lower(country) LIKE %s)
-               OR (city IS NOT NULL AND lower(city) LIKE %s)
-            ORDER BY posted_at DESC
-            LIMIT 5
-            """,
-            (f"%{query}%", f"%{query}%"),
-        )
-        results = cur.fetchall()
+    results = search_tours(query)
 
     if not results:
         await message.answer("❌ Ничего не найдено.")
         return
 
-    # формируем ответ
     response = "🔎 Нашёл такие туры:\n\n"
     for row in results:
         response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
-        response += f"💰 {row['price']} $\n"
+        response += f"💰 {row['price']}\n"
+        if row.get("source_url"):
+            response += f"🔗 {row['source_url']}\n"
+        response += f"📝 {row['description'][:200]}...\n\n"
+
+    await message.answer(response.strip())
+
+
+@dp.message(F.text)
+async def handle_plain_text(message: types.Message):
+    query = message.text.strip().lower()
+    if not query:
+        return
+
+    results = search_tours(query)
+
+    if not results:
+        await message.answer("❌ Ничего не найдено.")
+        return
+
+    response = "🔎 Нашёл такие туры:\n\n"
+    for row in results:
+        response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
+        response += f"💰 {row['price']}\n"
         if row.get("source_url"):
             response += f"🔗 {row['source_url']}\n"
         response += f"📝 {row['description'][:200]}...\n\n"
@@ -138,11 +108,9 @@ async def debug_cmd(message: types.Message):
 # -------------------- FASTAPI --------------------
 app = FastAPI()
 
-
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "tour-bot"}
-
 
 @app.on_event("startup")
 async def on_startup():
@@ -150,7 +118,6 @@ async def on_startup():
     webhook_url = f"{base}{WEBHOOK_PATH}"
     await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
     print(f"✅ Webhook set: {webhook_url}")
-
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
