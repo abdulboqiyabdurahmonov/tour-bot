@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    container_name: tours_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tours
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  collector:
+    build: ./collector
+    container_name: tours_collector
+    restart: always
+    depends_on:
+      - db
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      SESSION_B64: ${SESSION_B64}
+      CHANNELS: ${CHANNELS}
+      DATABASE_URL: postgres://postgres:postgres@db:5432/tours
+    command: ["python", "collector.py"]
+
+  bot:
+    build: ./bot
+    container_name: tours_bot
+    restart: always
+    depends_on:
+      - db
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-supersecret}
+      PORT: 8080
+      DATABASE_URL: postgres://postgres:postgres@db:5432/tours
+    ports:
+      - "8080:8080"
+    command: ["uvicorn", "bot:app", "--host", "0.0.0.0", "--port", "8080"]
+
+volumes:
+  db_data:
