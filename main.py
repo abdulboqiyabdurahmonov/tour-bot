@@ -30,3 +30,8 @@ async def webhook_handler(request: Request):
     update = types.Update(**data)
     await dp.feed_update(bot, update)
     return {"ok": True}
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Tour Bot is alive"}
+
