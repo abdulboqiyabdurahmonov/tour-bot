@@ -1,13 +1,19 @@
 import os
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-
 from psycopg.rows import dict_row
 from db_init import get_conn
-
 from openai import AsyncOpenAI
+
+
+# ================== LOGS ==================
+logging.basicConfig(level=logging.INFO)
+
 
 # ================== ENV ==================
 TOKEN = os.getenv("BOT_TOKEN")
@@ -21,32 +27,34 @@ if not TOKEN:
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY не задан в переменных окружения")
 
-# ================== Aiogram ==================
+
+# ================== Aiogram / GPT ==================
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
-# ================== GPT клиент ==================
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
-# -------------------- ВСПОМОГАТЕЛЬНЫЕ --------------------
+# -------------------- KEYBOARDS --------------------
 def main_menu():
-    """Клавиатура главного меню"""
-    kb = [
-        [KeyboardButton(text="🌍 Найти тур")],
-        [KeyboardButton(text="ℹ️ О проекте"), KeyboardButton(text="💰 Прайс подписки")],
-    ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🌍 Найти тур")],
+            [KeyboardButton(text="ℹ️ О проекте"), KeyboardButton(text="💰 Прайс подписки")],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def back_menu():
-    """Клавиатура с кнопкой назад"""
-    kb = [[KeyboardButton(text="🔙 Назад")]]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🔙 Назад")]],
+        resize_keyboard=True,
+    )
 
 
+# -------------------- DB --------------------
 async def search_tours(query: str):
-    """Поиск туров в базе только за последние 24 часа"""
+    """Ищем туры за последние 24 часа"""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -66,30 +74,28 @@ async def search_tours(query: str):
 
 
 async def format_with_gpt(query: str, results: list):
-    """Оформляем ответ через GPT"""
+    """Форматируем ответ через GPT"""
     if not results:
         prompt = f"""
-        Пользователь ищет туры по запросу "{query}", но в базе за последние 24 часа ничего нет.
-        Ответь вежливо и дружелюбно. 
-        Подскажи, что новых туров пока нет, но стоит заглянуть позже.
+        Пользователь ищет туры по запросу "{query}", но за последние 24 часа ничего нет.
+        Ответь дружелюбно, предложи заглянуть позже.
         """
     else:
         prompt = f"""
         Пользователь ищет туры по запросу "{query}".
-        Вот список туров (каждый тур: страна, город, цена, ссылка, описание):
+        Вот список туров:
         {results}
 
-        Сформулируй красивый, дружелюбный и понятный ответ для клиента:
+        Сформулируй короткий (до 800 символов), дружелюбный и продающий ответ:
         - Добавь приветствие с эмодзи
-        - Представь туры живым текстом (не сухой список, а мини-описания)
-        - Если есть ссылки, укажи их с 🔗
-        - Не превышай 800 символов
+        - Представь туры как мини-описания
+        - Если есть ссылки, добавь 🔗
         """
 
     resp = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Ты помощник турфирмы. Пиши дружелюбно, понятно и продающе."},
+            {"role": "system", "content": "Ты помощник турфирмы, отвечай дружелюбно и продающе."},
             {"role": "user", "content": prompt},
         ],
     )
@@ -101,8 +107,8 @@ async def format_with_gpt(query: str, results: list):
 async def start_cmd(message: types.Message):
     await message.answer(
         "Привет! Я тур-бот 🤖\n"
-        "Я помогу найти свежие туры за последние 24 часа.\n\n"
-        "Выберите опцию из меню 👇",
+        "Помогу найти свежие туры за последние 24 часа.\n\n"
+        "Выберите опцию 👇",
         reply_markup=main_menu(),
     )
 
@@ -110,7 +116,7 @@ async def start_cmd(message: types.Message):
 @dp.message(F.text == "🌍 Найти тур")
 async def menu_tour(message: types.Message):
     await message.answer(
-        "Чтобы найти тур, напиши команду:\n\n`/tours <страна/город>`\n\n"
+        "Чтобы найти тур, напиши:\n\n`/tours <страна/город>`\n\n"
         "Пример: `/tours Турция` или просто `Турция`",
         parse_mode="Markdown",
         reply_markup=back_menu(),
@@ -120,8 +126,8 @@ async def menu_tour(message: types.Message):
 @dp.message(F.text == "ℹ️ О проекте")
 async def menu_about(message: types.Message):
     await message.answer(
-        "✨ Этот бот создан для поиска свежих туров из Telegram-каналов туроператоров.\n"
-        "Мы собираем новые предложения каждые сутки и показываем только актуальные туры 🏖️",
+        "✨ Бот ищет свежие туры из каналов туроператоров.\n"
+        "Обновляем базу каждые сутки и показываем только актуальное 🏖️",
         reply_markup=back_menu(),
     )
 
@@ -129,11 +135,11 @@ async def menu_about(message: types.Message):
 @dp.message(F.text == "💰 Прайс подписки")
 async def menu_price(message: types.Message):
     await message.answer(
-        "💳 Подписка на доступ к актуальным турам стоит:\n\n"
+        "💳 Подписка на туры:\n\n"
         "• 1 месяц — 99 000 UZS\n"
         "• 3 месяца — 249 000 UZS\n"
         "• 6 месяцев — 449 000 UZS\n\n"
-        "После подписки мы открываем контакты туроператоров ✈️",
+        "После подписки открываются контакты туроператоров ✈️",
         reply_markup=back_menu(),
     )
 
@@ -162,11 +168,10 @@ async def tours_cmd(message: types.Message):
 @dp.message(F.text)
 async def handle_plain_text(message: types.Message):
     query = message.text.strip().lower()
-    if not query:
-        return
-    results = await search_tours(query)
-    text = await format_with_gpt(query, results)
-    await message.answer(text)
+    if query:
+        results = await search_tours(query)
+        text = await format_with_gpt(query, results)
+        await message.answer(text)
 
 
 @dp.message(Command("debug"))
@@ -178,20 +183,33 @@ async def debug_cmd(message: types.Message):
 
 
 # -------------------- FASTAPI --------------------
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    base = os.getenv("RENDER_EXTERNAL_URL", f"http://0.0.0.0:{PORT}")
+    webhook_url = f"{base}{WEBHOOK_PATH}"
+
+    try:
+        await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+        logging.info(f"✅ Webhook set: {webhook_url}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка при установке webhook: {e}")
+
+    yield
+
+    # при остановке приложения — снимаем вебхук
+    try:
+        await bot.delete_webhook()
+        logging.info("🛑 Webhook удалён")
+    except Exception as e:
+        logging.error(f"❌ Ошибка при удалении webhook: {e}")
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "tour-bot"}
-
-
-@app.on_event("startup")
-async def on_startup():
-    base = os.getenv("RENDER_EXTERNAL_URL", f"http://0.0.0.0:{PORT}")
-    webhook_url = f"{base}{WEBHOOK_PATH}"
-    await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
-    print(f"✅ Webhook set: {webhook_url}")
 
 
 @app.post(WEBHOOK_PATH)
