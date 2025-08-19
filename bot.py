@@ -8,7 +8,7 @@ from db_init import get_conn
 
 from openai import AsyncOpenAI
 
-# --- ENV ---
+# ================== ENV ==================
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret")
@@ -16,30 +16,23 @@ PORT = int(os.getenv("PORT", 8080))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TOKEN:
-    raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
+    raise RuntimeError("❌ BOT_TOKEN не задан в переменных окружения")
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения")
+    raise RuntimeError("❌ OPENAI_API_KEY не задан в переменных окружения")
 
-# --- Aiogram ---
+# ================== Aiogram ==================
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- GPT клиент ---
+# ================== GPT клиент ==================
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
-# -------------------- HANDLERS --------------------
-@dp.message(Command("start"))
-async def start_cmd(message: types.Message):
-    await message.answer(
-        "Привет! Я тур-бот 🤖\n"
-        "Напиши /tours <страна/город> или просто название города, и я найду свежие туры (за последние 24 часа).\n\n"
-        "Пример: /tours Турция или просто Турция"
-    )
-
-
+# -------------------- ВСПОМОГАТЕЛЬНЫЕ --------------------
 async def search_tours(query: str):
-    """Поиск туров в базе только за последние 24 часа"""
+    """
+    Поиск туров в базе только за последние 24 часа
+    """
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -59,11 +52,13 @@ async def search_tours(query: str):
 
 
 async def format_with_gpt(query: str, results: list):
-    """Оформляем ответ через GPT"""
+    """
+    Оформляем ответ через GPT
+    """
     if not results:
         prompt = f"""
         Пользователь ищет туры по запросу "{query}", но в базе за последние 24 часа ничего нет.
-        Ответь вежливо, дружелюбно и человечно. 
+        Ответь вежливо и дружелюбно. 
         Подскажи, что новых туров пока нет, но стоит заглянуть позже.
         """
     else:
@@ -73,8 +68,8 @@ async def format_with_gpt(query: str, results: list):
         {results}
 
         Сформулируй красивый, дружелюбный и понятный ответ для клиента:
-        - В начале добавь приветствие с эмодзи
-        - Представь туры в виде живого текста (короткие описания, но не сухой список)
+        - Добавь приветствие с эмодзи
+        - Представь туры живым текстом (не сухой список, а мини-описания)
         - Если есть ссылки, укажи их с 🔗
         - Не превышай 800 символов
         """
@@ -82,11 +77,21 @@ async def format_with_gpt(query: str, results: list):
     resp = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Ты помощник-бот турфирмы. Пиши дружелюбно, понятно и продающе."},
+            {"role": "system", "content": "Ты помощник турфирмы. Пиши дружелюбно, понятно и продающе."},
             {"role": "user", "content": prompt},
         ],
     )
     return resp.choices[0].message.content.strip()
+
+
+# -------------------- HANDLERS --------------------
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    await message.answer(
+        "Привет! Я тур-бот 🤖\n"
+        "Напиши /tours <страна/город> или просто название города, и я найду свежие туры (за последние 24 часа).\n\n"
+        "Пример: /tours Турция или просто Турция"
+    )
 
 
 @dp.message(Command("tours"))
@@ -120,15 +125,17 @@ async def debug_cmd(message: types.Message):
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT count(*) AS cnt FROM tours WHERE posted_at >= NOW() - INTERVAL '24 hours'")
         cnt = cur.fetchone()["cnt"]
-    await message.answer(f"В базе {cnt} туров за последние 24 часа ✅")
+    await message.answer(f"📊 В базе {cnt} туров за последние 24 часа ✅")
 
 
 # -------------------- FASTAPI --------------------
 app = FastAPI()
 
+
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "tour-bot"}
+
 
 @app.on_event("startup")
 async def on_startup():
@@ -136,6 +143,7 @@ async def on_startup():
     webhook_url = f"{base}{WEBHOOK_PATH}"
     await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
     print(f"✅ Webhook set: {webhook_url}")
+
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
