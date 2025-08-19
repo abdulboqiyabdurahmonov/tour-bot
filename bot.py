@@ -38,7 +38,7 @@ async def search_tours(query: str):
             FROM tours
             WHERE (country IS NOT NULL AND lower(country) LIKE %s)
                OR (city IS NOT NULL AND lower(city) LIKE %s)
-            ORDER BY posted_at DESC
+            ORDER BY price ASC
             LIMIT 5
             """,
             (f"%{query}%", f"%{query}%"),
@@ -57,7 +57,7 @@ async def tours_cmd(message: types.Message):
         return
 
     query = args[1].lower()
-    results = search_tours(query)
+    results = await search_tours(query)
 
     if not results:
         await message.answer("❌ Ничего не найдено.")
@@ -66,7 +66,7 @@ async def tours_cmd(message: types.Message):
     response = "🔎 Нашёл такие туры:\n\n"
     for row in results:
         response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
-        response += f"💰 {row['price']}\n"
+        response += f"💰 {row['price']} $\n"
         if row.get("source_url"):
             response += f"🔗 {row['source_url']}\n"
         response += f"📝 {row['description'][:200]}...\n\n"
@@ -80,7 +80,7 @@ async def handle_plain_text(message: types.Message):
     if not query:
         return
 
-    results = search_tours(query)
+    results = await search_tours(query)
 
     if not results:
         await message.answer("❌ Ничего не найдено.")
@@ -89,7 +89,7 @@ async def handle_plain_text(message: types.Message):
     response = "🔎 Нашёл такие туры:\n\n"
     for row in results:
         response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
-        response += f"💰 {row['price']}\n"
+        response += f"💰 {row['price']} $\n"
         if row.get("source_url"):
             response += f"🔗 {row['source_url']}\n"
         response += f"📝 {row['description'][:200]}...\n\n"
