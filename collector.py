@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
@@ -9,11 +10,14 @@ from telethon.sessions import StringSession
 from psycopg.rows import dict_row
 from db_init import get_conn, init_db
 
+# ---------- LOGGING ----------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("collector")
+
 # ---------- ENV ----------
 API_ID = int(os.environ["TELEGRAM_API_ID"])          # my.telegram.org
 API_HASH = os.environ["TELEGRAM_API_HASH"]
 SESSION_B64 = os.environ["SESSION_B64"]              # строка StringSession
-# список каналов через запятую: @tour_deals,@agentuz или числовые id
 CHANNELS = [x.strip() for x in os.getenv("CHANNELS", "").split(",") if x.strip()]
 
 # ---------- DB helpers ----------
@@ -106,23 +110,15 @@ def parse_post(text: str) -> dict | None:
         "country": country,
         "city": city,
         "hotel": None,
-        "price": price,        # <<< int
-        "currency": currency,  # <<< отдельное поле
+        "price": price,
+        "currency": currency,
         "dates": None,
         "description": text[:900],
     }
 
-# ---------- Telethon ----------
-client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
-
-@client.on(events.NewMessage(chats=CHANNELS if CHANNELS else None))
-async def handler(event):
+# ---------- обработка поста ----------
+async def process_message(msg, chat):
     try:
-        msg = event.message
-        chat = await event.get_chat()
-        chat_username = getattr(chat, "username", None)
-        chat_title = getattr(chat, "title", None)
-
         text = msg.message or ""
         parsed = parse_post(text)
         if not parsed:
@@ -130,18 +126,26 @@ async def handler(event):
 
         row = {
             **parsed,
-            "source_chat": f"@{chat_username}" if chat_username else (chat_title or str(chat.id)),
+            "source_chat": f"@{getattr(chat, 'username', None)}" if getattr(chat, "username", None) else (getattr(chat, "title", None) or str(chat.id)),
             "message_id": int(msg.id),
             "posted_at": datetime.fromtimestamp(msg.date.timestamp(), tz=timezone.utc),
-            "source_url": f"https://t.me/{chat_username}/{msg.id}" if chat_username else None,
+            "source_url": f"https://t.me/{chat.username}/{msg.id}" if getattr(chat, "username", None) else None,
         }
         upsert_tour(row)
-
         set_last_id(row["source_chat"], row["message_id"])
-        print(f"✨ saved: {row['source_chat']}#{row['message_id']} price={row['price']} {row['currency']}")
+
+        logger.info(f"✨ saved: {row['source_chat']}#{row['message_id']} price={row['price']} {row['currency']}")
 
     except Exception as e:
-        print("handler error:", e)
+        logger.error(f"process_message error: {e}")
+
+# ---------- Telethon ----------
+client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
+
+@client.on(events.NewMessage(chats=CHANNELS if CHANNELS else None))
+async def handler(event):
+    chat = await event.get_chat()
+    await process_message(event.message, chat)
 
 async def catch_up_history():
     """
@@ -151,18 +155,18 @@ async def catch_up_history():
         try:
             last_id = get_last_id(ch) or 0
             async for msg in client.iter_messages(ch, limit=200, min_id=last_id):
-                fake_event = type("E", (), {"message": msg, "get_chat": lambda: client.get_entity(ch)})
-                await handler(fake_event)
+                chat = await client.get_entity(ch)
+                await process_message(msg, chat)
         except Exception as e:
-            print(f"history for {ch} error:", e)
+            logger.error(f"history for {ch} error: {e}")
 
 async def main():
     init_db()
-    print("Connecting…")
+    logger.info("Connecting…")
     await client.start()
-    print("Connected.")
+    logger.info("Connected.")
     await catch_up_history()
-    print("Listening…")
+    logger.info("Listening…")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
