@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 from psycopg.rows import dict_row
 from db_init import get_conn
@@ -29,10 +30,23 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 # -------------------- ВСПОМОГАТЕЛЬНЫЕ --------------------
+def main_menu():
+    """Клавиатура главного меню"""
+    kb = [
+        [KeyboardButton(text="🌍 Найти тур")],
+        [KeyboardButton(text="ℹ️ О проекте"), KeyboardButton(text="💰 Прайс подписки")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+def back_menu():
+    """Клавиатура с кнопкой назад"""
+    kb = [[KeyboardButton(text="🔙 Назад")]]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
 async def search_tours(query: str):
-    """
-    Поиск туров в базе только за последние 24 часа
-    """
+    """Поиск туров в базе только за последние 24 часа"""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -52,9 +66,7 @@ async def search_tours(query: str):
 
 
 async def format_with_gpt(query: str, results: list):
-    """
-    Оформляем ответ через GPT
-    """
+    """Оформляем ответ через GPT"""
     if not results:
         prompt = f"""
         Пользователь ищет туры по запросу "{query}", но в базе за последние 24 часа ничего нет.
@@ -89,9 +101,46 @@ async def format_with_gpt(query: str, results: list):
 async def start_cmd(message: types.Message):
     await message.answer(
         "Привет! Я тур-бот 🤖\n"
-        "Напиши /tours <страна/город> или просто название города, и я найду свежие туры (за последние 24 часа).\n\n"
-        "Пример: /tours Турция или просто Турция"
+        "Я помогу найти свежие туры за последние 24 часа.\n\n"
+        "Выберите опцию из меню 👇",
+        reply_markup=main_menu(),
     )
+
+
+@dp.message(F.text == "🌍 Найти тур")
+async def menu_tour(message: types.Message):
+    await message.answer(
+        "Чтобы найти тур, напиши команду:\n\n`/tours <страна/город>`\n\n"
+        "Пример: `/tours Турция` или просто `Турция`",
+        parse_mode="Markdown",
+        reply_markup=back_menu(),
+    )
+
+
+@dp.message(F.text == "ℹ️ О проекте")
+async def menu_about(message: types.Message):
+    await message.answer(
+        "✨ Этот бот создан для поиска свежих туров из Telegram-каналов туроператоров.\n"
+        "Мы собираем новые предложения каждые сутки и показываем только актуальные туры 🏖️",
+        reply_markup=back_menu(),
+    )
+
+
+@dp.message(F.text == "💰 Прайс подписки")
+async def menu_price(message: types.Message):
+    await message.answer(
+        "💳 Подписка на доступ к актуальным турам стоит:\n\n"
+        "• 1 месяц — 99 000 UZS\n"
+        "• 3 месяца — 249 000 UZS\n"
+        "• 6 месяцев — 449 000 UZS\n\n"
+        "После подписки мы открываем контакты туроператоров ✈️",
+        reply_markup=back_menu(),
+    )
+
+
+@dp.message(F.text == "🔙 Назад")
+async def menu_back(message: types.Message):
+    await message.answer("Главное меню 👇", reply_markup=main_menu())
 
 
 @dp.message(Command("tours"))
