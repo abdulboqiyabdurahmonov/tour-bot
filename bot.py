@@ -1,14 +1,28 @@
 import os
 from fastapi import FastAPI, Request, Response
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 
 from psycopg.rows import dict_row
 from db_init import get_conn  # та же функция get_conn, что и в collector.py
 
-from aiogram import F
+# --- ENV ---
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret")
+PORT = int(os.getenv("PORT", 8080))
 
-# ...
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
+
+# --- Aiogram ---
+bot = Bot(token=TOKEN)
+dp = Dispatcher()   # dp должен быть объявлен здесь
+
+# Дальше можно спокойно писать хэндлеры:
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    await message.answer("Привет! Я тур-бот 🤖 ...")
 
 @dp.message(F.text)
 async def handle_plain_text(message: types.Message):
