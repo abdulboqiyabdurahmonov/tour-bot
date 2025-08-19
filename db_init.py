@@ -2,23 +2,20 @@ import os
 import psycopg
 from psycopg.rows import dict_row
 
-# URL базы из переменной окружения (Render → Internal Database URL)
 DB_URL = os.environ["DATABASE_URL"]
 
 def get_conn():
-    """
-    Возвращает подключение к базе.
-    """
     return psycopg.connect(DB_URL)
 
 def init_db():
-    """
-    Создает таблицы, если их ещё нет.
-    """
     with get_conn() as conn, conn.cursor() as cur:
-        # Таблица туров
+        # сначала сносим старые таблицы
+        cur.execute("DROP TABLE IF EXISTS tours CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS checkpoints CASCADE;")
+
+        # создаём заново
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS tours (
+        CREATE TABLE tours (
             id SERIAL PRIMARY KEY,
             country TEXT,
             city TEXT,
@@ -27,24 +24,20 @@ def init_db():
             currency TEXT,
             dates TEXT,
             description TEXT,
-            source_chat TEXT,
-            message_id BIGINT,
+            source_chat TEXT NOT NULL,
+            message_id BIGINT NOT NULL,
             posted_at TIMESTAMPTZ,
             source_url TEXT,
             UNIQUE(source_chat, message_id)
-        )
+        );
         """)
 
-        # Таблица чекпоинтов (для хранения последнего ID сообщений)
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS checkpoints (
+        CREATE TABLE checkpoints (
             chat TEXT PRIMARY KEY,
             last_id BIGINT
-        )
+        );
         """)
 
-        # Индексы для ускорения поиска
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_country_city ON tours(country, city)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours(posted_at DESC)")
-
         conn.commit()
+        print("✅ Database initialized")
