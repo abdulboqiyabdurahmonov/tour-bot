@@ -1,39 +1,26 @@
 import os
-import json
 from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-import gspread
-from google.oauth2.service_account import Credentials
+
+from psycopg.rows import dict_row
+from db_init import get_conn  # та же функция get_conn, что и в collector.py
 
 # --- ENV ---
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret")
 PORT = int(os.getenv("PORT", 8080))
-SHEET_NAME = os.getenv("SHEET_NAME", "Tours")
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
-
-# --- Google Sheets auth ---
-creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
-if not creds_json:
-    raise RuntimeError("GOOGLE_SHEETS_CREDENTIALS не задан")
-
-creds_dict = json.loads(creds_json)
-scopes = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-gc = gspread.authorize(creds)
-sheet = gc.open(SHEET_NAME).sheet1  # первая вкладка
 
 # --- Aiogram ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+
+# -------------------- HANDLERS --------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
@@ -42,18 +29,33 @@ async def start_cmd(message: types.Message):
         "Пример: /tours Турция"
     )
 
+
 @dp.message(Command("tours"))
 async def tours_cmd(message: types.Message):
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
-        await message.answer("Укажи страну или город после команды.\nНапример: `/tours Турция`")
+        await message.answer(
+            "Укажи страну или город после команды.\nНапример: `/tours Турция`",
+            parse_mode="Markdown",
+        )
         return
 
     query = args[1].lower()
 
-    # читаем все строки из таблицы
-    rows = sheet.get_all_records()
-    results = [row for row in rows if query in row["Текст"].lower()]
+    # читаем туры из Postgres
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT country, city, price, description, source_url, posted_at
+            FROM tours
+            WHERE (country IS NOT NULL AND lower(country) LIKE %s)
+               OR (city IS NOT NULL AND lower(city) LIKE %s)
+            ORDER BY posted_at DESC
+            LIMIT 5
+            """,
+            (f"%{query}%", f"%{query}%"),
+        )
+        results = cur.fetchall()
 
     if not results:
         await message.answer("❌ Ничего не найдено.")
@@ -61,27 +63,32 @@ async def tours_cmd(message: types.Message):
 
     # формируем ответ
     response = "🔎 Нашёл такие туры:\n\n"
-    for row in results[:5]:  # максимум 5
-        response += f"🌍 {row['Текст']}\n💰 {row.get('Цена', 'не указана')}\n🔗 {row.get('Ссылка','')}\n\n"
+    for row in results:
+        response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
+        response += f"💰 {row['price']} $\n"
+        if row.get("source_url"):
+            response += f"🔗 {row['source_url']}\n"
+        response += f"📝 {row['description'][:200]}...\n\n"
 
     await message.answer(response.strip())
 
-# --- debug команда ---
+
 @dp.message(Command("debug"))
 async def debug_cmd(message: types.Message):
-    rows = sheet.get_all_records()
-    if not rows:
-        await message.answer("Таблица пустая ❌")
-    else:
-        preview = "\n".join([str(r) for r in rows[:3]])  # первые 3 строки
-        await message.answer(f"Нашёл {len(rows)} строк.\nПример:\n{preview}")
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT count(*) AS cnt FROM tours")
+        cnt = cur.fetchone()["cnt"]
+    await message.answer(f"В базе сейчас {cnt} туров ✅")
 
-# --- FastAPI ---
+
+# -------------------- FASTAPI --------------------
 app = FastAPI()
+
 
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "tour-bot"}
+
 
 @app.on_event("startup")
 async def on_startup():
@@ -89,6 +96,7 @@ async def on_startup():
     webhook_url = f"{base}{WEBHOOK_PATH}"
     await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
     print(f"✅ Webhook set: {webhook_url}")
+
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
