@@ -6,18 +6,27 @@ from aiogram.filters import Command
 from psycopg.rows import dict_row
 from db_init import get_conn
 
+from openai import AsyncOpenAI
+
 # --- ENV ---
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret")
 PORT = int(os.getenv("PORT", 8080))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения")
 
 # --- Aiogram ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# --- GPT клиент ---
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
 
 # -------------------- HANDLERS --------------------
 @dp.message(Command("start"))
@@ -49,6 +58,37 @@ async def search_tours(query: str):
         return cur.fetchall()
 
 
+async def format_with_gpt(query: str, results: list):
+    """Оформляем ответ через GPT"""
+    if not results:
+        prompt = f"""
+        Пользователь ищет туры по запросу "{query}", но в базе за последние 24 часа ничего нет.
+        Ответь вежливо, дружелюбно и человечно. 
+        Подскажи, что новых туров пока нет, но стоит заглянуть позже.
+        """
+    else:
+        prompt = f"""
+        Пользователь ищет туры по запросу "{query}".
+        Вот список туров (каждый тур: страна, город, цена, ссылка, описание):
+        {results}
+
+        Сформулируй красивый, дружелюбный и понятный ответ для клиента:
+        - В начале добавь приветствие с эмодзи
+        - Представь туры в виде живого текста (короткие описания, но не сухой список)
+        - Если есть ссылки, укажи их с 🔗
+        - Не превышай 800 символов
+        """
+
+    resp = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты помощник-бот турфирмы. Пиши дружелюбно, понятно и продающе."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return resp.choices[0].message.content.strip()
+
+
 @dp.message(Command("tours"))
 async def tours_cmd(message: types.Message):
     args = message.text.split(maxsplit=1)
@@ -61,20 +101,8 @@ async def tours_cmd(message: types.Message):
 
     query = args[1].lower()
     results = await search_tours(query)
-
-    if not results:
-        await message.answer("❌ Ничего не найдено за последние 24 часа.")
-        return
-
-    response = "🔎 Нашёл такие туры за последние 24 часа:\n\n"
-    for row in results:
-        response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
-        response += f"💰 {row['price']} $\n"
-        if row.get("source_url"):
-            response += f"🔗 {row['source_url']}\n"
-        response += f"📝 {row['description'][:200]}...\n\n"
-
-    await message.answer(response.strip())
+    text = await format_with_gpt(query, results)
+    await message.answer(text)
 
 
 @dp.message(F.text)
@@ -82,22 +110,9 @@ async def handle_plain_text(message: types.Message):
     query = message.text.strip().lower()
     if not query:
         return
-
     results = await search_tours(query)
-
-    if not results:
-        await message.answer("❌ Ничего не найдено за последние 24 часа.")
-        return
-
-    response = "🔎 Нашёл такие туры за последние 24 часа:\n\n"
-    for row in results:
-        response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
-        response += f"💰 {row['price']} $\n"
-        if row.get("source_url"):
-            response += f"🔗 {row['source_url']}\n"
-        response += f"📝 {row['description'][:200]}...\n\n"
-
-    await message.answer(response.strip())
+    text = await format_with_gpt(query, results)
+    await message.answer(text)
 
 
 @dp.message(Command("debug"))
@@ -130,5 +145,4 @@ async def telegram_webhook(request: Request):
     data = await request.json()
     update = types.Update.model_validate(data)
     await dp.feed_update(bot, update)
-
     return {"ok": True}
