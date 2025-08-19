@@ -20,23 +20,24 @@ CHANNELS = [x.strip() for x in os.getenv("CHANNELS", "").split(",") if x.strip()
 def upsert_tour(row: dict):
     """
     row = {
-      country, city, hotel, price, dates, description,
+      country, city, hotel, price, currency, dates, description,
       source_chat, message_id, posted_at, source_url
     }
     """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO tours (country, city, hotel, price, dates, description,
+            INSERT INTO tours (country, city, hotel, price, currency, dates, description,
                                source_chat, message_id, posted_at, source_url)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (source_chat, message_id)
             DO UPDATE SET
                 price = EXCLUDED.price,
+                currency = EXCLUDED.currency,
                 dates = EXCLUDED.dates,
                 description = EXCLUDED.description
         """, (
             row.get("country"), row.get("city"), row.get("hotel"),
-            row.get("price"), row.get("dates"), row.get("description"),
+            row.get("price"), row.get("currency"), row.get("dates"), row.get("description"),
             row.get("source_chat"), row.get("message_id"),
             row.get("posted_at"), row.get("source_url"),
         ))
@@ -89,7 +90,7 @@ def parse_post(text: str) -> dict | None:
         return None
 
     try:
-        price = int(price.replace(" ", ""))
+        price = int(price.replace(" ", ""))   # <<< теперь число
     except:
         return None
 
@@ -105,7 +106,8 @@ def parse_post(text: str) -> dict | None:
         "country": country,
         "city": city,
         "hotel": None,
-        "price": f"{price} {currency}",
+        "price": price,        # <<< int
+        "currency": currency,  # <<< отдельное поле
         "dates": None,
         "description": text[:900],
     }
@@ -136,7 +138,7 @@ async def handler(event):
         upsert_tour(row)
 
         set_last_id(row["source_chat"], row["message_id"])
-        print(f"✨ saved: {row['source_chat']}#{row['message_id']} price={row['price']}")
+        print(f"✨ saved: {row['source_chat']}#{row['message_id']} price={row['price']} {row['currency']}")
 
     except Exception as e:
         print("handler error:", e)
