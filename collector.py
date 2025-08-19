@@ -57,13 +57,17 @@ def set_last_id(chat: str, last_id: int):
         """, (chat, last_id))
         conn.commit()
 
-# ---------- very simple parser ----------
-PRICE_RX = re.compile(r"(\d{2,5})\s*\$|\$\s*(\d{2,5})", re.I)
+# ---------- parser ----------
+PRICE_RX = re.compile(
+    r"(?P<usd>\d{2,7})\s*(\$|usd|долл?)"
+    r"|(?P<rub>\d{2,7})\s*(₽|rub|руб)"
+    r"|(?P<uzs>\d{3,12})\s*(сум|so['`]?m|uzs)",
+    re.I,
+)
 
 def parse_post(text: str) -> dict | None:
     """
-    Простейший разбор: ищем цену в $, вытаскиваем страну/город по ключевым словам.
-    При желании здесь усложним позже.
+    Парсим пост: ищем цену (USD, RUB, UZS) + эвристика по странам/городам.
     """
     if not text:
         return None
@@ -71,27 +75,39 @@ def parse_post(text: str) -> dict | None:
     m = PRICE_RX.search(text)
     if not m:
         return None
-    price = m.group(1) or m.group(2)
+
+    price = None
+    currency = None
+    if m.group("usd"):
+        price, currency = m.group("usd"), "USD"
+    elif m.group("rub"):
+        price, currency = m.group("rub"), "RUB"
+    elif m.group("uzs"):
+        price, currency = m.group("uzs"), "UZS"
+
+    if not price:
+        return None
+
     try:
-        price = int(price)
+        price = int(price.replace(" ", ""))
     except:
         return None
 
-    # грубые эвристики
+    # эвристики по странам/городам
     country = None
     city = None
-    if "анталь" in text.lower(): country, city = "Турция", "Анталья"
-    if "хургад" in text.lower(): country, city = "Египет", "Хургада"
-    if "дубай"  in text.lower(): country, city = "ОАЭ", "Дубай"
+    low = text.lower()
+    if "анталь" in low: country, city = "Турция", "Анталья"
+    if "хургад" in low: country, city = "Египет", "Хургада"
+    if "дубай"  in low: country, city = "ОАЭ", "Дубай"
 
-    # даты не парсим точно — оставим как весь текст для MVP
     return {
         "country": country,
         "city": city,
         "hotel": None,
-        "price": price,
+        "price": f"{price} {currency}",
         "dates": None,
-        "description": text[:900],  # чтобы не раздувать
+        "description": text[:900],
     }
 
 # ---------- Telethon ----------
@@ -101,7 +117,7 @@ client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
 async def handler(event):
     try:
         msg = event.message
-        chat = (await event.get_chat())
+        chat = await event.get_chat()
         chat_username = getattr(chat, "username", None)
         chat_title = getattr(chat, "title", None)
 
@@ -119,7 +135,6 @@ async def handler(event):
         }
         upsert_tour(row)
 
-        # передвигаем чекпоинт
         set_last_id(row["source_chat"], row["message_id"])
         print(f"✨ saved: {row['source_chat']}#{row['message_id']} price={row['price']}")
 
@@ -133,7 +148,6 @@ async def catch_up_history():
     for ch in CHANNELS:
         try:
             last_id = get_last_id(ch) or 0
-            # берём последние 200 сообщений поверхностно
             async for msg in client.iter_messages(ch, limit=200, min_id=last_id):
                 fake_event = type("E", (), {"message": msg, "get_chat": lambda: client.get_entity(ch)})
                 await handler(fake_event)
