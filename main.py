@@ -42,12 +42,11 @@ async def webhook_handler(request: Request):
     return {"ok": True}
 
 @app.get("/")
+@app.head("/")
 async def root():
-    """
-    Health-check эндпоинт для Render
-    """
     return {
         "status": "ok",
         "message": "Tour Bot is alive 🚀",
         "webhook": WEBHOOK_URL
     }
+
