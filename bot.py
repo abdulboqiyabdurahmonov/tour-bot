@@ -6,6 +6,46 @@ from aiogram.filters import Command
 from psycopg.rows import dict_row
 from db_init import get_conn  # та же функция get_conn, что и в collector.py
 
+from aiogram import F
+
+# ...
+
+@dp.message(F.text)
+async def handle_plain_text(message: types.Message):
+    query = message.text.strip().lower()
+
+    if not query:
+        return
+
+    # читаем туры из Postgres
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT country, city, price, description, source_url, posted_at
+            FROM tours
+            WHERE (country IS NOT NULL AND lower(country) LIKE %s)
+               OR (city IS NOT NULL AND lower(city) LIKE %s)
+            ORDER BY posted_at DESC
+            LIMIT 5
+            """,
+            (f"%{query}%", f"%{query}%"),
+        )
+        results = cur.fetchall()
+
+    if not results:
+        await message.answer("❌ Ничего не найдено.")
+        return
+
+    response = "🔎 Нашёл такие туры:\n\n"
+    for row in results:
+        response += f"🌍 {row['country'] or ''} {row['city'] or ''}\n"
+        response += f"💰 {row['price']} $\n"
+        if row.get("source_url"):
+            response += f"🔗 {row['source_url']}\n"
+        response += f"📝 {row['description'][:200]}...\n\n"
+
+    await message.answer(response.strip())
+
 # --- ENV ---
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
