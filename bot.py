@@ -62,7 +62,7 @@ async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - interval '%s days'
+        WHERE posted_at >= NOW() - make_interval(days => $1)
     """
     params = [days]
 
@@ -108,6 +108,23 @@ async def ask_gpt(prompt: str) -> str:
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
 
+# ============ ПРОГРЕСС ============
+async def show_progress(chat_id: int, bot: Bot):
+    steps = [
+        "🤔 Думаю...",
+        "🔍 Ищу информацию...",
+        "📊 Сравниваю варианты...",
+        "✅ Почти готово..."
+    ]
+    msg = await bot.send_message(chat_id, steps[0])  # первое сообщение
+    for step in steps[1:]:
+        await asyncio.sleep(2)
+        try:
+            await bot.edit_message_text(step, chat_id, msg.message_id)
+        except Exception:
+            pass
+    return msg
+
 # ============ ОБРАБОТЧИКИ ============
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -123,13 +140,16 @@ async def start_cmd(message: types.Message):
 @dp.message()
 async def handle_plain_text(message: types.Message):
     query = message.text.strip()
-    premium = await is_premium(message.from_user.id)
 
+    # показываем прогресс
+    progress_msg = await show_progress(message.chat.id, bot)
+
+    premium = await is_premium(message.from_user.id)
     tours = await get_latest_tours(query=query, limit=5, days=3)
 
     if not tours:
         reply = await ask_gpt(f"Пользователь ищет тур: {query}. Если в базе нет, дай совет куда лететь в это направление.")
-        await message.answer(reply)
+        await bot.edit_message_text(reply, message.chat.id, progress_msg.message_id)
         return
 
     if premium:
@@ -138,9 +158,16 @@ async def handle_plain_text(message: types.Message):
             for t in tours
         ])
     else:
-        text = "\n".join([f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}" for t in tours])
+        text = "\n".join([
+            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}"
+            for t in tours
+        ])
 
-    await message.answer(f"📋 Нашёл такие варианты:\n\n{text}")
+    await bot.edit_message_text(
+        f"📋 Нашёл такие варианты:\n\n{text}",
+        message.chat.id,
+        progress_msg.message_id
+    )
 
 # ============ CALLBACKS ============
 @dp.callback_query(F.data == "menu")
@@ -169,7 +196,7 @@ async def price(callback: types.CallbackQuery):
         reply_markup=back_menu(),
     )
 
-# ============ FASTAPI (WEBHOOK + HEALTH) ============
+# ============ FASTAPI (WEBHOOK) ============
 @app.on_event("startup")
 async def on_startup():
     init_db()
@@ -187,7 +214,3 @@ async def webhook_handler(request: Request):
     update = types.Update.model_validate(await request.json())
     await dp.feed_update(bot, update)
     return {"ok": True}
-
-@app.get("/")
-async def health():
-    return {"status": "ok", "message": "Tour Bot is running 🚀"}
