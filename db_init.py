@@ -1,48 +1,42 @@
+# db_init.py
 import os
-import psycopg
-import logging
+from psycopg import connect
 
-logger = logging.getLogger("db_init")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ---------- ENV ----------
-DB_URL = os.getenv("DATABASE_URL")  # формат: postgres://user:pass@host:port/dbname
-
-# ---------- connector ----------
 def get_conn():
-    """
-    Создаём новое подключение к базе (используй with get_conn() as conn).
-    """
-    return psycopg.connect(DB_URL, autocommit=False)
+    return connect(DATABASE_URL, autocommit=True)
 
-# ---------- init ----------
 def init_db():
-    """
-    Создаём таблицы, если их ещё нет.
-    """
     with get_conn() as conn, conn.cursor() as cur:
-        # таблица туров
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS tours (
-                country     text,
-                city        text,
-                hotel       text,
-                price       int,
-                currency    text,
-                dates       text,
-                description text,
-                source_chat text NOT NULL,
-                message_id  bigint NOT NULL,
-                posted_at   timestamptz,
-                source_url  text,
-                PRIMARY KEY (source_chat, message_id)
-            )
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            is_premium BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
         """)
-        # чекпоинты
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                chat    text PRIMARY KEY,
-                last_id bigint
-            )
+        CREATE TABLE IF NOT EXISTS tours (
+            id SERIAL PRIMARY KEY,
+            country TEXT,
+            city TEXT,
+            hotel TEXT,
+            price INT,
+            currency TEXT,
+            dates TEXT,
+            description TEXT,
+            source_chat TEXT,
+            message_id BIGINT,
+            posted_at TIMESTAMP,
+            source_url TEXT,
+            UNIQUE (source_chat, message_id)
+        );
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            chat TEXT PRIMARY KEY,
+            last_id BIGINT
+        );
         """)
         conn.commit()
-        logger.info("✅ DB initialized")
