@@ -33,7 +33,7 @@ def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
 def init_db():
-    """Создание таблицы пользователей"""
+    """Создание таблиц пользователей и туров"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -42,10 +42,23 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS tours (
+            id SERIAL PRIMARY KEY,
+            country TEXT,
+            city TEXT,
+            hotel TEXT,
+            price NUMERIC,
+            currency TEXT,
+            dates TEXT,
+            description TEXT,
+            source_url TEXT,
+            posted_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
 
 async def is_premium(user_id: int):
     """Проверка подписки"""
-    init_db()
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
@@ -62,7 +75,7 @@ async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - make_interval(days => $1)
+        WHERE posted_at >= NOW() - make_interval(days => %s)
     """
     params = [days]
 
