@@ -1,4 +1,4 @@
-services:
+sservices:
   - type: web
     name: tour-bot
     env: python
