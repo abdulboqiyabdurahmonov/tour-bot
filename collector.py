@@ -161,10 +161,13 @@ async def catch_up_history():
 async def main():
     init_db()
     logger.info("Connecting…")
-    await client.start()
-    logger.info("Connected.")
+    await client.connect()
+    if not await client.is_user_authorized():
+        logger.error("❌ Client is not authorized! Проверь SESSION_B64")
+        return
+    logger.info("✅ Connected.")
     await catch_up_history()
-    logger.info("Listening…")
+    logger.info("👂 Listening…")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
