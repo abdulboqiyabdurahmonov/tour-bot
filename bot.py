@@ -59,12 +59,12 @@ async def is_premium(user_id: int):
 
 async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     """Берём свежие туры за N дней, фильтруем по стране/городу"""
-    sql = f"""
+    sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - INTERVAL '{days} days'
+        WHERE posted_at >= NOW() - make_interval(days => %s)
     """
-    params = []
+    params = [days]
 
     if query:
         sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
