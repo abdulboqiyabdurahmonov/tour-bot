@@ -9,8 +9,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# === наша база (подключение через db_init.py) ===
-from db_init import get_conn, init_db
+from psycopg import connect
 from psycopg.rows import dict_row
 
 # ============ ЛОГИ ============
@@ -19,12 +18,31 @@ logging.basicConfig(level=logging.INFO)
 # ============ ENV ============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+if not TELEGRAM_TOKEN:
+    raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
 # ============ БД ============
+def get_conn():
+    return connect(DATABASE_URL, autocommit=True)
+
+def init_db():
+    """Создание таблицы пользователей"""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            is_premium BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
 async def is_premium(user_id: int):
     """Проверка подписки"""
     init_db()
@@ -41,12 +59,12 @@ async def is_premium(user_id: int):
 
 async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     """Берём свежие туры за N дней, фильтруем по стране/городу"""
-    sql = """
+    sql = f"""
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - interval %s
+        WHERE posted_at >= NOW() - INTERVAL '{days} days'
     """
-    params = [f"{days} days"]
+    params = []
 
     if query:
         sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
@@ -155,9 +173,8 @@ async def price(callback: types.CallbackQuery):
 @app.on_event("startup")
 async def on_startup():
     init_db()
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if webhook_url:
-        await bot.set_webhook(webhook_url)
+    if WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL)
         logging.info("✅ Webhook установлен")
 
 @app.on_event("shutdown")
