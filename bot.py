@@ -62,7 +62,7 @@ async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - make_interval(days => $1)
+        WHERE posted_at >= NOW() - interval '%s days'
     """
     params = [days]
 
@@ -169,7 +169,7 @@ async def price(callback: types.CallbackQuery):
         reply_markup=back_menu(),
     )
 
-# ============ FASTAPI (WEBHOOK) ============
+# ============ FASTAPI (WEBHOOK + HEALTH) ============
 @app.on_event("startup")
 async def on_startup():
     init_db()
@@ -187,3 +187,7 @@ async def webhook_handler(request: Request):
     update = types.Update.model_validate(await request.json())
     await dp.feed_update(bot, update)
     return {"ok": True}
+
+@app.get("/")
+async def health():
+    return {"status": "ok", "message": "Tour Bot is running 🚀"}
