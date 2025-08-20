@@ -39,6 +39,7 @@ def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🌍 Найти тур")],
+            [KeyboardButton(text="🔥 Дешёвые туры")],
             [KeyboardButton(text="ℹ️ О проекте"), KeyboardButton(text="💰 Прайс подписки")],
         ],
         resize_keyboard=True,
@@ -58,7 +59,7 @@ async def search_tours(query: str):
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT country, city, price, description, source_url, posted_at
+            SELECT country, city, price, currency, description, source_url, posted_at
             FROM tours
             WHERE posted_at >= NOW() - INTERVAL '24 hours'
               AND (
@@ -69,6 +70,22 @@ async def search_tours(query: str):
             LIMIT 5
             """,
             (f"%{query}%", f"%{query}%"),
+        )
+        return cur.fetchall()
+
+
+async def get_cheap_tours(limit=5):
+    """Самые дешёвые туры за последние 3 дня"""
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT country, city, price, currency, description, source_url, posted_at
+            FROM tours
+            WHERE posted_at >= NOW() - INTERVAL '3 days'
+            ORDER BY price ASC
+            LIMIT %s
+            """,
+            (limit,),
         )
         return cur.fetchall()
 
@@ -107,7 +124,7 @@ async def format_with_gpt(query: str, results: list):
 async def start_cmd(message: types.Message):
     await message.answer(
         "Привет! Я тур-бот 🤖\n"
-        "Помогу найти свежие туры за последние 24 часа.\n\n"
+        "Помогу найти свежие туры за последние 24 часа и покажу лучшие предложения.\n\n"
         "Выберите опцию 👇",
         reply_markup=main_menu(),
     )
@@ -121,6 +138,24 @@ async def menu_tour(message: types.Message):
         parse_mode="Markdown",
         reply_markup=back_menu(),
     )
+
+
+@dp.message(F.text == "🔥 Дешёвые туры")
+async def menu_cheap(message: types.Message):
+    tours = await get_cheap_tours(limit=5)
+    if not tours:
+        await message.answer("😔 За последние 3 дня ничего не нашли.")
+        return
+
+    reply = "🔥 Самые дешёвые туры за 3 дня:\n\n"
+    for t in tours:
+        reply += (
+            f"🏝 {t['country'] or '-'} – {t['city'] or '-'}\n"
+            f"💵 {t['price']} {t.get('currency','')}\n"
+            f"📅 {t['posted_at'].strftime('%d.%m.%Y')}\n"
+            f"🔗 {t['source_url'] or '-'}\n\n"
+        )
+    await message.answer(reply, disable_web_page_preview=True, reply_markup=back_menu())
 
 
 @dp.message(F.text == "ℹ️ О проекте")
