@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn bot:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn app.bot:app --host 0.0.0.0 --port 10000
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
@@ -22,7 +22,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python collector.py
+    startCommand: python -m app.collector
     envVars:
       - key: TELEGRAM_API_ID
         sync: false
