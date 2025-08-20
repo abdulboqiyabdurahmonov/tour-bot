@@ -62,7 +62,7 @@ async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - make_interval(days => %s)
+        WHERE posted_at >= NOW() - make_interval(days => $1)
     """
     params = [days]
 
