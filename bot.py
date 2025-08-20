@@ -196,7 +196,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # при остановке приложения — снимаем вебхук
     try:
         await bot.delete_webhook()
         logging.info("🛑 Webhook удалён")
