@@ -53,6 +53,27 @@ async def is_premium(user_id: int):
             return False
         return row["is_premium"]
 
+async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
+    """Берём свежие туры за N дней, фильтруем по стране/городу"""
+    sql = """
+        SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
+        FROM tours
+        WHERE posted_at >= NOW() - interval %s
+    """
+    params = [f"{days} days"]
+
+    if query:
+        sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
+        q = f"%{query.lower()}%"
+        params.extend([q, q])
+
+    sql += " ORDER BY posted_at DESC LIMIT %s"
+    params.append(limit)
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
 # ============ МЕНЮ ============
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -73,7 +94,7 @@ async def ask_gpt(prompt: str) -> str:
     data = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий. Не придумывай несуществующих туров. Держись фактов из данных."},
+            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий. Не придумывай туров. Держись фактов из базы."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.3
@@ -95,42 +116,25 @@ async def start_cmd(message: types.Message):
         reply_markup=main_menu(),
     )
 
-    await message.answer(
-        "🆘 Как пользоваться ботом:\n\n"
-        "• Нажми **🌍 Найти тур**, чтобы искать по стране или городу.\n"
-        "   👉 Пример: напиши *Турция* или */tours Дубай*\n\n"
-        "• В разделе **🔥 Дешёвые туры** показываем самые выгодные за 3 дня.\n\n"
-        "• В меню **ℹ️ О проекте** расскажем подробнее, как работает экосистема TripleA.\n\n"
-        "• В **💰 Прайс подписки** смотри тарифы и условия доступа к полным данным.\n\n"
-        "📩 Если остались вопросы — пиши прямо сюда, мы всегда на связи!",
-        parse_mode="Markdown",
-        reply_markup=back_menu(),
-    )
-
 @dp.message()
 async def handle_plain_text(message: types.Message):
     query = message.text.strip()
     premium = await is_premium(message.from_user.id)
 
-    # эмуляция "поиска туров" (позже сюда подключим парсинг)
-    tours = [
-        {"country": "Турция", "price": 500, "hotel": "Hilton Antalya"},
-        {"country": "ОАЭ", "price": 450, "hotel": "Dubai Marina Hotel"},
-        {"country": "Египет", "price": 400, "hotel": "Sharm Beach Resort"},
-    ]
+    tours = await get_latest_tours(query=query, limit=5, days=3)
 
-    # фильтр по тексту
-    results = [t for t in tours if query.lower() in t["country"].lower()]
-
-    if not results:
-        reply = await ask_gpt(f"Пользователь ищет тур: {query}. Ответь кратко и строго по теме.")
+    if not tours:
+        reply = await ask_gpt(f"Пользователь ищет тур: {query}. Если в базе нет, дай совет куда лететь в это направление.")
         await message.answer(reply)
         return
 
     if premium:
-        text = "\n".join([f"{t['country']} — {t['price']}$ ({t['hotel']})" for t in results])
+        text = "\n\n".join([
+            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}\n🏨 {t['hotel'] or 'Отель не указан'}\n🔗 {t['source_url'] or ''}"
+            for t in tours
+        ])
     else:
-        text = "\n".join([f"{t['country']} — {t['price']}$" for t in results])
+        text = "\n".join([f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}" for t in tours])
 
     await message.answer(f"📋 Нашёл такие варианты:\n\n{text}")
 
