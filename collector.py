@@ -47,11 +47,13 @@ def upsert_tour(row: dict):
         ))
         conn.commit()
 
+
 def get_last_id(chat: str) -> int | None:
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT last_id FROM checkpoints WHERE chat=%s", (chat,))
         r = cur.fetchone()
         return r["last_id"] if r else None
+
 
 def set_last_id(chat: str, last_id: int):
     with get_conn() as conn, conn.cursor() as cur:
@@ -71,9 +73,7 @@ PRICE_RX = re.compile(
 )
 
 def parse_post(text: str) -> dict | None:
-    """
-    Парсим пост: ищем цену (USD, RUB, UZS) + эвристика по странам/городам.
-    """
+    """Парсим пост: ищем цену (USD, RUB, UZS) + эвристика по странам/городам."""
     if not text:
         return None
 
@@ -94,7 +94,7 @@ def parse_post(text: str) -> dict | None:
         return None
 
     try:
-        price = int(price.replace(" ", ""))   # <<< теперь число
+        price = int(price.replace(" ", ""))
     except:
         return None
 
@@ -148,9 +148,7 @@ async def handler(event):
     await process_message(event.message, chat)
 
 async def catch_up_history():
-    """
-    При старте подтягиваем историю после last_id для каждого канала.
-    """
+    """При старте подтягиваем историю после last_id для каждого канала."""
     for ch in CHANNELS:
         try:
             last_id = get_last_id(ch) or 0
