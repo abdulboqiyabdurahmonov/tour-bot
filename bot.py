@@ -48,6 +48,13 @@ def back_menu():
     )
 
 # -------------------- DB --------------------
+async def is_premium(user_id: int) -> bool:
+    """Проверяем подписку пользователя"""
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        return bool(row and row["is_premium"])
+
 async def search_tours(query: str):
     """Ищем туры за последние 24 часа"""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -145,56 +152,40 @@ async def format_with_gpt(query: str, results: list, premium: bool = False):
 # -------------------- HANDLERS --------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
+    # Регистрируем пользователя если его нет
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO users (user_id, is_premium) VALUES (%s, FALSE) ON CONFLICT (user_id) DO NOTHING", (message.from_user.id,))
+        conn.commit()
+
+    # Приветствие
     await message.answer(
-        "Привет! Я тур-бот 🤖\n"
-        "В бесплатной версии я показываю только цену и направление.\n"
-        "В подписке открывается полная информация с отелями и ссылками 🔗\n\n"
-        "Выберите опцию 👇",
+        "👋 Привет! Я умный тур-бот 🤖\n\n"
+        "Мы часть **экосистемы TripleA** — проектов для автоматизации, путешествий и новых возможностей 🚀\n\n"
+        "Здесь ты найдёшь только свежие туры за последние 24 часа 🏖️\n\n"
+        "Выбирай опцию ниже и погнали! 👇",
+        parse_mode="Markdown",
         reply_markup=main_menu(),
     )
 
-@dp.message(F.text == "🌍 Найти тур")
-async def menu_tour(message: types.Message):
+    # Автоматический вывод помощи
     await message.answer(
-        "Чтобы найти тур, напиши:\n\n`/tours <страна/город>`\n\n"
-        "Пример: `/tours Турция` или просто `Турция`",
+        "🆘 Как пользоваться ботом:\n\n"
+        "• Нажми **🌍 Найти тур**, чтобы искать по стране или городу.\n"
+        "   👉 Пример: напиши *Турция* или */tours Дубай*\n\n"
+        "• В разделе **🔥 Дешёвые туры** показываем самые выгодные за 3 дня.\n\n"
+        "• В меню **ℹ️ О проекте** расскажем подробнее, как работает экосистема TripleA.\n\n"
+        "• В **💰 Прайс подписки** смотри тарифы и условия доступа к полным данным.\n\n"
+        "📩 Если остались вопросы — пиши прямо сюда, мы всегда на связи!",
         parse_mode="Markdown",
         reply_markup=back_menu(),
     )
 
 @dp.message(F.text == "🔥 Дешёвые туры")
 async def menu_cheap(message: types.Message):
+    premium = await is_premium(message.from_user.id)
     tours = await get_cheap_tours(limit=5)
-    if not tours:
-        await message.answer("😔 За последние 3 дня ничего не нашли.")
-        return
-    # FREE режим
-    text = await format_with_gpt("дешёвые туры", tours, premium=False)
+    text = await format_with_gpt("дешёвые туры", tours, premium=premium)
     await message.answer(text, disable_web_page_preview=True, reply_markup=back_menu())
-
-@dp.message(F.text == "ℹ️ О проекте")
-async def menu_about(message: types.Message):
-    await message.answer(
-        "✨ Бот ищет свежие туры из каналов туроператоров.\n"
-        "В бесплатной версии показываем цены и направления 🌍\n"
-        "В подписке — полный доступ к отелям и ссылкам ✈️",
-        reply_markup=back_menu(),
-    )
-
-@dp.message(F.text == "💰 Прайс подписки")
-async def menu_price(message: types.Message):
-    await message.answer(
-        "💳 Подписка на туры:\n\n"
-        "• 1 месяц — 99 000 UZS\n"
-        "• 3 месяца — 249 000 UZS\n"
-        "• 6 месяцев — 449 000 UZS\n\n"
-        "После подписки открываются отели и ссылки на туроператоров 🔗",
-        reply_markup=back_menu(),
-    )
-
-@dp.message(F.text == "🔙 Назад")
-async def menu_back(message: types.Message):
-    await message.answer("Главное меню 👇", reply_markup=main_menu())
 
 @dp.message(Command("tours"))
 async def tours_cmd(message: types.Message):
@@ -206,25 +197,19 @@ async def tours_cmd(message: types.Message):
         )
         return
     query = args[1].lower()
+    premium = await is_premium(message.from_user.id)
     results = await search_tours(query)
-    # FREE режим
-    text = await format_with_gpt(query, results, premium=False)
+    text = await format_with_gpt(query, results, premium=premium)
     await message.answer(text)
 
 @dp.message(F.text)
 async def handle_plain_text(message: types.Message):
     query = message.text.strip().lower()
     if query:
+        premium = await is_premium(message.from_user.id)
         results = await search_tours(query)
-        text = await format_with_gpt(query, results, premium=False)
+        text = await format_with_gpt(query, results, premium=premium)
         await message.answer(text)
-
-@dp.message(Command("debug"))
-async def debug_cmd(message: types.Message):
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT count(*) AS cnt FROM tours WHERE posted_at >= NOW() - INTERVAL '24 hours'")
-        cnt = cur.fetchone()["cnt"]
-    await message.answer(f"📊 В базе {cnt} туров за последние 24 часа ✅")
 
 # -------------------- FASTAPI --------------------
 @asynccontextmanager
