@@ -9,7 +9,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from psycopg import connect
+# === наша база (подключение через db_init.py) ===
+from db_init import get_conn, init_db
 from psycopg.rows import dict_row
 
 # ============ ЛОГИ ============
@@ -18,27 +19,12 @@ logging.basicConfig(level=logging.INFO)
 # ============ ENV ============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
 # ============ БД ============
-def get_conn():
-    return connect(DATABASE_URL, autocommit=True)
-
-def init_db():
-    """Создание таблицы пользователей"""
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            is_premium BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
 async def is_premium(user_id: int):
     """Проверка подписки"""
     init_db()
