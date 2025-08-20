@@ -8,26 +8,18 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 from psycopg.rows import dict_row
-from db_init import get_conn, init_db
+from app.db_init import get_conn, init_db
 
-# ---------- LOGGING ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("collector")
 
-# ---------- ENV ----------
-API_ID = int(os.environ["TELEGRAM_API_ID"])          # my.telegram.org
+API_ID = int(os.environ["TELEGRAM_API_ID"])
 API_HASH = os.environ["TELEGRAM_API_HASH"]
-SESSION_B64 = os.environ["SESSION_B64"]              # строка StringSession
+SESSION_B64 = os.environ["SESSION_B64"]
 CHANNELS = [x.strip() for x in os.getenv("CHANNELS", "").split(",") if x.strip()]
 
 # ---------- DB helpers ----------
 def upsert_tour(row: dict):
-    """
-    row = {
-      country, city, hotel, price, currency, dates, description,
-      source_chat, message_id, posted_at, source_url
-    }
-    """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO tours (country, city, hotel, price, currency, dates, description,
@@ -47,13 +39,11 @@ def upsert_tour(row: dict):
         ))
         conn.commit()
 
-
 def get_last_id(chat: str) -> int | None:
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT last_id FROM checkpoints WHERE chat=%s", (chat,))
         r = cur.fetchone()
         return r["last_id"] if r else None
-
 
 def set_last_id(chat: str, last_id: int):
     with get_conn() as conn, conn.cursor() as cur:
@@ -73,23 +63,19 @@ PRICE_RX = re.compile(
 )
 
 def parse_post(text: str) -> dict | None:
-    """Парсим пост: ищем цену (USD, RUB, UZS) + эвристика по странам/городам."""
     if not text:
         return None
-
     m = PRICE_RX.search(text)
     if not m:
         return None
 
-    price = None
-    currency = None
+    price, currency = None, None
     if m.group("usd"):
         price, currency = m.group("usd"), "USD"
     elif m.group("rub"):
         price, currency = m.group("rub"), "RUB"
     elif m.group("uzs"):
         price, currency = m.group("uzs"), "UZS"
-
     if not price:
         return None
 
@@ -98,9 +84,7 @@ def parse_post(text: str) -> dict | None:
     except:
         return None
 
-    # эвристики по странам/городам
-    country = None
-    city = None
+    country, city = None, None
     low = text.lower()
     if "анталь" in low: country, city = "Турция", "Анталья"
     if "хургад" in low: country, city = "Египет", "Хургада"
@@ -133,9 +117,7 @@ async def process_message(msg, chat):
         }
         upsert_tour(row)
         set_last_id(row["source_chat"], row["message_id"])
-
         logger.info(f"✨ saved: {row['source_chat']}#{row['message_id']} price={row['price']} {row['currency']}")
-
     except Exception as e:
         logger.error(f"process_message error: {e}")
 
@@ -148,7 +130,6 @@ async def handler(event):
     await process_message(event.message, chat)
 
 async def catch_up_history():
-    """При старте подтягиваем историю после last_id для каждого канала."""
     for ch in CHANNELS:
         try:
             last_id = get_last_id(ch) or 0
