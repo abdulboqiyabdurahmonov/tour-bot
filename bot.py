@@ -148,13 +148,22 @@ async def handle_plain_text(message: types.Message):
     tours = await get_latest_tours(query=query, limit=5, days=3)
 
     if not tours:
-        reply = await ask_gpt(f"Пользователь ищет тур: {query}. Если в базе нет, дай совет куда лететь в это направление.")
-        await bot.edit_message_text(reply, message.chat.id, progress_msg.message_id)
+        reply = await ask_gpt(
+            f"Пользователь ищет тур: {query}. "
+            f"Если в базе нет, дай совет куда лететь в это направление."
+        )
+        await bot.edit_message_text(
+            text=reply,
+            chat_id=message.chat.id,
+            message_id=progress_msg.message_id
+        )
         return
 
     if premium:
         text = "\n\n".join([
-            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}\n🏨 {t['hotel'] or 'Отель не указан'}\n🔗 {t['source_url'] or ''}"
+            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}\n"
+            f"🏨 {t['hotel'] or 'Отель не указан'}\n"
+            f"🔗 {t['source_url'] or ''}"
             for t in tours
         ])
     else:
@@ -164,9 +173,9 @@ async def handle_plain_text(message: types.Message):
         ])
 
     await bot.edit_message_text(
-        f"📋 Нашёл такие варианты:\n\n{text}",
-        message.chat.id,
-        progress_msg.message_id
+        text=f"📋 Нашёл такие варианты:\n\n{text}",
+        chat_id=message.chat.id,
+        message_id=progress_msg.message_id
     )
 
 # ============ CALLBACKS ============
