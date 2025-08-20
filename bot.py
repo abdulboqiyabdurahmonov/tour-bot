@@ -33,7 +33,6 @@ def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
 def init_db():
-    """Создание таблицы пользователей"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -44,21 +43,16 @@ def init_db():
         """)
 
 async def is_premium(user_id: int):
-    """Проверка подписки"""
     init_db()
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row:
-            cur.execute(
-                "INSERT INTO users (user_id, is_premium) VALUES (%s, %s)",
-                (user_id, False)
-            )
+            cur.execute("INSERT INTO users (user_id, is_premium) VALUES (%s, %s)", (user_id, False))
             return False
         return row["is_premium"]
 
 async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
-    """Берём свежие туры за N дней, фильтруем по стране/городу"""
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
@@ -116,11 +110,15 @@ async def show_progress(chat_id: int, bot: Bot):
         "📊 Сравниваю варианты...",
         "✅ Почти готово..."
     ]
-    msg = await bot.send_message(chat_id, steps[0])  # первое сообщение
+    msg = await bot.send_message(chat_id, steps[0])
     for step in steps[1:]:
         await asyncio.sleep(2)
         try:
-            await bot.edit_message_text(step, chat_id, msg.message_id)
+            await bot.edit_message_text(
+                text=step,
+                chat_id=chat_id,
+                message_id=msg.message_id
+            )
         except Exception:
             pass
     return msg
@@ -140,8 +138,6 @@ async def start_cmd(message: types.Message):
 @dp.message()
 async def handle_plain_text(message: types.Message):
     query = message.text.strip()
-
-    # показываем прогресс
     progress_msg = await show_progress(message.chat.id, bot)
 
     premium = await is_premium(message.from_user.id)
