@@ -62,9 +62,9 @@ async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - (%s * INTERVAL '1 day')
+        WHERE posted_at >= NOW() - (%s || ' days')::interval
     """
-    params = [days]
+    params = [str(days)]
 
     if query:
         sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
@@ -75,7 +75,6 @@ async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
     params.append(limit)
 
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        logging.info(f"SQL: {sql} | params={params}")
         cur.execute(sql, params)
         return cur.fetchall()
 
