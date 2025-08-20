@@ -41,6 +41,20 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS tours (
+            id SERIAL PRIMARY KEY,
+            country TEXT,
+            city TEXT,
+            hotel TEXT,
+            price NUMERIC,
+            currency TEXT,
+            dates TEXT,
+            description TEXT,
+            source_url TEXT,
+            posted_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
 
 async def is_premium(user_id: int):
     init_db()
@@ -48,7 +62,10 @@ async def is_premium(user_id: int):
         cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row:
-            cur.execute("INSERT INTO users (user_id, is_premium) VALUES (%s, %s)", (user_id, False))
+            cur.execute(
+                "INSERT INTO users (user_id, is_premium) VALUES (%s, %s)",
+                (user_id, False)
+            )
             return False
         return row["is_premium"]
 
@@ -86,7 +103,7 @@ def back_menu():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")]
     ])
 
-# ============ OPENAI GPT ============
+# ============ OPENAI ============
 async def ask_gpt(prompt: str) -> str:
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     data = {
@@ -114,11 +131,7 @@ async def show_progress(chat_id: int, bot: Bot):
     for step in steps[1:]:
         await asyncio.sleep(2)
         try:
-            await bot.edit_message_text(
-                text=step,
-                chat_id=chat_id,
-                message_id=msg.message_id
-            )
+            await bot.edit_message_text(step, chat_id, msg.message_id)
         except Exception:
             pass
     return msg
@@ -138,6 +151,7 @@ async def start_cmd(message: types.Message):
 @dp.message()
 async def handle_plain_text(message: types.Message):
     query = message.text.strip()
+
     progress_msg = await show_progress(message.chat.id, bot)
 
     premium = await is_premium(message.from_user.id)
@@ -201,7 +215,31 @@ async def price(callback: types.CallbackQuery):
         reply_markup=back_menu(),
     )
 
-# ============ FASTAPI (WEBHOOK) ============
+@dp.callback_query(F.data == "find_tour")
+async def find_tour(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🔍 Введи название страны или города, куда хочешь поехать:",
+        reply_markup=back_menu()
+    )
+
+@dp.callback_query(F.data == "cheap_tours")
+async def cheap_tours(callback: types.CallbackQuery):
+    tours = await get_latest_tours(limit=5, days=3)
+    if not tours:
+        await callback.message.edit_text("⚠️ Пока нет дешёвых туров.", reply_markup=back_menu())
+        return
+
+    text = "\n".join([
+        f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}"
+        for t in tours
+    ])
+
+    await callback.message.edit_text(
+        f"🔥 Самые свежие дешёвые туры:\n\n{text}",
+        reply_markup=back_menu()
+    )
+
+# ============ FASTAPI ============
 @app.on_event("startup")
 async def on_startup():
     init_db()
