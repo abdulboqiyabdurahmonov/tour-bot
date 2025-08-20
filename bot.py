@@ -1,5 +1,7 @@
 import os
+import time
 import logging
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
@@ -30,6 +32,17 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
+# ================== FLOOD CONTROL ==================
+user_last_time = defaultdict(float)
+
+def is_flood(user_id: int, delay: int = 5) -> bool:
+    """Проверка, не флудит ли пользователь"""
+    now = time.time()
+    if now - user_last_time[user_id] < delay:
+        return True
+    user_last_time[user_id] = now
+    return False
+
 # -------------------- KEYBOARDS --------------------
 def main_menu():
     return ReplyKeyboardMarkup(
@@ -48,13 +61,6 @@ def back_menu():
     )
 
 # -------------------- DB --------------------
-async def is_premium(user_id: int) -> bool:
-    """Проверяем подписку пользователя"""
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        return bool(row and row["is_premium"])
-
 async def search_tours(query: str):
     """Ищем туры за последние 24 часа"""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -152,11 +158,6 @@ async def format_with_gpt(query: str, results: list, premium: bool = False):
 # -------------------- HANDLERS --------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    # Регистрируем пользователя если его нет
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO users (user_id, is_premium) VALUES (%s, FALSE) ON CONFLICT (user_id) DO NOTHING", (message.from_user.id,))
-        conn.commit()
-
     # Приветствие
     await message.answer(
         "👋 Привет! Я умный тур-бот 🤖\n\n"
@@ -180,15 +181,59 @@ async def start_cmd(message: types.Message):
         reply_markup=back_menu(),
     )
 
+@dp.message(F.text == "🌍 Найти тур")
+async def menu_tour(message: types.Message):
+    if is_flood(message.from_user.id):
+        await message.answer("⏳ Подожди пару секунд перед следующим запросом 🙂")
+        return
+    await message.answer(
+        "Чтобы найти тур, напиши:\n\n`/tours <страна/город>`\n\n"
+        "Пример: `/tours Турция` или просто `Турция`",
+        parse_mode="Markdown",
+        reply_markup=back_menu(),
+    )
+
 @dp.message(F.text == "🔥 Дешёвые туры")
 async def menu_cheap(message: types.Message):
-    premium = await is_premium(message.from_user.id)
+    if is_flood(message.from_user.id):
+        await message.answer("🙅 Слишком быстро! Подожди чуть-чуть ⏳")
+        return
     tours = await get_cheap_tours(limit=5)
-    text = await format_with_gpt("дешёвые туры", tours, premium=premium)
+    if not tours:
+        await message.answer("😔 За последние 3 дня ничего не нашли.")
+        return
+    text = await format_with_gpt("дешёвые туры", tours, premium=False)
     await message.answer(text, disable_web_page_preview=True, reply_markup=back_menu())
+
+@dp.message(F.text == "ℹ️ О проекте")
+async def menu_about(message: types.Message):
+    await message.answer(
+        "✨ Бот ищет свежие туры из каналов туроператоров.\n"
+        "В бесплатной версии показываем цены и направления 🌍\n"
+        "В подписке — полный доступ к отелям и ссылкам ✈️",
+        reply_markup=back_menu(),
+    )
+
+@dp.message(F.text == "💰 Прайс подписки")
+async def menu_price(message: types.Message):
+    await message.answer(
+        "💳 Подписка на туры:\n\n"
+        "• 1 месяц — 99 000 UZS\n"
+        "• 3 месяца — 249 000 UZS\n"
+        "• 6 месяцев — 449 000 UZS\n\n"
+        "После подписки открываются отели и ссылки на туроператоров 🔗",
+        reply_markup=back_menu(),
+    )
+
+@dp.message(F.text == "🔙 Назад")
+async def menu_back(message: types.Message):
+    await message.answer("Главное меню 👇", reply_markup=main_menu())
 
 @dp.message(Command("tours"))
 async def tours_cmd(message: types.Message):
+    if is_flood(message.from_user.id):
+        await message.answer("⏳ Подожди пару секунд перед следующим запросом 🙂")
+        return
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
         await message.answer(
@@ -197,19 +242,27 @@ async def tours_cmd(message: types.Message):
         )
         return
     query = args[1].lower()
-    premium = await is_premium(message.from_user.id)
     results = await search_tours(query)
-    text = await format_with_gpt(query, results, premium=premium)
+    text = await format_with_gpt(query, results, premium=False)
     await message.answer(text)
 
 @dp.message(F.text)
 async def handle_plain_text(message: types.Message):
+    if is_flood(message.from_user.id):
+        await message.answer("🙅 Слишком быстро! Подожди чуть-чуть ⏳")
+        return
     query = message.text.strip().lower()
     if query:
-        premium = await is_premium(message.from_user.id)
         results = await search_tours(query)
-        text = await format_with_gpt(query, results, premium=premium)
+        text = await format_with_gpt(query, results, premium=False)
         await message.answer(text)
+
+@dp.message(Command("debug"))
+async def debug_cmd(message: types.Message):
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT count(*) AS cnt FROM tours WHERE posted_at >= NOW() - INTERVAL '24 hours'")
+        cnt = cur.fetchone()["cnt"]
+    await message.answer(f"📊 В базе {cnt} туров за последние 24 часа ✅")
 
 # -------------------- FASTAPI --------------------
 @asynccontextmanager
