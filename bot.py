@@ -1,5 +1,4 @@
 import os
-import re
 import logging
 import asyncio
 import httpx
@@ -26,7 +25,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
 
-bot = Bot(token=TELEGRAM_TOKEN)
+bot = Bot(token=TELEGRAM_TOKEN, parse_mode="Markdown")
 dp = Dispatcher()
 app = FastAPI()
 
@@ -71,7 +70,7 @@ async def is_premium(user_id: int):
             return False
         return row["is_premium"]
 
-async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24):
+async def get_latest_tours(query: str = None, max_price: int = None, limit: int = 5, hours: int = 24):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
@@ -84,6 +83,10 @@ async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24):
         q = f"%{query.lower()}%"
         params.extend([q, q])
 
+    if max_price:
+        sql += " AND price <= %s"
+        params.append(max_price)
+
     sql += " ORDER BY posted_at DESC LIMIT %s"
     params.append(limit)
 
@@ -91,25 +94,27 @@ async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24):
         cur.execute(sql, params)
         return cur.fetchall()
 
-# ============ ПАРСЕР БЮДЖЕТА ============
-def parse_budget(query: str):
-    """Ищет бюджет: 'до 1000 долларов' / 'до 5000 сум' / 'до 800 euro'"""
-    pattern = r"до\s*(\d+)\s*(\$|usd|доллар|долл|сум|uzs|₽|руб|eur|€)"
-    m = re.search(pattern, query.lower())
-    if m:
-        amount = int(m.group(1))
-        currency = m.group(2)
-        # нормализация валют
-        if currency in ["$", "usd", "доллар", "долл"]:
-            currency = "USD"
-        elif currency in ["сум", "uzs"]:
-            currency = "UZS"
-        elif currency in ["₽", "руб"]:
-            currency = "RUB"
-        elif currency in ["eur", "€"]:
-            currency = "EUR"
-        return amount, currency
-    return None, None
+# ============ ФОРМАТ ВЫВОДА ============
+def format_tour(t, premium=False):
+    country = t["country"] or "—"
+    city = t["city"] or ""
+    hotel = t["hotel"] or "Не указан"
+    price = f"{t['price']} {t['currency']}" if t["price"] else "Цена не указана"
+    dates = t["dates"] or "Не указаны"
+    description = t["description"] or "—"
+
+    text = (
+        f"🌍 *Страна:* {country} {city}\n"
+        f"🏨 *Отель:* {hotel}\n"
+        f"💲 *Цена:* {price}\n"
+        f"📅 *Даты:* {dates}\n"
+        f"📝 *Описание:* {description[:150]}{'...' if len(description)>150 else ''}\n"
+    )
+
+    if premium and t.get("source_url"):
+        text += f"🔗 [Подробнее]({t['source_url']})"
+
+    return text
 
 # ============ МЕНЮ ============
 def main_menu():
@@ -131,7 +136,7 @@ async def ask_gpt(prompt: str) -> str:
     data = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий."},
+            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий, подсказывай советы и лайфхаки для туристов."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.4
@@ -145,9 +150,9 @@ async def ask_gpt(prompt: str) -> str:
 async def show_progress(chat_id: int, bot: Bot):
     steps = [
         "🤔 Думаю...",
-        "🔍 Ищу варианты...",
-        "📊 Проверяю источники...",
-        "✅ Готовлю результаты..."
+        "🔍 Ищу информацию...",
+        "📊 Сравниваю варианты...",
+        "✅ Почти готово..."
     ]
     msg = await bot.send_message(chat_id, steps[0])
     for step in steps[1:]:
@@ -162,9 +167,10 @@ async def show_progress(chat_id: int, bot: Bot):
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
-        "👋 Привет! Я — умный тур-бот 🤖\n\n"
-        "Здесь только **свежие туры за последние 24 часа** 🏖️\n\n"
-        "Выбирай опцию ниже и поехали! 🚀",
+        "👋 Привет! Я умный тур-бот 🤖\n\n"
+        "Мы часть **экосистемы TripleA** 🚀\n\n"
+        "Здесь только свежие туры за последние 24 часа 🏖️\n\n"
+        "Выбирай опцию ниже и погнали! 👇",
         parse_mode="Markdown",
         reply_markup=main_menu(),
     )
@@ -172,24 +178,31 @@ async def start_cmd(message: types.Message):
 @dp.message()
 async def handle_plain_text(message: types.Message):
     query = message.text.strip()
-    progress_msg = await show_progress(message.chat.id, bot)
 
+    # проверка на "до ХХХ долларов"
+    max_price = None
+    if "до" in query and any(cur in query.lower() for cur in ["usd", "доллар"]):
+        try:
+            words = query.replace("$", "").split()
+            for w in words:
+                if w.isdigit():
+                    max_price = int(w)
+                    break
+        except:
+            pass
+
+    progress_msg = await show_progress(message.chat.id, bot)
     premium = await is_premium(message.from_user.id)
 
-    # --- проверка бюджета ---
-    budget, currency = parse_budget(query)
-    if budget:
-        tours = await get_latest_tours(limit=20, hours=24)
-        tours = [t for t in tours if t["currency"] == currency and t["price"] <= budget]
-        header = f"📊 За последние 24 часа нашёл туры до {budget} {currency}:"
-    else:
-        tours = await get_latest_tours(query=query, limit=5, hours=24)
-        header = f"📋 Нашёл такие варианты:"
+    tours = await get_latest_tours(query=query, max_price=max_price, limit=5, hours=24)
 
     if not tours:
-        reply = f"⚠️ За последние 24 часа туров не найдено по запросу: {query}."
-        gpt_suggestion = await ask_gpt(f"Подскажи туристические направления, похожие на: {query}.")
-        reply += "\n\n💡 Советы: " + gpt_suggestion
+        reply = f"⚠️ За последние 24 часа туров по запросу '{query}' не найдено.\n\n"
+        gpt_suggestion = await ask_gpt(
+            f"Пользователь ищет тур: {query}. "
+            f"Если в базе нет, предложи альтернативные направления в регионе."
+        )
+        reply += gpt_suggestion
         await bot.edit_message_text(
             text=reply,
             chat_id=message.chat.id,
@@ -198,29 +211,15 @@ async def handle_plain_text(message: types.Message):
         )
         return
 
-    # --- формирование текста ---
-    if premium:
-        text = "\n\n".join([
-            f"🌍 {t['country']} {t['city'] or ''}\n"
-            f"💲 {t['price']} {t['currency']}\n"
-            f"🏨 {t['hotel'] or 'Отель не указан'}\n"
-            f"📅 {t['dates'] or 'Даты не указаны'}\n"
-            f"📝 {t['description'][:120]+'...' if t['description'] else ''}\n"
-            f"🔗 {t['source_url'] or ''}"
-            for t in tours
-        ])
+    if max_price:
+        header = f"📊 За последние 24 часа нашёл туры до {max_price} USD:\n\n"
     else:
-        text = "\n\n".join([
-            f"🌍 {t['country']} {t['city'] or ''}\n"
-            f"💲 {t['price']} {t['currency']}\n"
-            f"🏨 {t['hotel'] or 'Отель не указан'}\n"
-            f"📅 {t['dates'] or 'Даты не указаны'}\n"
-            f"📝 {t['description'][:60]+'...' if t['description'] else ''}"
-            for t in tours
-        ])
+        header = "📋 Нашёл такие варианты:\n\n"
+
+    text = "\n\n".join([format_tour(t, premium=premium) for t in tours])
 
     await bot.edit_message_text(
-        text=f"{header}\n\n{text}",
+        text=header + text,
         chat_id=message.chat.id,
         message_id=progress_msg.message_id,
         reply_markup=back_menu()
@@ -235,9 +234,9 @@ async def back_to_menu(callback: types.CallbackQuery):
 async def about(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "🌐 Мы — часть экосистемы **TripleA**.\n\n"
-        "🤖 Автоматизация процессов\n"
-        "🏝️ Путешествия и выгодные туры\n"
-        "🚀 Новые возможности для роста",
+        "Автоматизация процессов 🤖\n"
+        "Путешествия и выгодные туры 🏝️\n"
+        "Новые возможности для роста 🚀",
         parse_mode="Markdown",
         reply_markup=back_menu(),
     )
@@ -246,8 +245,8 @@ async def about(callback: types.CallbackQuery):
 async def price(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "💰 Подписка TripleA Travel:\n\n"
-        "• Бесплатно — цены + отели + даты\n"
-        "• Премиум — полный пакет (отели, описания, ссылки)\n\n"
+        "• Бесплатно — цены, отели, даты\n"
+        "• Премиум — ссылки, контакты туроператоров\n\n"
         "Подключение премиум скоро 🔑",
         reply_markup=back_menu(),
     )
@@ -255,7 +254,7 @@ async def price(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "find_tour")
 async def find_tour(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "🔍 Введи название страны, города или бюджет (например: 'туры до 1000 долларов'):",
+        "🔍 Введи название страны или города:",
         reply_markup=back_menu()
     )
 
@@ -266,10 +265,7 @@ async def cheap_tours(callback: types.CallbackQuery):
         await callback.message.edit_text("⚠️ За последние 24 часа дешёвых туров не найдено.", reply_markup=back_menu())
         return
 
-    text = "\n".join([
-        f"🌍 {t['country']} {t['city'] or ''} — 💲 {t['price']} {t['currency']}"
-        for t in tours
-    ])
+    text = "\n\n".join([format_tour(t) for t in tours])
 
     await callback.message.edit_text(
         f"🔥 Свежие дешёвые туры:\n\n{text}",
