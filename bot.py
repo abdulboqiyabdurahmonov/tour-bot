@@ -70,13 +70,13 @@ async def is_premium(user_id: int):
             return False
         return row["is_premium"]
 
-async def get_latest_tours(query: str = None, limit: int = 5, days: int = 1):
+async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
-        WHERE posted_at >= NOW() - (%s || ' days')::interval
+        WHERE posted_at >= NOW() - (%s || ' hours')::interval
     """
-    params = [str(days)]
+    params = [str(hours)]
 
     if query:
         sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
@@ -155,11 +155,17 @@ async def handle_plain_text(message: types.Message):
     progress_msg = await show_progress(message.chat.id, bot)
 
     premium = await is_premium(message.from_user.id)
-    tours = await get_latest_tours(query=query, limit=5, days=1)
+    tours = await get_latest_tours(query=query, limit=5, hours=24)
 
     if not tours:
+        reply = f"⚠️ За последние 24 часа не было объявлено туров в '{query}'.\n\n"
+        gpt_suggestion = await ask_gpt(
+            f"Пользователь ищет тур: {query}. "
+            f"Если в базе нет, предложи альтернативные направления в регионе."
+        )
+        reply += gpt_suggestion
         await bot.edit_message_text(
-            text=f"⚠️ За последние 24 часа не было объявлено туров в {query}.",
+            text=reply,
             chat_id=message.chat.id,
             message_id=progress_msg.message_id,
             reply_markup=back_menu()
@@ -168,14 +174,16 @@ async def handle_plain_text(message: types.Message):
 
     if premium:
         text = "\n\n".join([
-            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}\n"
+            f"🌍 {t['country']} {t['city'] or ''}\n"
+            f"💲 {t['price']} {t['currency']}\n"
             f"🏨 {t['hotel'] or 'Отель не указан'}\n"
+            f"📅 {t['dates'] or 'Даты не указаны'}\n"
             f"🔗 {t['source_url'] or ''}"
             for t in tours
         ])
     else:
         text = "\n".join([
-            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}"
+            f"🌍 {t['country']} {t['city'] or ''} — 💲 {t['price']} {t['currency']}"
             for t in tours
         ])
 
@@ -221,13 +229,13 @@ async def find_tour(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "cheap_tours")
 async def cheap_tours(callback: types.CallbackQuery):
-    tours = await get_latest_tours(limit=5, days=1)
+    tours = await get_latest_tours(limit=5, hours=24)
     if not tours:
         await callback.message.edit_text("⚠️ За последние 24 часа дешёвых туров не найдено.", reply_markup=back_menu())
         return
 
     text = "\n".join([
-        f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}"
+        f"🌍 {t['country']} {t['city'] or ''} — 💲 {t['price']} {t['currency']}"
         for t in tours
     ])
 
