@@ -1,275 +1,136 @@
 import os
+import re
 import logging
 import asyncio
-import httpx
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
+from telethon import TelegramClient
 from psycopg import connect
-from psycopg.rows import dict_row
 
 # ============ ЛОГИ ============
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ============ ENV ============
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+API_ID = int(os.getenv("TG_API_ID"))
+API_HASH = os.getenv("TG_API_HASH")
+SESSION_NAME = os.getenv("TG_SESSION", "collector_session")
+CHANNELS = os.getenv("CHANNELS", "").split(",")  # пример: @tour1,@tour2
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
-
-bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher()
-app = FastAPI()
+if not API_ID or not API_HASH or not CHANNELS:
+    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH и CHANNELS в .env")
 
 # ============ БД ============
 def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
-def init_db():
+def save_tour(data: dict):
+    """Сохраняем тур в PostgreSQL"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            is_premium BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS tours (
-            id SERIAL PRIMARY KEY,
-            country TEXT,
-            city TEXT,
-            hotel TEXT,
-            price NUMERIC,
-            currency TEXT,
-            dates TEXT,
-            description TEXT,
-            source_url TEXT,
-            posted_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
+            INSERT INTO tours (country, city, hotel, price, currency, dates, description, source_url, posted_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT DO NOTHING;
+        """, (
+            data.get("country"),
+            data.get("city"),
+            data.get("hotel"),
+            data.get("price"),
+            data.get("currency"),
+            data.get("dates"),
+            data.get("description"),
+            data.get("source_url"),
+            data.get("posted_at")
+        ))
 
-async def is_premium(user_id: int):
-    init_db()
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        if not row:
-            cur.execute(
-                "INSERT INTO users (user_id, is_premium) VALUES (%s, %s)",
-                (user_id, False)
-            )
-            return False
-        return row["is_premium"]
+# ============ ПАРСЕР ============
+MONTHS = {
+    "янв": "01", "фев": "02", "мар": "03", "апр": "04", "май": "05", "мая": "05",
+    "июн": "06", "июл": "07", "авг": "08", "сен": "09", "сент": "09",
+    "окт": "10", "ноя": "11", "дек": "12"
+}
 
-async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24):
-    sql = """
-        SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
-        FROM tours
-        WHERE posted_at >= NOW() - (%s || ' hours')::interval
-    """
-    params = [str(hours)]
+def parse_dates(text: str):
+    """Извлекаем даты из текста (15-25 сентября, 01.09–10.09, с 5 по 12 октября)"""
+    # 01.09–10.09
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?", text)
+    if m:
+        d1, m1, y1, d2, m2, y2 = m.groups()
+        return f"{d1.zfill(2)}.{m1.zfill(2)}.{y1 or datetime.now().year}–{d2.zfill(2)}.{m2.zfill(2)}.{y2 or datetime.now().year}"
 
-    if query:
-        sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
-        q = f"%{query.lower()}%"
-        params.extend([q, q])
+    # 15–25 сентября
+    m = re.search(r"(\d{1,2})\s?[–\-]\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
+    if m:
+        d1, d2, mon = m.groups()
+        return f"{d1.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}–{d2.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}"
 
-    sql += " ORDER BY posted_at DESC LIMIT %s"
-    params.append(limit)
+    # с 5 по 12 октября
+    m = re.search(r"с\s?(\d{1,2})\s?по\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
+    if m:
+        d1, d2, mon = m.groups()
+        return f"{d1.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}–{d2.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}"
 
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, params)
-        return cur.fetchall()
+    return None
 
-# ============ МЕНЮ ============
-def main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌍 Найти тур", callback_data="find_tour")],
-        [InlineKeyboardButton(text="🔥 Дешёвые туры", callback_data="cheap_tours")],
-        [InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")],
-        [InlineKeyboardButton(text="💰 Прайс подписки", callback_data="price")],
-    ])
+def parse_post(text: str, link: str):
+    """Разбор поста (цена, город, отель, валюта, даты)"""
+    price_match = re.search(r"(\d{2,6})\s?(USD|EUR|СУМ|сум|руб)", text, re.I)
+    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
+    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
+    dates_match = parse_dates(text)
 
-def back_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")]
-    ])
-
-# ============ OPENAI ============
-async def ask_gpt(prompt: str) -> str:
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    data = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий, подсказывай советы и лайфхаки для туристов."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.4
+    return {
+        "country": None if not city_match else guess_country(city_match.group(1)),
+        "city": city_match.group(1) if city_match else None,
+        "hotel": hotel_match.group(0) if hotel_match else None,
+        "price": float(price_match.group(1)) if price_match else None,
+        "currency": price_match.group(2).upper() if price_match else None,
+        "dates": dates_match,
+        "description": text[:500],
+        "source_url": link,
+        "posted_at": datetime.utcnow()
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
 
-# ============ ПРОГРЕСС ============
-async def show_progress(chat_id: int, bot: Bot):
-    steps = [
-        "🤔 Думаю...",
-        "🔍 Ищу информацию...",
-        "📊 Сравниваю варианты...",
-        "✅ Почти готово..."
-    ]
-    msg = await bot.send_message(chat_id, steps[0])
-    for step in steps[1:]:
-        await asyncio.sleep(2)
+def guess_country(city: str):
+    """Простейший словарь город → страна"""
+    mapping = {
+        "Нячанг": "Вьетнам",
+        "Анталья": "Турция",
+        "Пхукет": "Таиланд",
+        "Дубай": "ОАЭ",
+        "Бали": "Индонезия",
+        "Тбилиси": "Грузия"
+    }
+    return mapping.get(city, None)
+
+# ============ КОЛЛЕКТОР ============
+async def collect_once(client: TelegramClient):
+    """Один прогон сбора туров"""
+    since = datetime.utcnow() - timedelta(hours=24)
+
+    for channel in CHANNELS:
+        logging.info(f"📥 Читаю канал: {channel}")
+        async for msg in client.iter_messages(channel.strip(), limit=50):
+            if not msg.text:
+                continue
+            if msg.date.replace(tzinfo=None) < since:
+                break
+
+            data = parse_post(msg.text, f"https://t.me/{channel.strip('@')}/{msg.id}")
+            save_tour(data)
+            logging.info(f"💾 Сохранил тур: {data}")
+
+async def run_collector():
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    await client.start()
+    logging.info("✅ Collector started")
+
+    while True:
         try:
-            await bot.edit_message_text(step, chat_id, msg.message_id)
-        except Exception:
-            pass
-    return msg
+            await collect_once(client)
+        except Exception as e:
+            logging.error(f"❌ Ошибка в коллекторе: {e}")
+        await asyncio.sleep(900)  # ждать 15 минут
 
-# ============ ОБРАБОТЧИКИ ============
-@dp.message(Command("start"))
-async def start_cmd(message: types.Message):
-    await message.answer(
-        "👋 Привет! Я умный тур-бот 🤖\n\n"
-        "Мы часть **экосистемы TripleA** 🚀\n\n"
-        "Здесь только свежие туры за последние 24 часа 🏖️\n\n"
-        "Выбирай опцию ниже и погнали! 👇",
-        parse_mode="Markdown",
-        reply_markup=main_menu(),
-    )
-
-@dp.message()
-async def handle_plain_text(message: types.Message):
-    query = message.text.strip()
-    progress_msg = await show_progress(message.chat.id, bot)
-
-    premium = await is_premium(message.from_user.id)
-    tours = await get_latest_tours(query=query, limit=5, hours=24)
-
-    if not tours:
-        reply = f"⚠️ За последние 24 часа не было объявлено туров в '{query}'.\n\n"
-        gpt_suggestion = await ask_gpt(
-            f"Пользователь ищет тур: {query}. "
-            f"Если в базе нет, предложи альтернативные направления в регионе."
-        )
-        reply += gpt_suggestion
-        await bot.edit_message_text(
-            text=reply,
-            chat_id=message.chat.id,
-            message_id=progress_msg.message_id,
-            reply_markup=back_menu()
-        )
-        return
-
-    if premium:
-        text = "\n\n".join([
-            f"🌍 {t['country']} {t['city'] or ''}\n"
-            f"💲 {t['price']} {t['currency']}\n"
-            f"🏨 {t['hotel'] or 'Отель не указан'}\n"
-            f"📅 {t['dates'] or 'Даты не указаны'}\n"
-            f"🔗 {t['source_url'] or ''}"
-            for t in tours
-        ])
-    else:
-        text = "\n".join([
-            f"🌍 {t['country']} {t['city'] or ''} — 💲 {t['price']} {t['currency']}"
-            for t in tours
-        ])
-
-    await bot.edit_message_text(
-        text=f"📋 Нашёл такие варианты:\n\n{text}",
-        chat_id=message.chat.id,
-        message_id=progress_msg.message_id,
-        reply_markup=back_menu()
-    )
-
-# ============ CALLBACKS ============
-@dp.callback_query(F.data == "menu")
-async def back_to_menu(callback: types.CallbackQuery):
-    await callback.message.edit_text("Главное меню 👇", reply_markup=main_menu())
-
-@dp.callback_query(F.data == "about")
-async def about(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "🌐 Мы — часть экосистемы **TripleA**.\n\n"
-        "Автоматизация процессов 🤖\n"
-        "Путешествия и выгодные туры 🏝️\n"
-        "Новые возможности для роста 🚀",
-        parse_mode="Markdown",
-        reply_markup=back_menu(),
-    )
-
-@dp.callback_query(F.data == "price")
-async def price(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "💰 Подписка TripleA Travel:\n\n"
-        "• Бесплатно — цены без отелей\n"
-        "• Премиум — отели, ссылки и туроператоры\n\n"
-        "Подключение премиум скоро 🔑",
-        reply_markup=back_menu(),
-    )
-
-@dp.callback_query(F.data == "find_tour")
-async def find_tour(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "🔍 Введи название страны или города:",
-        reply_markup=back_menu()
-    )
-
-@dp.callback_query(F.data == "cheap_tours")
-async def cheap_tours(callback: types.CallbackQuery):
-    tours = await get_latest_tours(limit=5, hours=24)
-    if not tours:
-        await callback.message.edit_text("⚠️ За последние 24 часа дешёвых туров не найдено.", reply_markup=back_menu())
-        return
-
-    text = "\n".join([
-        f"🌍 {t['country']} {t['city'] or ''} — 💲 {t['price']} {t['currency']}"
-        for t in tours
-    ])
-
-    await callback.message.edit_text(
-        f"🔥 Свежие дешёвые туры:\n\n{text}",
-        reply_markup=back_menu()
-    )
-
-# ============ FASTAPI ============
-@app.on_event("startup")
-async def on_startup():
-    init_db()
-    if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL)
-        logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    logging.info("🛑 Shutdown event — webhook НЕ удаляется")
-    await bot.session.close()
-
-@app.post("/webhook")
-async def webhook_handler(request: Request):
-    update = types.Update.model_validate(await request.json())
-    await dp.feed_update(bot, update)
-    return {"ok": True}
-
-# ====== HEALTH CHECK + ROOT ======
-@app.get("/healthz", include_in_schema=False)
-@app.head("/healthz", include_in_schema=False)
-async def health_check():
-    return JSONResponse(content={"status": "ok"})
-
-@app.get("/", include_in_schema=False)
-@app.head("/", include_in_schema=False)
-async def root():
-    return JSONResponse(content={"status": "ok"})
+if __name__ == "__main__":
+    asyncio.run(run_collector())
