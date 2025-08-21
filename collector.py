@@ -2,8 +2,9 @@ import os
 import re
 import logging
 import asyncio
-from datetime import datetime, timedelta, UTC
-
+import base64
+from datetime import datetime, timedelta
+from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
 
@@ -14,106 +15,137 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 API_ID = int(os.getenv("TG_API_ID"))
 API_HASH = os.getenv("TG_API_HASH")
 SESSION_B64 = os.getenv("TG_SESSION_B64")
+CHANNELS = os.getenv("CHANNELS", "").split(",")  # пример: @tour1,@tour2
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CHANNELS = os.getenv("CHANNELS", "@mangotour,@CentralTur_uz,@talismantour").split(",")
-
-if not API_ID or not API_HASH or not SESSION_B64 or not DATABASE_URL:
-    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64 и DATABASE_URL в .env")
-
-# ============ КЛИЕНТ ============
-client = TelegramClient("collector", API_ID, API_HASH)
-client.start()
+if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
+    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64 и CHANNELS в .env")
 
 # ============ БД ============
 def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
-def init_db():
+def save_tour(data: dict):
+    """Сохраняем тур в PostgreSQL"""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tours (
-                id SERIAL PRIMARY KEY,
-                source TEXT,
-                title TEXT,
-                price NUMERIC,
-                currency TEXT,
-                posted_at TIMESTAMP
-            );
-        """)
+        try:
+            cur.execute("""
+                INSERT INTO tours 
+                (country, city, hotel, price, currency, dates, description, source_url, posted_at, message_id, source_chat)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING;
+            """, (
+                data.get("country"),
+                data.get("city"),
+                data.get("hotel"),
+                data.get("price"),
+                data.get("currency"),
+                data.get("dates"),
+                data.get("description"),
+                data.get("source_url"),
+                data.get("posted_at"),
+                data.get("message_id"),
+                data.get("source_chat"),
+            ))
+            logging.info(f"💾 Сохранил тур: {data.get('city')} | {data.get('price')} {data.get('currency')}")
+        except Exception as e:
+            logging.error(f"❌ Ошибка при сохранении тура: {e}")
 
-init_db()
+# ============ ПАРСЕР ============
+MONTHS = {
+    "янв": "01", "фев": "02", "мар": "03", "апр": "04", "май": "05", "мая": "05",
+    "июн": "06", "июл": "07", "авг": "08", "сен": "09", "сент": "09",
+    "окт": "10", "ноя": "11", "дек": "12"
+}
 
-# ============ УТИЛИТЫ ============
-def parse_title_and_price(text: str):
-    """
-    Парсим название тура и цену
-    """
-    if not text:
-        return None, None, None
+def parse_dates(text: str):
+    """Извлекаем даты из текста"""
+    # 01.09–10.09
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?", text)
+    if m:
+        d1, m1, y1, d2, m2, y2 = m.groups()
+        return f"{d1.zfill(2)}.{m1.zfill(2)}.{y1 or datetime.now().year}–{d2.zfill(2)}.{m2.zfill(2)}.{y2 or datetime.now().year}"
 
-    # --- Парсим цену ---
-    price_match = re.search(r"(\d{2,6})\s?(USD|\$|EUR|€|СУМ|сум|UZS|₽|руб)", text, re.IGNORECASE)
-    price, currency = None, None
-    if price_match:
-        price = float(price_match.group(1))
-        currency = price_match.group(2).upper()
-        # Нормализация
-        if currency in ["$", "USD"]:
-            currency = "USD"
-        elif currency in ["€", "EUR"]:
-            currency = "EUR"
-        elif currency in ["СУМ", "СУМС", "UZS"]:
-            currency = "UZS"
-        elif currency in ["₽", "РУБ", "RUB"]:
-            currency = "RUB"
+    # 15–25 сентября
+    m = re.search(r"(\d{1,2})\s?[–\-]\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
+    if m:
+        d1, d2, mon = m.groups()
+        return f"{d1.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}–{d2.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}"
 
-    # --- Парсим заголовок (название направления) ---
-    title = None
-    if price_match:
-        idx = price_match.start()
-        title = text[:idx].strip(" ,.-\n")
-    if not title:  # fallback
-        lines = text.split("\n")
-        title = lines[0][:50] if lines else None
+    # с 5 по 12 октября
+    m = re.search(r"с\s?(\d{1,2})\s?по\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
+    if m:
+        d1, d2, mon = m.groups()
+        return f"{d1.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}–{d2.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}"
 
-    return title, price, currency
+    return None
 
-# ============ ОСНОВНОЙ ЦИКЛ ============
-async def collect():
-    async with client:
-        logging.info("✅ Collector запущен")
-        since = datetime.now(UTC) - timedelta(hours=24)
+def guess_country(city: str):
+    mapping = {
+        "Нячанг": "Вьетнам",
+        "Анталья": "Турция",
+        "Пхукет": "Таиланд",
+        "Дубай": "ОАЭ",
+        "Бали": "Индонезия",
+        "Тбилиси": "Грузия"
+    }
+    return mapping.get(city, None)
 
-        for channel in CHANNELS:
-            channel = channel.strip()
-            if not channel:
+def parse_post(text: str, link: str, msg_id: int, chat: str):
+    """Разбор поста"""
+    price_match = re.search(r"(\d{2,6})\s?(USD|EUR|СУМ|сум|руб|\$|€)", text, re.I)
+    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
+    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
+    dates_match = parse_dates(text)
+
+    return {
+        "country": None if not city_match else guess_country(city_match.group(1)),
+        "city": city_match.group(1) if city_match else None,
+        "hotel": hotel_match.group(0) if hotel_match else None,
+        "price": float(price_match.group(1)) if price_match else None,
+        "currency": price_match.group(2).upper() if price_match else None,
+        "dates": dates_match,
+        "description": text[:500],
+        "source_url": link,
+        "posted_at": datetime.utcnow(),
+        "message_id": msg_id,
+        "source_chat": chat
+    }
+
+# ============ КОЛЛЕКТОР ============
+async def collect_once(client: TelegramClient):
+    """Один прогон сбора туров"""
+    since = datetime.utcnow() - timedelta(hours=24)
+
+    for channel in CHANNELS:
+        if not channel.strip():
+            continue
+        logging.info(f"📥 Читаю канал: {channel}")
+        async for msg in client.iter_messages(channel.strip(), limit=50):
+            if not msg.text:
                 continue
+            if msg.date.replace(tzinfo=None) < since:
+                break
 
-            logging.info(f"📥 Читаю канал: {channel}")
-            async for msg in client.iter_messages(channel, limit=50, offset_date=since):
-                if not msg.text:
-                    continue
+            data = parse_post(
+                msg.text,
+                f"https://t.me/{channel.strip('@')}/{msg.id}",
+                msg.id,
+                channel.strip('@')
+            )
+            save_tour(data)
 
-                title, price, currency = parse_title_and_price(msg.text)
+async def run_collector():
+    client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
+    await client.start()
+    logging.info("✅ Collector запущен")
 
-                with get_conn() as conn, conn.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO tours (source, title, price, currency, posted_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (channel, title, price, currency, datetime.now(UTC)))
-
-                logging.info(f"💾 Сохранил тур: {title} | {price} {currency}")
-
-        logging.info("♻️ Сборка завершена")
-
-async def scheduler():
     while True:
         try:
-            await collect()
+            await collect_once(client)
         except Exception as e:
             logging.error(f"❌ Ошибка в коллекторе: {e}")
-        await asyncio.sleep(900)  # каждые 15 минут
+        await asyncio.sleep(900)  # 15 минут
 
 if __name__ == "__main__":
-    asyncio.run(scheduler())
+    asyncio.run(run_collector())
