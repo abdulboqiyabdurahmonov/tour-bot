@@ -4,14 +4,14 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.bot:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: WEBHOOK_URL
-        value: https://tour-bot.onrender.com/webhook
+        value: https://tour-bot-rxi8.onrender.com/webhook
       - key: DATABASE_URL
         fromDatabase:
           name: tour-db
@@ -22,7 +22,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.collector
+    startCommand: python collector.py
     envVars:
       - key: TELEGRAM_API_ID
         sync: false
