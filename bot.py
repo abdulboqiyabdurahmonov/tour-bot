@@ -70,7 +70,7 @@ async def is_premium(user_id: int):
             return False
         return row["is_premium"]
 
-async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
+async def get_latest_tours(query: str = None, limit: int = 5, days: int = 1):
     sql = """
         SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
         FROM tours
@@ -155,17 +155,14 @@ async def handle_plain_text(message: types.Message):
     progress_msg = await show_progress(message.chat.id, bot)
 
     premium = await is_premium(message.from_user.id)
-    tours = await get_latest_tours(query=query, limit=5, days=3)
+    tours = await get_latest_tours(query=query, limit=5, days=1)
 
     if not tours:
-        reply = await ask_gpt(
-            f"Пользователь ищет тур: {query}. "
-            f"Если в базе нет, дай туристический совет, куда можно поехать."
-        )
         await bot.edit_message_text(
-            text=reply,
+            text=f"⚠️ За последние 24 часа не было объявлено туров в {query}.",
             chat_id=message.chat.id,
-            message_id=progress_msg.message_id
+            message_id=progress_msg.message_id,
+            reply_markup=back_menu()
         )
         return
 
@@ -185,7 +182,8 @@ async def handle_plain_text(message: types.Message):
     await bot.edit_message_text(
         text=f"📋 Нашёл такие варианты:\n\n{text}",
         chat_id=message.chat.id,
-        message_id=progress_msg.message_id
+        message_id=progress_msg.message_id,
+        reply_markup=back_menu()
     )
 
 # ============ CALLBACKS ============
@@ -223,9 +221,9 @@ async def find_tour(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "cheap_tours")
 async def cheap_tours(callback: types.CallbackQuery):
-    tours = await get_latest_tours(limit=5, days=3)
+    tours = await get_latest_tours(limit=5, days=1)
     if not tours:
-        await callback.message.edit_text("⚠️ Пока нет дешёвых туров.", reply_markup=back_menu())
+        await callback.message.edit_text("⚠️ За последние 24 часа дешёвых туров не найдено.", reply_markup=back_menu())
         return
 
     text = "\n".join([
