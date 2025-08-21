@@ -1,9 +1,8 @@
 import os
 import asyncio
 import logging
-from datetime import datetime, timedelta
-
-from telethon import TelegramClient
+from datetime import datetime
+from telethon import TelegramClient, events
 from psycopg import connect
 
 # ===== Логирование =====
@@ -12,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 # ===== ENV =====
 API_ID = int(os.getenv("TG_API_ID"))
 API_HASH = os.getenv("TG_API_HASH")
-PHONE = os.getenv("TG_PHONE")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS", "").split(",")
 
 PG_HOST = os.getenv("POSTGRES_HOST")
@@ -48,12 +47,12 @@ def init_db():
         """)
     logging.info("✅ Таблица tours инициализирована")
 
-# ===== Обработка сообщения =====
+# ===== Обработка сообщений =====
 async def handle_message(event, channel):
     text = event.message.message
     date = event.message.date
 
-    # простейший парсинг цены
+    # парсим цену
     price, currency = None, None
     for word in text.split():
         if word.isdigit():
@@ -61,7 +60,7 @@ async def handle_message(event, channel):
         if word.upper() in ["USD", "EUR", "SUM", "СУМ"]:
             currency = word.upper()
 
-    # упрощённый поиск страны/города
+    # ищем страну и город
     country, city = None, None
     for kw in ["Турция", "Египет", "Таиланд", "ОАЭ", "Вьетнам", "Узбекистан"]:
         if kw.lower() in text.lower():
@@ -70,6 +69,7 @@ async def handle_message(event, channel):
         if kw.lower() in text.lower():
             city = kw
 
+    # сохраняем в БД
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO tours(channel, country, city, price, currency, message, date)
@@ -81,9 +81,7 @@ async def handle_message(event, channel):
 # ===== Основной процесс =====
 async def main():
     init_db()
-    client = TelegramClient("collector", API_ID, API_HASH)
-
-    await client.start(phone=PHONE)
+    client = TelegramClient("collector_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
     for ch in CHANNELS:
         try:
