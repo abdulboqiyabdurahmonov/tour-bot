@@ -2,11 +2,11 @@ import os
 import re
 import logging
 import asyncio
+import base64
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
 
 from telethon import TelegramClient
-from psycopg import connect, OperationalError
+from psycopg import connect
 
 # ============ ЛОГИ ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -14,37 +14,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # ============ ENV ============
 API_ID = int(os.getenv("TG_API_ID"))
 API_HASH = os.getenv("TG_API_HASH")
-SESSION_NAME = os.getenv("TG_SESSION", "collector_session")
+SESSION_B64 = os.getenv("TG_SESSION_B64")
 CHANNELS = os.getenv("CHANNELS", "").split(",")  # пример: @tour1,@tour2
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not API_ID or not API_HASH or not CHANNELS:
-    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH и CHANNELS в .env")
+if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
+    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64 и CHANNELS в .env")
 
 # ============ БД ============
 def get_conn():
-    """Подключение к Postgres через DATABASE_URL"""
-    if not DATABASE_URL:
-        raise ValueError("❌ Нет DATABASE_URL в ENV")
+    return connect(DATABASE_URL, autocommit=True)
 
-    url = urlparse(DATABASE_URL)
-
-    try:
-        conn = connect(
-            host=url.hostname,
-            port=url.port,
-            user=url.username,
-            password=url.password,
-            dbname=url.path.lstrip("/"),
-            autocommit=True
-        )
-        return conn
-    except OperationalError as e:
-        logging.error(f"❌ Ошибка подключения к БД: {e}")
-        raise
-
-def save_tour(data: dict) -> bool:
-    """Сохраняем тур в PostgreSQL. Возвращает True если реально добавилось, иначе False"""
+def save_tour(data: dict):
+    """Сохраняем тур в PostgreSQL"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO tours (country, city, hotel, price, currency, dates, description, source_url, posted_at)
@@ -61,7 +43,6 @@ def save_tour(data: dict) -> bool:
             data.get("source_url"),
             data.get("posted_at")
         ))
-        return cur.rowcount > 0  # rowcount = 1 если реально вставилось
 
 # ============ ПАРСЕР ============
 MONTHS = {
@@ -71,7 +52,7 @@ MONTHS = {
 }
 
 def parse_dates(text: str):
-    """Извлекаем даты из текста (15-25 сентября, 01.09–10.09, с 5 по 12 октября)"""
+    """Извлекаем даты из текста"""
     # 01.09–10.09
     m = re.search(r"(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?", text)
     if m:
@@ -93,7 +74,7 @@ def parse_dates(text: str):
     return None
 
 def parse_post(text: str, link: str):
-    """Разбор поста (цена, город, отель, валюта, даты)"""
+    """Разбор поста"""
     price_match = re.search(r"(\d{2,6})\s?(USD|EUR|СУМ|сум|руб)", text, re.I)
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
     hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
@@ -112,7 +93,6 @@ def parse_post(text: str, link: str):
     }
 
 def guess_country(city: str):
-    """Простейший словарь город → страна"""
     mapping = {
         "Нячанг": "Вьетнам",
         "Анталья": "Турция",
@@ -127,12 +107,10 @@ def guess_country(city: str):
 async def collect_once(client: TelegramClient):
     """Один прогон сбора туров"""
     since = datetime.utcnow() - timedelta(hours=24)
-    total_found, total_saved, total_prices = 0, 0, []
 
     for channel in CHANNELS:
-        ch_found, ch_saved = 0, 0
-        ch_prices = []
-
+        if not channel.strip():
+            continue
         logging.info(f"📥 Читаю канал: {channel}")
         async for msg in client.iter_messages(channel.strip(), limit=50):
             if not msg.text:
@@ -141,36 +119,26 @@ async def collect_once(client: TelegramClient):
                 break
 
             data = parse_post(msg.text, f"https://t.me/{channel.strip('@')}/{msg.id}")
-            ch_found += 1
-            if data["price"]:
-                ch_prices.append(data["price"])
-                total_prices.append(data["price"])
-            if save_tour(data):
-                ch_saved += 1
-                logging.info(f"💾 Сохранил тур: {data}")
-
-        avg_price = round(sum(ch_prices) / len(ch_prices), 2) if ch_prices else 0
-        logging.info(f"📊 Канал {channel}: найдено {ch_found}, сохранено {ch_saved}, средняя цена {avg_price}")
-        total_found += ch_found
-        total_saved += ch_saved
-
-    total_avg_price = round(sum(total_prices) / len(total_prices), 2) if total_prices else 0
-    logging.info(f"📈 Общий итог: найдено {total_found}, сохранено {total_saved}, средняя цена {total_avg_price}")
+            save_tour(data)
+            logging.info(f"💾 Сохранил тур: {data}")
 
 async def run_collector():
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    # декодируем session_b64
+    session_bytes = base64.b64decode(SESSION_B64)
+    session_file = "session.session"
+    with open(session_file, "wb") as f:
+        f.write(session_bytes)
+
+    client = TelegramClient(session_file, API_ID, API_HASH)
     await client.start()
     logging.info("✅ Collector started")
-
-    # тест коннекта перед запуском
-    get_conn().close()
 
     while True:
         try:
             await collect_once(client)
         except Exception as e:
             logging.error(f"❌ Ошибка в коллекторе: {e}")
-        await asyncio.sleep(900)  # ждать 15 минут
+        await asyncio.sleep(900)
 
 if __name__ == "__main__":
     asyncio.run(run_collector())
