@@ -2,10 +2,10 @@ services:
   - type: web
     name: triplea-travel-bot
     env: python
-    plan: standard
+    plan: standard   # можно оставить starter, если нагрузка небольшая
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
-    autoDeploy: false
+    autoDeploy: false   # чтобы не падало при каждом пуше
     healthCheckPath: /healthz
     envVars:
       - key: TELEGRAM_TOKEN
@@ -15,4 +15,4 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: WEBHOOK_URL
-        sync: false
+        value: https://triplea-travel-bot.onrender.com/webhook
