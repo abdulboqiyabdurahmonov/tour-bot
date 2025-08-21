@@ -93,17 +93,40 @@ def guess_country(city: str):
 
 def parse_post(text: str, link: str, msg_id: int, chat: str):
     """Разбор поста"""
-    price_match = re.search(r"(\d{2,6})\s?(USD|EUR|СУМ|сум|руб|\$|€)", text, re.I)
+
+    # --- Цена (поддержка разных форматов: 850$, $850, 850 USD, 850€) ---
+    price_match = re.search(
+        r"(?:(\d{2,6})(?:\s?)(USD|EUR|СУМ|сум|руб|\$|€))|(?:(USD|EUR|\$|€)\s?(\d{2,6}))",
+        text, re.I
+    )
+    price, currency = None, None
+    if price_match:
+        if price_match.group(1) and price_match.group(2):  # 850 USD
+            price, currency = price_match.group(1), price_match.group(2)
+        elif price_match.group(3) and price_match.group(4):  # $850
+            price, currency = price_match.group(4), price_match.group(3)
+
+    # --- Город (по списку или fallback) ---
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
+    city = city_match.group(1) if city_match else None
+
+    # fallback: ищем первое слово с заглавной буквы, если нет совпадения
+    if not city:
+        m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", text)
+        city = m.group(1) if m else None
+
+    # --- Отель ---
     hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
+
+    # --- Даты ---
     dates_match = parse_dates(text)
 
     return {
-        "country": None if not city_match else guess_country(city_match.group(1)),
-        "city": city_match.group(1) if city_match else None,
+        "country": guess_country(city) if city else None,
+        "city": city,
         "hotel": hotel_match.group(0) if hotel_match else None,
-        "price": float(price_match.group(1)) if price_match else None,
-        "currency": price_match.group(2).upper() if price_match else None,
+        "price": float(price) if price else None,
+        "currency": currency.upper() if currency else None,
         "dates": dates_match,
         "description": text[:500],
         "source_url": link,
