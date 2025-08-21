@@ -56,49 +56,39 @@ def init_db():
             posted_at TIMESTAMP DEFAULT NOW()
         );
         """)
-    logging.info("📂 База инициализирована")
 
 async def is_premium(user_id: int):
-    loop = asyncio.get_event_loop()
-    def query():
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
-            row = cur.fetchone()
-            if not row:
-                cur.execute(
-                    "INSERT INTO users (user_id, is_premium) VALUES (%s, %s)",
-                    (user_id, False)
-                )
-                return False
-            return row["is_premium"]
-    return await loop.run_in_executor(None, query)
+    init_db()
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.execute(
+                "INSERT INTO users (user_id, is_premium) VALUES (%s, %s)",
+                (user_id, False)
+            )
+            return False
+        return row["is_premium"]
 
 async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
-    loop = asyncio.get_event_loop()
+    sql = """
+        SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
+        FROM tours
+        WHERE posted_at >= NOW() - (%s || ' days')::interval
+    """
+    params = [str(days)]
 
-    def query_db():
-        sql = """
-            SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
-            FROM tours
-            WHERE posted_at >= NOW() - INTERVAL '%s days'
-        """ % days
-        params = []
+    if query:
+        sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
+        q = f"%{query.lower()}%"
+        params.extend([q, q])
 
-        if query:
-            sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
-            q = f"%{query.lower()}%"
-            params.extend([q, q])
+    sql += " ORDER BY posted_at DESC LIMIT %s"
+    params.append(limit)
 
-        sql += " ORDER BY posted_at DESC LIMIT %s"
-        params.append(limit)
-
-        logging.info(f"🗂 SQL: {sql} | params={params}")
-
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, params)
-            return cur.fetchall()
-
-    return await loop.run_in_executor(None, query_db)
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
 
 # ============ МЕНЮ ============
 def main_menu():
@@ -120,7 +110,7 @@ async def ask_gpt(prompt: str) -> str:
     data = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий."},
+            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий, подсказывай советы и лайфхаки для туристов."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.4
@@ -132,7 +122,12 @@ async def ask_gpt(prompt: str) -> str:
 
 # ============ ПРОГРЕСС ============
 async def show_progress(chat_id: int, bot: Bot):
-    steps = ["🤔 Думаю...", "🔍 Ищу информацию...", "📊 Сравниваю варианты...", "✅ Почти готово..."]
+    steps = [
+        "🤔 Думаю...",
+        "🔍 Ищу информацию...",
+        "📊 Сравниваю варианты...",
+        "✅ Почти готово..."
+    ]
     msg = await bot.send_message(chat_id, steps[0])
     for step in steps[1:]:
         await asyncio.sleep(2)
@@ -148,8 +143,8 @@ async def start_cmd(message: types.Message):
     await message.answer(
         "👋 Привет! Я умный тур-бот 🤖\n\n"
         "Мы часть **экосистемы TripleA** 🚀\n\n"
-        "Здесь только свежие туры 🏖️\n\n"
-        "Выбирай опцию ниже 👇",
+        "Здесь только свежие туры за последние 24 часа 🏖️\n\n"
+        "Выбирай опцию ниже и погнали! 👇",
         parse_mode="Markdown",
         reply_markup=main_menu(),
     )
@@ -163,8 +158,15 @@ async def handle_plain_text(message: types.Message):
     tours = await get_latest_tours(query=query, limit=5, days=3)
 
     if not tours:
-        reply = await ask_gpt(f"Пользователь ищет тур: {query}. Если в базе нет, дай совет по путешествиям.")
-        await bot.edit_message_text(reply, chat_id=message.chat.id, message_id=progress_msg.message_id)
+        reply = await ask_gpt(
+            f"Пользователь ищет тур: {query}. "
+            f"Если в базе нет, дай туристический совет, куда можно поехать."
+        )
+        await bot.edit_message_text(
+            text=reply,
+            chat_id=message.chat.id,
+            message_id=progress_msg.message_id
+        )
         return
 
     if premium:
@@ -175,9 +177,16 @@ async def handle_plain_text(message: types.Message):
             for t in tours
         ])
     else:
-        text = "\n".join([f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}" for t in tours])
+        text = "\n".join([
+            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}"
+            for t in tours
+        ])
 
-    await bot.edit_message_text(f"📋 Нашёл такие варианты:\n\n{text}", chat_id=message.chat.id, message_id=progress_msg.message_id)
+    await bot.edit_message_text(
+        text=f"📋 Нашёл такие варианты:\n\n{text}",
+        chat_id=message.chat.id,
+        message_id=progress_msg.message_id
+    )
 
 # ============ CALLBACKS ============
 @dp.callback_query(F.data == "menu")
@@ -187,7 +196,10 @@ async def back_to_menu(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "about")
 async def about(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "🌐 Мы — часть экосистемы **TripleA**.\n\nАвтоматизация процессов 🤖\nПутешествия и туры 🏝️\nРост 🚀",
+        "🌐 Мы — часть экосистемы **TripleA**.\n\n"
+        "Автоматизация процессов 🤖\n"
+        "Путешествия и выгодные туры 🏝️\n"
+        "Новые возможности для роста 🚀",
         parse_mode="Markdown",
         reply_markup=back_menu(),
     )
@@ -195,13 +207,19 @@ async def about(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "price")
 async def price(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "💰 Подписка:\n\n• Бесплатно — цены без отелей\n• Премиум — отели, ссылки и ТО\n\nСкоро 🔑",
+        "💰 Подписка TripleA Travel:\n\n"
+        "• Бесплатно — цены без отелей\n"
+        "• Премиум — отели, ссылки и туроператоры\n\n"
+        "Подключение премиум скоро 🔑",
         reply_markup=back_menu(),
     )
 
 @dp.callback_query(F.data == "find_tour")
 async def find_tour(callback: types.CallbackQuery):
-    await callback.message.edit_text("🔍 Введи страну или город:", reply_markup=back_menu())
+    await callback.message.edit_text(
+        "🔍 Введи название страны или города:",
+        reply_markup=back_menu()
+    )
 
 @dp.callback_query(F.data == "cheap_tours")
 async def cheap_tours(callback: types.CallbackQuery):
@@ -209,8 +227,16 @@ async def cheap_tours(callback: types.CallbackQuery):
     if not tours:
         await callback.message.edit_text("⚠️ Пока нет дешёвых туров.", reply_markup=back_menu())
         return
-    text = "\n".join([f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}" for t in tours])
-    await callback.message.edit_text(f"🔥 Свежие дешёвые туры:\n\n{text}", reply_markup=back_menu())
+
+    text = "\n".join([
+        f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}"
+        for t in tours
+    ])
+
+    await callback.message.edit_text(
+        f"🔥 Свежие дешёвые туры:\n\n{text}",
+        reply_markup=back_menu()
+    )
 
 # ============ FASTAPI ============
 @app.on_event("startup")
@@ -231,12 +257,13 @@ async def webhook_handler(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
-@app.get("/healthz")
-@app.head("/healthz")
+# ====== HEALTH CHECK + ROOT ======
+@app.get("/healthz", include_in_schema=False)
+@app.head("/healthz", include_in_schema=False)
 async def health_check():
     return JSONResponse(content={"status": "ok"})
 
-@app.get("/")
-@app.head("/")
+@app.get("/", include_in_schema=False)
+@app.head("/", include_in_schema=False)
 async def root():
     return JSONResponse(content={"status": "ok"})
