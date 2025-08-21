@@ -51,6 +51,47 @@ def save_tour(data: dict):
         except Exception as e:
             logging.error(f"❌ Ошибка при сохранении тура: {e}")
 
+# ======== ДОБАВЛЕНО: функции поиска и форматирования ========
+def get_tours_by_query(query: str, limit=5):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT country, city, hotel, price, currency, dates, description, source_url
+            FROM tours
+            WHERE (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)
+              AND posted_at > NOW() - INTERVAL '24 HOURS'
+            ORDER BY posted_at DESC
+            LIMIT %s;
+        """, (f"%{query.lower()}%", f"%{query.lower()}%", limit))
+        return cur.fetchall()
+
+def format_tour_basic(row) -> str:
+    country, city, hotel, price, currency, dates, description, source_url = row
+    parts = []
+    if country:
+        parts.append(f"🌍 {country}")
+    if price:
+        parts.append(f"💰 {int(price)} {currency}")
+    if description:
+        parts.append(f"📝 {description[:100]}...")
+    return "\n".join(parts)
+
+def format_tour_premium(row) -> str:
+    country, city, hotel, price, currency, dates, description, source_url = row
+    parts = []
+    if city:
+        parts.append(f"📍 {city} ({country})")
+    if hotel:
+        parts.append(f"🏨 {hotel}")
+    if price:
+        parts.append(f"💰 {int(price)} {currency}")
+    if dates:
+        parts.append(f"📅 {dates}")
+    if description:
+        parts.append(f"📝 {description[:120]}...")
+    if source_url:
+        parts.append(f"🔗 [Подробнее]({source_url})")
+    return "\n".join(parts)
+
 # ============ ПАРСЕР ============
 MONTHS = {
     "янв": "01", "фев": "02", "мар": "03", "апр": "04", "май": "05", "мая": "05",
@@ -110,7 +151,6 @@ def parse_post(text: str, link: str, msg_id: int, chat: str):
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
     city = city_match.group(1) if city_match else None
 
-    # fallback: ищем первое слово с заглавной буквы, если нет совпадения
     if not city:
         m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", text)
         city = m.group(1) if m else None
