@@ -4,6 +4,7 @@ import logging
 import asyncio
 import base64
 from datetime import datetime, timedelta
+from telethon.sessions import StringSession
 
 from telethon import TelegramClient
 from psycopg import connect
@@ -129,7 +130,7 @@ async def run_collector():
     with open(session_file, "wb") as f:
         f.write(session_bytes)
 
-    client = TelegramClient(session_file, API_ID, API_HASH)
+    client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
     await client.start()
     logging.info("✅ Collector started")
 
