@@ -267,5 +267,10 @@ from fastapi.responses import JSONResponse
 async def health_check():
     return JSONResponse(content={"status": "ok"})
 
+@app.get("/", include_in_schema=False)
+async def root():
+    return {"status": "ok"}
+
+
 
 
