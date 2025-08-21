@@ -3,17 +3,13 @@ import re
 import logging
 import asyncio
 import base64
-from datetime import datetime, timedelta, UTC
-
+from datetime import datetime, timedelta
 from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
 
 # ============ ЛОГИ ============
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ============ ENV ============
 API_ID = int(os.getenv("TG_API_ID"))
@@ -31,14 +27,12 @@ def get_conn():
 
 def save_tour(data: dict):
     """Сохраняем тур в PostgreSQL"""
-    try:
-        with get_conn() as conn, conn.cursor() as cur:
+    with get_conn() as conn, conn.cursor() as cur:
+        try:
             cur.execute("""
-                INSERT INTO tours (
-                    country, city, hotel, price, currency, dates,
-                    description, source_url, posted_at, source_chat
-                )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                INSERT INTO tours 
+                (country, city, hotel, price, currency, dates, description, source_url, posted_at, message_id, source_chat)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT DO NOTHING;
             """, (
                 data.get("country"),
@@ -50,10 +44,12 @@ def save_tour(data: dict):
                 data.get("description"),
                 data.get("source_url"),
                 data.get("posted_at"),
+                data.get("message_id"),
                 data.get("source_chat"),
             ))
-    except Exception as e:
-        logging.error(f"❌ Ошибка при сохранении тура: {e}")
+            logging.info(f"💾 Сохранил тур: {data.get('city')} | {data.get('price')} {data.get('currency')}")
+        except Exception as e:
+            logging.error(f"❌ Ошибка при сохранении тура: {e}")
 
 # ============ ПАРСЕР ============
 MONTHS = {
@@ -95,15 +91,15 @@ def guess_country(city: str):
     }
     return mapping.get(city, None)
 
-def parse_post(text: str, link: str, chat: str):
+def parse_post(text: str, link: str, msg_id: int, chat: str):
     """Разбор поста"""
-    price_match = re.search(r"(\d{2,6})\s?(USD|EUR|СУМ|сум|руб)", text, re.I)
+    price_match = re.search(r"(\d{2,6})\s?(USD|EUR|СУМ|сум|руб|\$|€)", text, re.I)
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
     hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
     dates_match = parse_dates(text)
 
     return {
-        "country": guess_country(city_match.group(1)) if city_match else None,
+        "country": None if not city_match else guess_country(city_match.group(1)),
         "city": city_match.group(1) if city_match else None,
         "hotel": hotel_match.group(0) if hotel_match else None,
         "price": float(price_match.group(1)) if price_match else None,
@@ -111,14 +107,15 @@ def parse_post(text: str, link: str, chat: str):
         "dates": dates_match,
         "description": text[:500],
         "source_url": link,
-        "posted_at": datetime.now(UTC),
-        "source_chat": chat,   # ✅ добавили
+        "posted_at": datetime.utcnow(),
+        "message_id": msg_id,
+        "source_chat": chat
     }
 
 # ============ КОЛЛЕКТОР ============
 async def collect_once(client: TelegramClient):
     """Один прогон сбора туров"""
-    since = datetime.now(UTC) - timedelta(hours=24)
+    since = datetime.utcnow() - timedelta(hours=24)
 
     for channel in CHANNELS:
         if not channel.strip():
@@ -127,21 +124,21 @@ async def collect_once(client: TelegramClient):
         async for msg in client.iter_messages(channel.strip(), limit=50):
             if not msg.text:
                 continue
-            if msg.date.replace(tzinfo=UTC) < since:
+            if msg.date.replace(tzinfo=None) < since:
                 break
 
             data = parse_post(
                 msg.text,
                 f"https://t.me/{channel.strip('@')}/{msg.id}",
+                msg.id,
                 channel.strip('@')
             )
             save_tour(data)
-            logging.info(f"💾 Сохранил тур: {data}")
 
 async def run_collector():
     client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
     await client.start()
-    logging.info("✅ Collector started")
+    logging.info("✅ Collector запущен")
 
     while True:
         try:
