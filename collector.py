@@ -30,7 +30,9 @@ def upsert_tour(row: dict):
                 price = EXCLUDED.price,
                 currency = EXCLUDED.currency,
                 dates = EXCLUDED.dates,
-                description = EXCLUDED.description
+                description = EXCLUDED.description,
+                country = EXCLUDED.country,
+                city = EXCLUDED.city
         """, (
             row.get("country"), row.get("city"), row.get("hotel"),
             row.get("price"), row.get("currency"), row.get("dates"), row.get("description"),
@@ -62,9 +64,26 @@ PRICE_RX = re.compile(
     re.I,
 )
 
+# Словарь стран/курортов
+GEO = {
+    "турц": ("Турция", None),
+    "анталь": ("Турция", "Анталья"),
+    "кемер": ("Турция", "Кемер"),
+    "бодрум": ("Турция", "Бодрум"),
+    "мармарис": ("Турция", "Мармарис"),
+    "египет": ("Египет", None),
+    "хургад": ("Египет", "Хургада"),
+    "шарм": ("Египет", "Шарм-эль-Шейх"),
+    "оаэ": ("ОАЭ", None),
+    "дубай": ("ОАЭ", "Дубай"),
+    "абу-даб": ("ОАЭ", "Абу-Даби"),
+}
+
 def parse_post(text: str) -> dict | None:
     if not text:
         return None
+
+    # цена
     m = PRICE_RX.search(text)
     if not m:
         return None
@@ -76,6 +95,7 @@ def parse_post(text: str) -> dict | None:
         price, currency = m.group("rub"), "RUB"
     elif m.group("uzs"):
         price, currency = m.group("uzs"), "UZS"
+
     if not price:
         return None
 
@@ -84,11 +104,13 @@ def parse_post(text: str) -> dict | None:
     except:
         return None
 
+    # страна/город
     country, city = None, None
     low = text.lower()
-    if "анталь" in low: country, city = "Турция", "Анталья"
-    if "хургад" in low: country, city = "Египет", "Хургада"
-    if "дубай"  in low: country, city = "ОАЭ", "Дубай"
+    for key, (c, ct) in GEO.items():
+        if key in low:
+            country, city = c, ct
+            break
 
     return {
         "country": country,
