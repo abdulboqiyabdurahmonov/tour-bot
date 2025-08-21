@@ -276,13 +276,12 @@ async def cheap_tours(callback: types.CallbackQuery):
 async def on_startup():
     init_db()
     if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL)
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
         logging.info("✅ Webhook установлен")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await bot.delete_webhook()
-    logging.info("🛑 Webhook удалён")
+    logging.info("🛑 Bot shutdown (вебхук НЕ удаляем)")
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
