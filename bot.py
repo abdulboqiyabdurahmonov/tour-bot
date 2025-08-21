@@ -5,6 +5,7 @@ import httpx
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -141,8 +142,8 @@ async def show_progress(chat_id: int, bot: Bot):
 async def start_cmd(message: types.Message):
     await message.answer(
         "👋 Привет! Я умный тур-бот 🤖\n\n"
-        "Мы часть **экосистемы TripleA** — проектов для автоматизации, путешествий и новых возможностей 🚀\n\n"
-        "Здесь ты найдёшь только свежие туры за последние 24 часа 🏖️\n\n"
+        "Мы часть **экосистемы TripleA** 🚀\n\n"
+        "Здесь только свежие туры за последние 24 часа 🏖️\n\n"
         "Выбирай опцию ниже и погнали! 👇",
         parse_mode="Markdown",
         reply_markup=main_menu(),
@@ -197,10 +198,9 @@ async def back_to_menu(callback: types.CallbackQuery):
 async def about(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "🌐 Мы — часть экосистемы **TripleA**.\n\n"
-        "Наши проекты помогают бизнесу и людям:\n"
-        "• Автоматизация процессов 🤖\n"
-        "• Путешествия и выгодные туры 🏝️\n"
-        "• Новые возможности для роста 🚀",
+        "Автоматизация процессов 🤖\n"
+        "Путешествия и выгодные туры 🏝️\n"
+        "Новые возможности для роста 🚀",
         parse_mode="Markdown",
         reply_markup=back_menu(),
     )
@@ -211,14 +211,14 @@ async def price(callback: types.CallbackQuery):
         "💰 Подписка TripleA Travel:\n\n"
         "• Бесплатно — цены без отелей\n"
         "• Премиум — отели, ссылки и туроператоры\n\n"
-        "Подключение премиум подписки скоро будет доступно 🔑",
+        "Подключение премиум скоро 🔑",
         reply_markup=back_menu(),
     )
 
 @dp.callback_query(F.data == "find_tour")
 async def find_tour(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "🔍 Введи название страны или города, куда хочешь поехать:",
+        "🔍 Введи название страны или города:",
         reply_markup=back_menu()
     )
 
@@ -235,12 +235,11 @@ async def cheap_tours(callback: types.CallbackQuery):
     ])
 
     await callback.message.edit_text(
-        f"🔥 Самые свежие дешёвые туры:\n\n{text}",
+        f"🔥 Свежие дешёвые туры:\n\n{text}",
         reply_markup=back_menu()
     )
 
 # ============ FASTAPI ============
-
 @app.on_event("startup")
 async def on_startup():
     init_db()
@@ -259,18 +258,13 @@ async def webhook_handler(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
-# ====== HEALTH CHECK ======
-from fastapi.responses import JSONResponse
-
+# ====== HEALTH CHECK + ROOT ======
 @app.get("/healthz", include_in_schema=False)
 @app.head("/healthz", include_in_schema=False)
 async def health_check():
     return JSONResponse(content={"status": "ok"})
 
 @app.get("/", include_in_schema=False)
+@app.head("/", include_in_schema=False)
 async def root():
-    return {"status": "ok"}
-
-
-
-
+    return JSONResponse(content={"status": "ok"})
