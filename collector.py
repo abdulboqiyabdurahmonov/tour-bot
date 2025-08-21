@@ -13,12 +13,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # ============ ENV ============
 API_ID = int(os.getenv("TG_API_ID"))
 API_HASH = os.getenv("TG_API_HASH")
+BOT_TOKEN = os.getenv("TG_BOT_TOKEN")  # ✅ логинимся как бот
 SESSION_NAME = os.getenv("TG_SESSION", "collector_session")
-CHANNELS = os.getenv("CHANNELS", "").split(",")  # пример: @tour1,@tour2
+CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not API_ID or not API_HASH or not CHANNELS:
-    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH и CHANNELS в .env")
+if not API_ID or not API_HASH or not BOT_TOKEN or not CHANNELS:
+    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_BOT_TOKEN и CHANNELS в .env")
 
 # ============ БД ============
 def get_conn():
@@ -51,7 +52,7 @@ MONTHS = {
 }
 
 def parse_dates(text: str):
-    """Извлекаем даты из текста (15-25 сентября, 01.09–10.09, с 5 по 12 октября)"""
+    """Извлекаем даты из текста"""
     # 01.09–10.09
     m = re.search(r"(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?", text)
     if m:
@@ -75,12 +76,12 @@ def parse_dates(text: str):
 def parse_post(text: str, link: str):
     """Разбор поста (цена, город, отель, валюта, даты)"""
     price_match = re.search(r"(\d{2,6})\s?(USD|EUR|СУМ|сум|руб)", text, re.I)
-    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
+    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text)
     hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
     dates_match = parse_dates(text)
 
     return {
-        "country": None if not city_match else guess_country(city_match.group(1)),
+        "country": guess_country(city_match.group(1)) if city_match else None,
         "city": city_match.group(1) if city_match else None,
         "hotel": hotel_match.group(0) if hotel_match else None,
         "price": float(price_match.group(1)) if price_match else None,
@@ -92,7 +93,6 @@ def parse_post(text: str, link: str):
     }
 
 def guess_country(city: str):
-    """Простейший словарь город → страна"""
     mapping = {
         "Нячанг": "Вьетнам",
         "Анталья": "Турция",
@@ -110,7 +110,7 @@ async def collect_once(client: TelegramClient):
 
     for channel in CHANNELS:
         logging.info(f"📥 Читаю канал: {channel}")
-        async for msg in client.iter_messages(channel.strip(), limit=50):
+        async for msg in client.iter_messages(channel, limit=50):
             if not msg.text:
                 continue
             if msg.date.replace(tzinfo=None) < since:
@@ -122,7 +122,7 @@ async def collect_once(client: TelegramClient):
 
 async def run_collector():
     client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-    await client.start()
+    await client.start(bot_token=BOT_TOKEN)  # ✅ запускаем как бот
     logging.info("✅ Collector started")
 
     while True:
@@ -130,7 +130,7 @@ async def run_collector():
             await collect_once(client)
         except Exception as e:
             logging.error(f"❌ Ошибка в коллекторе: {e}")
-        await asyncio.sleep(900)  # ждать 15 минут
+        await asyncio.sleep(900)  # каждые 15 минут
 
 if __name__ == "__main__":
     asyncio.run(run_collector())
