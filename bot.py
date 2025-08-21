@@ -70,40 +70,25 @@ async def is_premium(user_id: int):
             return False
         return row["is_premium"]
 
-# 🔎 Поиск туров
-def search_tours(query: str):
+async def get_latest_tours(query: str = None, limit: int = 5, days: int = 3):
+    sql = """
+        SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
+        FROM tours
+        WHERE posted_at >= NOW() - (%s || ' days')::interval
+    """
+    params = [str(days)]
+
+    if query:
+        sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
+        q = f"%{query.lower()}%"
+        params.extend([q, q])
+
+    sql += " ORDER BY posted_at DESC LIMIT %s"
+    params.append(limit)
+
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("""
-            SELECT *
-            FROM tours
-            WHERE (
-                country ILIKE %(q)s
-                OR city ILIKE %(q)s
-                OR description ILIKE %(q)s
-            )
-            ORDER BY posted_at DESC
-            LIMIT 10
-        """, {"q": f"%{query}%"})
+        cur.execute(sql, params)
         return cur.fetchall()
-
-# 📝 Форматирование ответа
-def format_tour(tour: dict) -> str:
-    parts = []
-    if tour.get("country") or tour.get("city"):
-        parts.append(f"🌍 {tour.get('country','')} {tour.get('city','')}")
-    if tour.get("hotel"):
-        parts.append(f"🏨 {tour['hotel']}")
-    if tour.get("price"):
-        parts.append(f"💵 {tour['price']} {tour.get('currency','')}")
-    if tour.get("dates"):
-        parts.append(f"📅 {tour['dates']}")
-    if tour.get("description"):
-        desc = tour['description'][:200] + "..." if len(tour['description']) > 200 else tour['description']
-        parts.append(f"📝 {desc}")
-    if tour.get("source_url"):
-        parts.append(f"[Источник]({tour['source_url']})")
-
-    return "\n".join(parts)
 
 # ============ МЕНЮ ============
 def main_menu():
@@ -125,10 +110,10 @@ async def ask_gpt(prompt: str) -> str:
     data = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий. Не придумывай туров. Держись фактов из базы."},
+            {"role": "system", "content": "Ты туристический ассистент. Отвечай строго по теме путешествий, подсказывай советы и лайфхаки для туристов."},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.3
+        "temperature": 0.4
     }
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data)
@@ -164,41 +149,18 @@ async def start_cmd(message: types.Message):
         reply_markup=main_menu(),
     )
 
-# ✈️ Поиск по команде
-@dp.message(Command("search"))
-async def cmd_search(message: types.Message):
-    query = message.text.replace("/search", "").strip()
-    if not query:
-        await message.answer("🔍 Введите запрос, например:\n`/search Анталья`\n`/search Дубай`")
-        return
-
-    tours = search_tours(query)
-    if not tours:
-        await message.answer("❌ По вашему запросу ничего не найдено.")
-        return
-
-    for t in tours:
-        text = format_tour(t)
-        kb = None
-        if t.get("source_url"):
-            kb = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Открыть пост", url=t["source_url"])
-            )
-        await message.answer(text, reply_markup=kb, disable_web_page_preview=True, parse_mode="Markdown")
-
-# 💬 Любой текст → поиск
 @dp.message()
 async def handle_plain_text(message: types.Message):
     query = message.text.strip()
-
     progress_msg = await show_progress(message.chat.id, bot)
 
-    tours = search_tours(query)
+    premium = await is_premium(message.from_user.id)
+    tours = await get_latest_tours(query=query, limit=5, days=3)
 
     if not tours:
         reply = await ask_gpt(
             f"Пользователь ищет тур: {query}. "
-            f"Если в базе нет, дай совет куда лететь в это направление."
+            f"Если в базе нет, дай туристический совет, куда можно поехать."
         )
         await bot.edit_message_text(
             text=reply,
@@ -207,19 +169,24 @@ async def handle_plain_text(message: types.Message):
         )
         return
 
-    for t in tours:
-        text = format_tour(t)
-        kb = None
-        if t.get("source_url"):
-            kb = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Открыть пост", url=t["source_url"])
-            )
-        await bot.send_message(message.chat.id, text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
+    if premium:
+        text = "\n\n".join([
+            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}\n"
+            f"🏨 {t['hotel'] or 'Отель не указан'}\n"
+            f"🔗 {t['source_url'] or ''}"
+            for t in tours
+        ])
+    else:
+        text = "\n".join([
+            f"{t['country']} {t['city'] or ''} — {t['price']} {t['currency']}"
+            for t in tours
+        ])
 
-    try:
-        await bot.delete_message(message.chat.id, progress_msg.message_id)
-    except Exception:
-        pass
+    await bot.edit_message_text(
+        text=f"📋 Нашёл такие варианты:\n\n{text}",
+        chat_id=message.chat.id,
+        message_id=progress_msg.message_id
+    )
 
 # ============ CALLBACKS ============
 @dp.callback_query(F.data == "menu")
@@ -256,7 +223,7 @@ async def find_tour(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "cheap_tours")
 async def cheap_tours(callback: types.CallbackQuery):
-    tours = search_tours("")[:5]
+    tours = await get_latest_tours(limit=5, days=3)
     if not tours:
         await callback.message.edit_text("⚠️ Пока нет дешёвых туров.", reply_markup=back_menu())
         return
@@ -276,12 +243,13 @@ async def cheap_tours(callback: types.CallbackQuery):
 async def on_startup():
     init_db()
     if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-        logging.info("✅ Webhook установлен")
+        await bot.set_webhook(WEBHOOK_URL)
+        logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    logging.info("🛑 Bot shutdown (вебхук НЕ удаляем)")
+    logging.info("🛑 Shutdown event — webhook НЕ удаляется")
+    await bot.session.close()
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
