@@ -240,6 +240,7 @@ async def cheap_tours(callback: types.CallbackQuery):
     )
 
 # ============ FASTAPI ============
+
 @app.on_event("startup")
 async def on_startup():
     init_db()
@@ -257,3 +258,9 @@ async def webhook_handler(request: Request):
     update = types.Update.model_validate(await request.json())
     await dp.feed_update(bot, update)
     return {"ok": True}
+
+# ====== HEALTH CHECK ======
+@app.get("/")
+async def health_check():
+    return {"status": "ok"}
+
