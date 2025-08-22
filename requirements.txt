@@ -1,29 +1,7 @@
-# --- Web ---
-fastapi
-uvicorn
-
-# --- Telegram bot ---
-aiogram==3.*
-
-# --- PostgreSQL ---
-psycopg[binary]
-
-# --- Env ---
-python-dotenv
-
-# --- GPT ---
-openai==1.40.0
-httpx
-
-# --- Google Sheets ---
-gspread
-oauth2client
-
-# --- Collector (Telethon) ---
-telethon
-
-# --- Утилиты ---
-pytz
-
-openai==1.40.0
-
+fastapi==0.111.0
+uvicorn==0.30.1
+aiogram==3.13.1
+psycopg[binary]==3.2.1
+openai==1.43.0
+httpx==0.27.0
+python-dotenv==1.0.1
