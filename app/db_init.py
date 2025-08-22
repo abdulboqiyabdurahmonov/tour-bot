@@ -14,7 +14,7 @@ def init_db():
             ("username", "TEXT"),
             ("first_name", "TEXT"),
             ("last_name", "TEXT"),
-            ("full_name", "TEXT"),  # 👈 вот её не хватало
+            ("full_name", "TEXT"),   # вот тут забыл
             ("premium_until", "TIMESTAMP"),
             ("searches_today", "INT DEFAULT 0"),
             ("last_search_date", "DATE")
