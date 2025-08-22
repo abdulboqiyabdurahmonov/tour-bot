@@ -10,6 +10,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramForbiddenError
 
 from psycopg import connect
 from psycopg.rows import dict_row
@@ -126,7 +127,15 @@ async def ask_gpt(prompt: str) -> str:
 # ============ ПРОГРЕСС ============
 async def show_progress(chat_id: int, bot: Bot):
     steps = ["🤔 Думаю...", "🔍 Ищу туры...", "📊 Сравниваю варианты...", "✅ Готово!"]
-    msg = await bot.send_message(chat_id, steps[0])
+    try:
+        msg = await bot.send_message(chat_id, steps[0])
+    except TelegramForbiddenError:
+        logging.warning(f"❌ Пользователь {chat_id} заблокировал бота")
+        return None
+    except Exception as e:
+        logging.error(f"Ошибка при отправке прогресса: {e}")
+        return None
+
     for step in steps[1:]:
         await asyncio.sleep(2)
         try:
@@ -181,6 +190,9 @@ async def handle_plain_text(message: types.Message):
             pass
 
     progress_msg = await show_progress(message.chat.id, bot)
+    if not progress_msg:  # пользователь заблокировал бота или ошибка
+        return
+
     premium = await is_premium(message.from_user.id)
     tours = await get_latest_tours(query=query if not max_price else None, limit=5, hours=24, max_price=max_price)
 
@@ -188,7 +200,10 @@ async def handle_plain_text(message: types.Message):
         reply = f"⚠️ За последние 24 часа туров по запросу '{query}' не найдено.\n\n"
         gpt_suggestion = await ask_gpt(f"Подскажи альтернативные направления для запроса: {query}")
         reply += gpt_suggestion
-        await bot.edit_message_text(reply, message.chat.id, progress_msg.message_id, reply_markup=back_menu())
+        try:
+            await bot.edit_message_text(reply, message.chat.id, progress_msg.message_id, reply_markup=back_menu())
+        except Exception:
+            pass
         return
 
     header = "📋 Нашёл такие варианты:\n\n"
@@ -200,7 +215,10 @@ async def handle_plain_text(message: types.Message):
     else:
         text = "\n\n".join([format_tour_basic(t) for t in tours])
 
-    await bot.edit_message_text(header + text, message.chat.id, progress_msg.message_id, reply_markup=back_menu())
+    try:
+        await bot.edit_message_text(header + text, message.chat.id, progress_msg.message_id, reply_markup=back_menu())
+    except Exception as e:
+        logging.error(f"Ошибка при обновлении сообщения: {e}")
 
 # ============ CALLBACKS ============
 @dp.callback_query(F.data == "menu")
@@ -259,8 +277,12 @@ async def on_shutdown():
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
-    update = types.Update.model_validate(await request.json())
-    await dp.feed_update(bot, update)
+    try:
+        update = types.Update.model_validate(await request.json())
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logging.error(f"Ошибка обработки апдейта: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
     return {"ok": True}
 
 @app.get("/healthz")
