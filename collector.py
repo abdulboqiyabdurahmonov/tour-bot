@@ -59,15 +59,22 @@ def save_tour(data: dict):
             logging.error(f"❌ Ошибка при сохранении тура: {e}")
 
 def fetch_tours(query: str):
-    """Поиск туров по запросу"""
+    """Поиск туров только за последние 24 часа"""
+    since = datetime.utcnow() - timedelta(hours=24)
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("""
             SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
             FROM tours
-            WHERE (LOWER(country) LIKE %s OR LOWER(city) LIKE %s OR LOWER(description) LIKE %s)
+            WHERE posted_at >= %s
+              AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s OR LOWER(description) LIKE %s)
             ORDER BY posted_at DESC
             LIMIT 10;
-        """, (f"%{query.lower()}%", f"%{query.lower()}%", f"%{query.lower()}%"))
+        """, (
+            since,
+            f"%{query.lower()}%",
+            f"%{query.lower()}%",
+            f"%{query.lower()}%"
+        ))
         return cur.fetchall()
 
 # ============ ПАРСЕР ============
@@ -107,7 +114,7 @@ def guess_country(city: str):
     }
     return mapping.get(city, None)
 
-def parse_post(text: str, link: str, msg_id: int, chat: str):
+def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
     """Разбор поста"""
     price_match = re.search(
         r"(?:(\d{2,6})(?:\s?)(USD|EUR|СУМ|сум|руб|\$|€))|(?:(USD|EUR|\$|€)\s?(\d{2,6}))",
@@ -139,14 +146,13 @@ def parse_post(text: str, link: str, msg_id: int, chat: str):
         "dates": dates_match,
         "description": text[:500],
         "source_url": link,
-        "posted_at": datetime.utcnow(),
+        "posted_at": posted_at.replace(tzinfo=None),  # ← реальная дата сообщения
         "message_id": msg_id,
         "source_chat": chat
     }
 
 # ============ КОЛЛЕКТОР ============
 async def collect_once(client: TelegramClient):
-    since = datetime.utcnow() - timedelta(hours=24)
     for channel in CHANNELS:
         if not channel.strip():
             continue
@@ -154,14 +160,13 @@ async def collect_once(client: TelegramClient):
         async for msg in client.iter_messages(channel.strip(), limit=50):
             if not msg.text:
                 continue
-            if msg.date.replace(tzinfo=None) < since:
-                break
 
             data = parse_post(
                 msg.text,
                 f"https://t.me/{channel.strip('@')}/{msg.id}",
                 msg.id,
-                channel.strip('@')
+                channel.strip('@'),
+                msg.date
             )
             save_tour(data)
 
