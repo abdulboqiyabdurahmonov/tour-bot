@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -41,8 +41,6 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
-            is_premium BOOLEAN DEFAULT FALSE,
-            premium_until TIMESTAMP,
             searches_today INT DEFAULT 0,
             last_search_date DATE,
             created_at TIMESTAMP DEFAULT NOW()
@@ -63,32 +61,28 @@ def init_db():
         );
         """)
 
-async def is_premium(user_id: int):
-    init_db()
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT is_premium, premium_until FROM users WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        if not row:
-            cur.execute("INSERT INTO users (user_id, is_premium, searches_today, last_search_date) VALUES (%s, %s, 0, CURRENT_DATE)", (user_id, False))
-            return False
-        if row["premium_until"] and row["premium_until"] > datetime.utcnow():
-            return True
-        return row["is_premium"]
-
 async def increment_search(user_id: int):
     """Счётчик бесплатных поисков (лимит 5/день)."""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT searches_today, last_search_date FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
-        if not row:
-            return 0
         today = datetime.utcnow().date()
+
+        if not row:
+            cur.execute(
+                "INSERT INTO users (user_id, searches_today, last_search_date) VALUES (%s, %s, %s)",
+                (user_id, 1, today)
+            )
+            return 1
+
         if row["last_search_date"] != today:
-            cur.execute("UPDATE users SET searches_today = 1, last_search_date = %s WHERE user_id = %s", (today, user_id))
+            cur.execute("UPDATE users SET searches_today = 1, last_search_date = %s WHERE user_id = %s",
+                        (today, user_id))
             return 1
         else:
             new_count = row["searches_today"] + 1
-            cur.execute("UPDATE users SET searches_today = %s WHERE user_id = %s", (new_count, user_id))
+            cur.execute("UPDATE users SET searches_today = %s WHERE user_id = %s",
+                        (new_count, user_id))
             return new_count
 
 async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24, max_price: int = None):
@@ -122,7 +116,6 @@ def main_menu():
         [InlineKeyboardButton(text="🔥 Дешёвые туры", callback_data="cheap_tours")],
         [InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")],
         [InlineKeyboardButton(text="💰 Прайс подписки", callback_data="price")],
-        [InlineKeyboardButton(text="🔑 Купить Премиум", callback_data="buy_premium")],
     ])
 
 def back_menu():
@@ -171,22 +164,12 @@ async def show_progress(chat_id: int, bot: Bot):
     return msg
 
 # ============ ФОРМАТ ============
-def format_tour_basic(t):
+def format_tour(t):
     return (
         f"🌍 *{t['country']} {t['city'] or ''}*\n"
         f"💲 {t['price']} {t['currency']}\n"
         f"🏨 {t['hotel'] or 'Не указан'}\n"
         f"📅 {t['dates'] or 'Не указаны'}\n"
-        f"———\n"
-        f"_Полная инфо доступна в Премиум 🔑_"
-    )
-
-def format_tour_premium(t):
-    return (
-        f"🌍 *{t['country']} {t['city'] or ''}*\n"
-        f"💲 {t['price']} {t['currency']}\n"
-        f"🏨 {t['hotel'] or 'Отель не указан'}\n"
-        f"📅 {t['dates'] or 'Даты не указаны'}\n"
         f"📝 {t['description'] or ''}\n"
         f"🔗 {t['source_url'] or ''}"
     )
@@ -197,24 +180,10 @@ async def start_cmd(message: types.Message):
     await message.answer(
         "👋 Привет, путешественник!\n\n"
         "✈️ Я помогу найти туры за последние 24 часа.\n\n"
-        "🔓 Бесплатно — страна, цена, отель, даты (до 5 поисков/день)\n"
-        "💎 Премиум — полный пакет: описание, ссылки, детали + безлимитные поиски\n\n"
+        "🔓 Бесплатно — до 5 поисков в день\n"
+        "💎 Премиум пока недоступен\n\n"
         "Выбирай, и поехали 🌴",
         reply_markup=main_menu(),
-    )
-
-@dp.message(Command("premium"))
-async def premium_info(message: types.Message):
-    await message.answer(
-        "💎 *Премиум-подписка TripleA Travel*\n\n"
-        "✅ Безлимитные поиски\n"
-        "✅ Полные описания туров\n"
-        "✅ Ссылки и детали\n"
-        "✅ Доступ к архиву за 30 дней\n"
-        "✅ Уведомления о новых турах\n\n"
-        "Стоимость: скоро 🔜\n\n"
-        "Для подключения напиши менеджеру 👉 @triplea_manager",
-        reply_markup=back_menu()
     )
 
 @dp.message()
@@ -230,21 +199,15 @@ async def handle_plain_text(message: types.Message):
         except Exception:
             pass
 
-    premium = await is_premium(user_id)
-
     # проверка лимита бесплатных поисков
-    if not premium:
-        count = await increment_search(user_id)
-        if count > 5:
-            await message.answer(
-                "⚠️ Лимит бесплатных поисков (5/день) исчерпан.\n\n"
-                "🔑 Подключи Премиум, чтобы искать неограниченно!",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔑 Купить Премиум", callback_data="buy_premium")],
-                    [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")]
-                ])
-            )
-            return
+    count = await increment_search(user_id)
+    if count > 5:
+        await message.answer(
+            "⚠️ Лимит бесплатных поисков (5/день) исчерпан.\n\n"
+            "🔑 Премиум пока недоступен.",
+            reply_markup=back_menu()
+        )
+        return
 
     progress_msg = await show_progress(message.chat.id, bot)
     if not progress_msg:
@@ -254,7 +217,7 @@ async def handle_plain_text(message: types.Message):
 
     if not tours:
         reply = f"⚠️ За последние 24 часа туров по запросу '{query}' не найдено.\n\n"
-        gpt_suggestion = await ask_gpt(f"Подскажи альтернативные направления для запроса: {query}")
+        gpt_suggestion = await ask_gpt(f"Альтернативные направления для запроса: {query}")
         reply += gpt_suggestion
         try:
             await bot.edit_message_text(
@@ -271,10 +234,7 @@ async def handle_plain_text(message: types.Message):
     if max_price:
         header = f"💰 Свежие туры до {max_price} USD:\n\n"
 
-    if premium:
-        text = "\n\n".join([format_tour_premium(t) for t in tours])
-    else:
-        text = "\n\n".join([format_tour_basic(t) for t in tours])
+    text = "\n\n".join([format_tour(t) for t in tours])
 
     try:
         await bot.edit_message_text(
@@ -305,18 +265,9 @@ async def about(callback: types.CallbackQuery):
 async def price(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "💰 Подписка TripleA Travel:\n\n"
-        "• Бесплатно — страна, цена, даты, отель (до 5 поисков/день)\n"
-        "• Премиум — полная информация: описание, ссылки, детали, архив, уведомления\n\n"
-        "Премиум скоро 🔑",
+        "• Бесплатно — до 5 поисков/день\n"
+        "• Премиум — пока недоступен",
         reply_markup=back_menu(),
-    )
-
-@dp.callback_query(F.data == "buy_premium")
-async def buy_premium(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "🔑 Чтобы подключить Премиум, напиши менеджеру 👉 @triplea_manager\n\n"
-        "Скоро появится автоматическая оплата 💳",
-        reply_markup=back_menu()
     )
 
 @dp.callback_query(F.data == "find_tour")
@@ -333,7 +284,7 @@ async def cheap_tours(callback: types.CallbackQuery):
         await callback.message.edit_text("⚠️ Дешёвых туров за последние 24 часа не найдено.", reply_markup=back_menu())
         return
 
-    text = "\n\n".join([format_tour_basic(t) for t in tours])
+    text = "\n\n".join([format_tour(t) for t in tours])
     await callback.message.edit_text(f"🔥 Свежие дешёвые туры:\n\n{text}", reply_markup=back_menu())
 
 # ============ FASTAPI ============
