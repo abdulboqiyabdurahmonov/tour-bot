@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 from datetime import datetime
 
 from fastapi import FastAPI, Request
@@ -12,7 +11,8 @@ from aiogram.client.default import DefaultBotProperties
 
 from psycopg import connect
 from psycopg.rows import dict_row
-import openai
+
+from openai import OpenAI
 
 # ============ ЛОГИ ============
 logging.basicConfig(level=logging.INFO)
@@ -32,11 +32,11 @@ bot = Bot(
 )
 dp = Dispatcher()
 app = FastAPI()
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ============ БАЗА ДАННЫХ ============
 def get_conn():
-    return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+    return connect(DATABASE_URL, autocommit=True)
 
 def init_db():
     with get_conn() as conn, conn.cursor() as cur:
@@ -77,7 +77,7 @@ def save_request(user_id: int, query: str, response: str):
 
 def search_tours(query: str):
     """Ищем туры в таблице по ключевым словам"""
-    with get_conn() as conn, conn.cursor() as cur:
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("""
             SELECT * FROM tours
             WHERE country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s
@@ -99,7 +99,7 @@ async def ask_gpt(user_text: str, tours=None, premium=False):
         ])
         user_text = f"Пользователь ищет тур: {user_text}\n\nВот найденные варианты:\n{tours_text}"
 
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": context},
@@ -108,7 +108,7 @@ async def ask_gpt(user_text: str, tours=None, premium=False):
         max_tokens=500,
         temperature=0.7
     )
-    return response.choices[0].message["content"]
+    return response.choices[0].message.content
 
 # ============ ХЕНДЛЕРЫ ============
 @dp.message(Command("start"))
@@ -128,7 +128,7 @@ async def handle_message(message: types.Message):
 
     # 1. Ищем туры
     tours = search_tours(user_text)
-    premium = False  # потом сделаем проверку подписки
+    premium = False  # TODO: проверка подписки
 
     # 2. GPT отвечает
     reply = await ask_gpt(user_text, tours, premium)
