@@ -4,21 +4,22 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
             is_premium BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
 
-        # 2. проверяем и добавляем нужные поля (если их нет)
+        # 2. список недостающих колонок
         columns = [
+            ("username", "TEXT"),
+            ("first_name", "TEXT"),
+            ("last_name", "TEXT"),
             ("premium_until", "TIMESTAMP"),
             ("searches_today", "INT DEFAULT 0"),
             ("last_search_date", "DATE")
         ]
 
+        # 3. проверяем и добавляем недостающие поля
         for name, col_type in columns:
             cur.execute(f"""
             DO $$
@@ -33,3 +34,5 @@ def init_db():
                 END IF;
             END$$;
             """)
+
+        conn.commit()
