@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime
+from db_init import init_db, save_user
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
