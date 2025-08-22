@@ -11,8 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from psycopg import connect
 from psycopg.rows import dict_row
-
-from openai import OpenAI
+import openai
 
 # ============ ЛОГИ ============
 logging.basicConfig(level=logging.INFO)
@@ -32,14 +31,15 @@ bot = Bot(
 )
 dp = Dispatcher()
 app = FastAPI()
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY
 
 # ============ БАЗА ДАННЫХ ============
 def get_conn():
-    return connect(DATABASE_URL, autocommit=True)
+    return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
 def init_db():
     with get_conn() as conn, conn.cursor() as cur:
+        # юзеры
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -49,6 +49,7 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
+        # запросы
         cur.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -58,7 +59,7 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-    logging.info("✅ Таблицы готовы")
+    logging.info("✅ Таблицы users и requests готовы")
 
 def save_user(user: types.User):
     with get_conn() as conn, conn.cursor() as cur:
@@ -76,8 +77,8 @@ def save_request(user_id: int, query: str, response: str):
         """, (user_id, query, response))
 
 def search_tours(query: str):
-    """Ищем туры в таблице по ключевым словам"""
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+    """Поиск туров в таблице tours"""
+    with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT * FROM tours
             WHERE country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s
@@ -88,9 +89,10 @@ def search_tours(query: str):
 
 # ============ GPT ============
 async def ask_gpt(user_text: str, tours=None, premium=False):
-    context = "Ты тревел-ассистент. Отвечай кратко и понятно. Если просят тур, используй данные из базы. Не придумывай новые туры."
+    context = "Ты тревел-ассистент. Отвечай кратко и понятно. Если просят тур, используй только данные из таблицы. Не придумывай новые туры."
+
     if tours:
-        tours_text = "\n".join([
+        tours_text = "\n\n".join([
             f"🏨 {t['hotel'] or 'Отель не указан'} | {t['city']}, {t['country']}\n"
             f"💵 {t['price']} {t['currency']} | 📅 {t['dates'] or 'даты не указаны'}\n"
             f"{t['description'][:120]}..."
@@ -99,7 +101,7 @@ async def ask_gpt(user_text: str, tours=None, premium=False):
         ])
         user_text = f"Пользователь ищет тур: {user_text}\n\nВот найденные варианты:\n{tours_text}"
 
-    response = client.chat.completions.create(
+    response = openai.ChatCompletion.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": context},
@@ -108,7 +110,7 @@ async def ask_gpt(user_text: str, tours=None, premium=False):
         max_tokens=500,
         temperature=0.7
     )
-    return response.choices[0].message.content
+    return response.choices[0].message["content"]
 
 # ============ ХЕНДЛЕРЫ ============
 @dp.message(Command("start"))
@@ -126,11 +128,11 @@ async def handle_message(message: types.Message):
     user_text = message.text.strip()
     user_id = message.from_user.id
 
-    # 1. Ищем туры
+    # 1. Ищем туры в БД
     tours = search_tours(user_text)
-    premium = False  # TODO: проверка подписки
+    premium = False  # TODO: добавить проверку подписки
 
-    # 2. GPT отвечает
+    # 2. GPT формирует ответ
     reply = await ask_gpt(user_text, tours, premium)
 
     # 3. Сохраняем в БД
@@ -149,7 +151,7 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.delete_webhook()
-    logging.info("🛑 Webhook удалён")
+    logging.info("🛑 Webhook удалён, бот выключен")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
