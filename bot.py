@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 # ================= ENV =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SEARCH_API = os.getenv("SEARCH_API", "https://collector.onrender.com/search")
+SEARCH_API = os.getenv("SEARCH_API", "postgresql://tourbot_db_user:O6oNms2X7u3wMhVUFsTuj06v4qsto3Fo@dpg-d2hg1eqdbo4c73b11glg-a.oregon-postgres.render.com/tourbot_db")
 
 WEBHOOK_HOST = os.getenv("WEBHOOK_URL", "https://tour-bot-rxi8.onrender.com")  # домен Render
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
