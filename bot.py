@@ -39,16 +39,37 @@ def get_conn():
 
 def init_db():
     with get_conn() as conn, conn.cursor() as cur:
-        # юзеры
+        # таблица users
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 full_name TEXT,
+                is_premium BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-        # запросы
+
+        # проверка недостающих колонок
+        columns = [
+            ("premium_until", "TIMESTAMP"),
+            ("searches_today", "INT DEFAULT 0"),
+            ("last_search_date", "DATE")
+        ]
+        for name, col_type in columns:
+            cur.execute(f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = '{name}'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN {name} {col_type};
+                END IF;
+            END$$;
+            """)
+
+        # таблица requests
         cur.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -58,7 +79,8 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-        # туры (на будущее)
+
+        # таблица tours (на будущее)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tours (
                 id SERIAL PRIMARY KEY,
@@ -74,6 +96,7 @@ def init_db():
                 posted_at TIMESTAMP DEFAULT NOW()
             );
         """)
+
     logging.info("✅ Таблицы users, requests и tours готовы")
 
 def save_user(user: types.User):
@@ -146,17 +169,13 @@ async def handle_message(message: types.Message):
     user_text = message.text.strip()
     user_id = message.from_user.id
 
-    # 1. Ищем туры в БД
     tours = search_tours(user_text)
-    premium = False  # TODO: добавить проверку подписки
+    premium = False  # TODO: проверка подписки
 
-    # 2. GPT формирует ответ
     reply = await ask_gpt(user_text, tours, premium)
 
-    # 3. Сохраняем в БД
     save_request(user_id, user_text, reply)
 
-    # 4. Отправляем пользователю
     await message.answer(reply)
 
 # ============ FASTAPI ============
@@ -164,7 +183,7 @@ async def handle_message(message: types.Message):
 async def on_startup():
     init_db()
     await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-    logging.info("✅ Webhook установлен")
+    logging.info("✅ Webhook установлен и база инициализирована")
 
 @app.on_event("shutdown")
 async def on_shutdown():
