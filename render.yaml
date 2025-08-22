@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: triplea-travel-bot
+    name: tour-bot
     env: python
     plan: standard   # можно оставить starter, если нагрузка небольшая
     buildCommand: pip install -r requirements.txt
@@ -20,7 +20,7 @@ services:
         value: /webhook
 
   - type: worker
-    name: triplea-travel-collector
+    name: Collector
     env: python
     plan: starter   # можешь поднять до standard, если каналов будет много
     buildCommand: pip install -r requirements.txt
