@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -28,11 +27,9 @@ bot = Bot(token=TELEGRAM_TOKEN,
 dp = Dispatcher()
 app = FastAPI()
 
-
 # ============ БАЗА ДАННЫХ ============
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
-
 
 def init_db():
     """Создаём таблицу пользователей, если её нет"""
@@ -49,17 +46,18 @@ def init_db():
             """)
     logging.info("✅ Таблица users готова")
 
-
 def save_user(user: types.User):
     """Сохраняем пользователя в БД"""
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (user_id) DO NOTHING
-            """, (user.id, user.username, user.first_name, user.last_name))
-
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users (user_id, username, first_name, last_name)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO NOTHING
+                """, (user.id, user.username, user.first_name, user.last_name))
+    except Exception as e:
+        logging.error(f"❌ Ошибка сохранения пользователя: {e}")
 
 # ============ ХЕНДЛЕРЫ ============
 @dp.message(Command("start"))
@@ -72,18 +70,18 @@ async def cmd_start(message: types.Message):
     ])
 
     name = message.from_user.first_name or "друг"
+    username = f"(@{message.from_user.username})" if message.from_user.username else ""
+
     await message.answer(
-        f"👋 Привет, *{name}*!\n\n"
+        f"👋 Привет, *{name}* {username}!\n\n"
         "Я помогу тебе найти лучшие туры ✈️🏝\n\n"
         "Выбери, что хочешь сделать:",
         reply_markup=kb
     )
 
-
 @dp.callback_query(F.data == "find_tour")
 async def find_tour(callback: types.CallbackQuery):
     await callback.message.answer("✈️ Введи страну или город, куда хочешь поехать:")
-
 
 @dp.callback_query(F.data == "help")
 async def help_cmd(callback: types.CallbackQuery):
@@ -94,7 +92,6 @@ async def help_cmd(callback: types.CallbackQuery):
         "🔍 Найти тур – ввести запрос\n"
     )
 
-
 # ============ FASTAPI ============
 @app.on_event("startup")
 async def on_startup():
@@ -102,12 +99,10 @@ async def on_startup():
     await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
     logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}/webhook")
 
-
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.delete_webhook()
     logging.info("🛑 Webhook удалён, бот выключен")
-
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -118,7 +113,6 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         logging.error(f"Ошибка обработки апдейта: {e}")
         return JSONResponse(content={"ok": False})
-
 
 @app.get("/")
 async def root():
