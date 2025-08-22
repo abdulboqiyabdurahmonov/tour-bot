@@ -2,57 +2,45 @@ import os
 import logging
 import asyncio
 import httpx
+
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
 from aiogram.types import Message
+from aiogram.filters import Command
+from aiogram.client.default import DefaultBotProperties
 
-from psycopg import connect
-from psycopg.rows import dict_row
-
-# ============ ЛОГИ ============
+# ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
 
-# ============ ENV ============
+# ================= ENV =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
+if not OPENAI_API_KEY:
+    raise ValueError("❌ OPENAI_API_KEY не найден в переменных окружения!")
 
-bot = Bot(token=TELEGRAM_TOKEN, parse_mode="Markdown")
+# ================= БОТ =================
+bot = Bot(
+    token=TELEGRAM_TOKEN,
+    default=DefaultBotProperties(parse_mode="Markdown")
+)
 dp = Dispatcher()
 app = FastAPI()
 
-# ============ БД ============
-def get_conn():
-    return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
-
-def get_latest_tours(limit=5):
-    """Забираем последние туры из таблицы collector"""
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, title, price, details, source_url, created_at
-                FROM tours
-                ORDER BY created_at DESC
-                LIMIT %s;
-            """, (limit,))
-            return cur.fetchall()
-
-# ============ GPT ============
-GPT_SYSTEM_PROMPT = """
-Ты — дружелюбный и умный ассистент-консультант по путешествиям от TRIPLEA.
-Отвечай только в рамках тематики туров, стран, виз, перелётов, отелей, лайфхаков для туристов.
-Будь кратким, но полезным. Добавляй эмодзи. 
-Презентуй TRIPLEA как экосистему для умных путешествий.
-"""
-
-async def ask_gpt(user_message: str) -> str:
+# ================= GPT =================
+async def ask_gpt(prompt: str, premium: bool = False) -> str:
+    """
+    GPT-ответ строго в рамках тематики путешествий.
+    Бесплатный → без источника.
+    Премиум → со ссылкой на источник.
+    """
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={
@@ -62,70 +50,86 @@ async def ask_gpt(user_message: str) -> str:
                 json={
                     "model": "gpt-4o-mini",
                     "messages": [
-                        {"role": "system", "content": GPT_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_message},
+                        {"role": "system", "content": (
+                            "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
+                            "Твоя задача — вдохновлять, советовать направления, описывать отели, "
+                            "подсказывать цены, погоду, культурные особенности. "
+                            "Отвечай красиво, дружелюбно, но информативно. "
+                            "Избегай тем вне путешествий."
+                        )},
+                        {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.7,
                 },
             )
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
+
+        data = response.json()
+        answer = data["choices"][0]["message"]["content"].strip()
+
+        # Доп. логика для Free / Premium
+        if premium:
+            answer += "\n\n🔗 *Источник тура:* [Нажмите здесь](https://t.me/triplea_channel)"
+        else:
+            answer += "\n\n✨ Хочешь видеть прямые ссылки на источники туров? Подключи Premium доступ TripleA."
+
+        return answer
+
     except Exception as e:
         logging.error(f"Ошибка GPT: {e}")
-        return "😅 Упс, не удалось получить ответ. Попробуйте снова."
+        return "⚠️ Упс! Произошла ошибка при обращении к AI. Попробуйте ещё раз."
 
-# ============ HANDLERS ============
-PREMIUM_USERS = {123456789}  # TODO: вставь реальные ID премиум-пользователей
 
+# ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    text = (
-        f"👋 Привет, {message.from_user.first_name}!\n\n"
-        "Я — твой *умный гид по путешествиям* от TRIPLEA ✈️🌍\n"
-        "Спрашивай о турах, странах, визах, отелях или перелётах — и я помогу.\n\n"
-        "🔥 Также могу показать свежие туры прямо сейчас — просто напиши: *туры*"
+    intro = (
+        "🌍 Привет! Я — *TripleA Travel Bot* ✈️\n\n"
+        "Я помогу тебе найти *актуальные туры, советы по странам, лайфхаки путешественников*.\n\n"
+        "💡 Просто напиши, что тебя интересует:\n"
+        "— «Хочу тур в Турцию в сентябре»\n"
+        "— «Какая погода в Бали в октябре?»\n"
+        "— «Лучшие отели для двоих в Дубае»\n\n"
+        "✨ Доступно: вся информация по турам.\n"
+        "🔒 Premium: прямая ссылка на источник тура.\n\n"
+        "Что тебе подсказать? 😊"
     )
-    await message.answer(text)
+    await message.answer(intro)
 
-@dp.message(F.text.lower() == "туры")
-async def show_tours(message: Message):
-    tours = get_latest_tours()
-    if not tours:
-        await message.answer("🙃 Пока нет актуальных туров. Загляни позже.")
-        return
 
-    for t in tours:
-        base_info = f"🏖 *{t['title']}*\n💵 Цена: {t['price']} USD\n📌 {t['details']}"
-        if message.from_user.id in PREMIUM_USERS:
-            base_info += f"\n🔗 [Ссылка на источник]({t['source_url']})"
-        else:
-            base_info += "\n🔒 Ссылка доступна только *премиум* пользователям."
+@dp.message(F.text)
+async def handle_message(message: Message):
+    user_text = message.text.strip()
 
-        await message.answer(base_info)
+    # Логика Premium (например, VIP id-шники)
+    premium_users = {123456789, 987654321}  # список Telegram ID премиумов
+    is_premium = message.from_user.id in premium_users
 
-@dp.message()
-async def gpt_dialog(message: Message):
-    reply = await ask_gpt(message.text)
+    reply = await ask_gpt(user_text, premium=is_premium)
     await message.answer(reply)
 
-# ============ FASTAPI ============
+
+# ================= WEBHOOK =================
+@app.post("/webhook")
+async def webhook(request: Request):
+    try:
+        update = await request.json()
+        await dp.feed_webhook_update(bot, update)
+    except Exception as e:
+        logging.error(f"Webhook error: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    return JSONResponse({"status": "ok"})
+
+
 @app.on_event("startup")
 async def on_startup():
-    logging.info("📦 База данных инициализирована")
-    await bot.set_webhook(WEBHOOK_URL)
-    logging.info("✅ Webhook установлен")
+    if WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL)
+        logging.info(f"Webhook установлен: {WEBHOOK_URL}")
+    else:
+        logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await bot.delete_webhook()
-    logging.info("🛑 Webhook удалён, бот выключен")
-
-@app.post("/webhook")
-async def webhook_handler(request: Request):
-    update = await request.json()
-    await dp.feed_update(bot, update)
-    return {"status": "ok"}
-
-@app.get("/")
-async def root():
-    return {"message": "TRIPLEA Travel Bot is running 🚀"}
+    await bot.session.close()
