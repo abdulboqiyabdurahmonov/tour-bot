@@ -17,7 +17,9 @@ logging.basicConfig(level=logging.INFO)
 # ================= ENV =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_HOST = os.getenv("WEBHOOK_URL", "https://tour-bot-rxi8.onrender.com")  # домен
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")  # путь из Render
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
@@ -34,7 +36,7 @@ app = FastAPI()
 
 
 # ================= GPT =================
-async def ask_gpt(prompt: str, premium: bool = False) -> str:
+async def ask_gpt(prompt: str, premium: bool = False) -> list[str]:
     """
     GPT-ответ строго в рамках тематики путешествий.
     Бесплатный → без источника.
@@ -72,11 +74,10 @@ async def ask_gpt(prompt: str, premium: bool = False) -> str:
         else:
             answer += "\n\n✨ Хочешь видеть прямые ссылки на источники туров? Подключи Premium доступ TripleA."
 
-        # aiogram может ругаться на очень длинные сообщения
+        # Ограничиваем длину (Telegram лимит ~4096)
         MAX_LEN = 3800
         if len(answer) > MAX_LEN:
-            parts = [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
-            return parts
+            return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
         return [answer]
 
     except Exception as e:
@@ -121,7 +122,7 @@ async def root():
     return {"status": "ok", "message": "TripleA Travel Bot is running!"}
 
 
-@app.post("/webhook")
+@app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
     try:
         update = await request.json()
