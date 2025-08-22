@@ -41,8 +41,6 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
-            searches_today INT DEFAULT 0,
-            last_search_date DATE,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
@@ -60,54 +58,6 @@ def init_db():
             posted_at TIMESTAMP DEFAULT NOW()
         );
         """)
-
-async def increment_search(user_id: int):
-    """Счётчик бесплатных поисков (лимит 5/день)."""
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT searches_today, last_search_date FROM users WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        today = datetime.utcnow().date()
-
-        if not row:
-            cur.execute(
-                "INSERT INTO users (user_id, searches_today, last_search_date) VALUES (%s, %s, %s)",
-                (user_id, 1, today)
-            )
-            return 1
-
-        if row["last_search_date"] != today:
-            cur.execute("UPDATE users SET searches_today = 1, last_search_date = %s WHERE user_id = %s",
-                        (today, user_id))
-            return 1
-        else:
-            new_count = row["searches_today"] + 1
-            cur.execute("UPDATE users SET searches_today = %s WHERE user_id = %s",
-                        (new_count, user_id))
-            return new_count
-
-async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24, max_price: int = None):
-    sql = """
-        SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
-        FROM tours
-        WHERE posted_at >= NOW() - (%s || ' hours')::interval
-    """
-    params = [str(hours)]
-
-    if query:
-        sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
-        q = f"%{query.lower()}%"
-        params.extend([q, q])
-
-    if max_price:
-        sql += " AND price <= %s"
-        params.append(max_price)
-
-    sql += " ORDER BY posted_at DESC LIMIT %s"
-    params.append(limit)
-
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, params)
-        return cur.fetchall()
 
 # ============ МЕНЮ ============
 def main_menu():
@@ -177,18 +127,40 @@ def format_tour(t):
 # ============ ОБРАБОТЧИКИ ============
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    await message.answer(
-        "👋 Привет, путешественник!\n\n"
-        "✈️ Я помогу найти туры за последние 24 часа.\n\n"
-        "🔓 Бесплатно — до 5 поисков в день\n"
-        "💎 Премиум пока недоступен\n\n"
-        "Выбирай, и поехали 🌴",
-        reply_markup=main_menu(),
-    )
+    chat_id = message.chat.id
+
+    steps = [
+        "👋 Привет, путешественник!",
+        "✈️ Я — твой гид в мире свежих туров.",
+        "🧳 Найду для тебя лучшие варианты за последние 24 часа.",
+        "🌴 Готов начать?"
+    ]
+
+    msg = await bot.send_message(chat_id=chat_id, text=steps[0])
+    for step in steps[1:]:
+        await asyncio.sleep(2)
+        try:
+            await bot.edit_message_text(
+                text=step,
+                chat_id=chat_id,
+                message_id=msg.message_id
+            )
+        except Exception:
+            pass
+
+    await asyncio.sleep(2)
+    try:
+        await bot.edit_message_text(
+            text="✨ Добро пожаловать в *TripleA Travel Bot*!\n\nВыбирай действие ниже 👇",
+            chat_id=chat_id,
+            message_id=msg.message_id,
+            reply_markup=main_menu()
+        )
+    except Exception:
+        pass
 
 @dp.message()
 async def handle_plain_text(message: types.Message):
-    user_id = message.from_user.id
     query = message.text.strip()
     max_price = None
 
@@ -198,16 +170,6 @@ async def handle_plain_text(message: types.Message):
             max_price = int(parts[1].strip().split()[0])
         except Exception:
             pass
-
-    # проверка лимита бесплатных поисков
-    count = await increment_search(user_id)
-    if count > 5:
-        await message.answer(
-            "⚠️ Лимит бесплатных поисков (5/день) исчерпан.\n\n"
-            "🔑 Премиум пока недоступен.",
-            reply_markup=back_menu()
-        )
-        return
 
     progress_msg = await show_progress(message.chat.id, bot)
     if not progress_msg:
@@ -265,7 +227,7 @@ async def about(callback: types.CallbackQuery):
 async def price(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "💰 Подписка TripleA Travel:\n\n"
-        "• Бесплатно — до 5 поисков/день\n"
+        "• Бесплатно — без ограничений\n"
         "• Премиум — пока недоступен",
         reply_markup=back_menu(),
     )
@@ -317,3 +279,28 @@ async def health_check():
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "TripleA Travel Bot"}
+
+# ============ ПОИСК ТУРОВ ============
+async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24, max_price: int = None):
+    sql = """
+        SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
+        FROM tours
+        WHERE posted_at >= NOW() - (%s || ' hours')::interval
+    """
+    params = [str(hours)]
+
+    if query:
+        sql += " AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s)"
+        q = f"%{query.lower()}%"
+        params.extend([q, q])
+
+    if max_price:
+        sql += " AND price <= %s"
+        params.append(max_price)
+
+    sql += " ORDER BY posted_at DESC LIMIT %s"
+    params.append(limit)
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
