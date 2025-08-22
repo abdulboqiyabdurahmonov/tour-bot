@@ -7,10 +7,6 @@ from datetime import datetime, timedelta
 from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
-from psycopg.rows import dict_row
-
-from fastapi import FastAPI
-import uvicorn
 
 # ============ ЛОГИ ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -24,9 +20,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
     raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64 и CHANNELS в .env")
-
-# ============ FASTAPI ============
-app = FastAPI()
 
 # ============ БД ============
 def get_conn():
@@ -57,25 +50,6 @@ def save_tour(data: dict):
             logging.info(f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}")
         except Exception as e:
             logging.error(f"❌ Ошибка при сохранении тура: {e}")
-
-def fetch_tours(query: str):
-    """Поиск туров только за последние 24 часа"""
-    since = datetime.utcnow() - timedelta(hours=24)
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("""
-            SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
-            FROM tours
-            WHERE posted_at >= %s
-              AND (LOWER(country) LIKE %s OR LOWER(city) LIKE %s OR LOWER(description) LIKE %s)
-            ORDER BY posted_at DESC
-            LIMIT 10;
-        """, (
-            since,
-            f"%{query.lower()}%",
-            f"%{query.lower()}%",
-            f"%{query.lower()}%"
-        ))
-        return cur.fetchall()
 
 # ============ ПАРСЕР ============
 MONTHS = {
@@ -122,9 +96,9 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
     )
     price, currency = None, None
     if price_match:
-        if price_match.group(1) and price_match.group(2):  
+        if price_match.group(1) and price_match.group(2):
             price, currency = price_match.group(1), price_match.group(2)
-        elif price_match.group(3) and price_match.group(4):  
+        elif price_match.group(3) and price_match.group(4):
             price, currency = price_match.group(4), price_match.group(3)
 
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
@@ -146,7 +120,7 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         "dates": dates_match,
         "description": text[:500],
         "source_url": link,
-        "posted_at": posted_at.replace(tzinfo=None),  # ← реальная дата сообщения
+        "posted_at": posted_at.replace(tzinfo=None),
         "message_id": msg_id,
         "source_chat": chat
     }
@@ -160,7 +134,6 @@ async def collect_once(client: TelegramClient):
         async for msg in client.iter_messages(channel.strip(), limit=50):
             if not msg.text:
                 continue
-
             data = parse_post(
                 msg.text,
                 f"https://t.me/{channel.strip('@')}/{msg.id}",
@@ -182,17 +155,6 @@ async def run_collector():
             logging.error(f"❌ Ошибка в коллекторе: {e}")
         await asyncio.sleep(900)  # каждые 15 минут
 
-# ============ FASTAPI ENDPOINTS ============
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Collector is running"}
-
-@app.get("/search")
-async def search_tours(q: str):
-    return fetch_tours(q)
-
 # ============ MAIN ============
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_collector())
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    asyncio.run(run_collector())
