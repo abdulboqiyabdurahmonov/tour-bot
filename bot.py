@@ -53,15 +53,32 @@ def init_db():
         cur.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
-                user_id BIGINT,
+                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
                 query TEXT,
                 response TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-    logging.info("✅ Таблицы users и requests готовы")
+        # туры (добавил на будущее)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tours (
+                id SERIAL PRIMARY KEY,
+                country TEXT,
+                city TEXT,
+                hotel TEXT,
+                price NUMERIC,
+                currency TEXT,
+                dates TEXT,
+                description TEXT,
+                source_chat TEXT,
+                message_id BIGINT,
+                posted_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+    logging.info("✅ Таблицы users, requests и tours готовы")
 
 def save_user(user: types.User):
+    """Сохраняем пользователя в БД"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO users (user_id, username, first_name, last_name)
@@ -70,6 +87,7 @@ def save_user(user: types.User):
         """, (user.id, user.username, user.first_name, user.last_name))
 
 def save_request(user_id: int, query: str, response: str):
+    """Сохраняем запрос юзера и ответ GPT"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO requests (user_id, query, response)
