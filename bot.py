@@ -44,8 +44,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
-                first_name TEXT,
-                last_name TEXT,
+                full_name TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
@@ -59,7 +58,7 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-        # туры (добавил на будущее)
+        # туры (на будущее)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tours (
                 id SERIAL PRIMARY KEY,
@@ -79,12 +78,13 @@ def init_db():
 
 def save_user(user: types.User):
     """Сохраняем пользователя в БД"""
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO users (user_id, username, first_name, last_name)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO users (user_id, username, full_name)
+            VALUES (%s, %s, %s)
             ON CONFLICT (user_id) DO NOTHING;
-        """, (user.id, user.username, user.first_name, user.last_name))
+        """, (user.id, user.username, full_name))
 
 def save_request(user_id: int, query: str, response: str):
     """Сохраняем запрос юзера и ответ GPT"""
