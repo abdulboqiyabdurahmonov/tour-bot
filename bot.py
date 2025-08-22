@@ -37,68 +37,6 @@ openai.api_key = OPENAI_API_KEY
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
-def init_db():
-    with get_conn() as conn, conn.cursor() as cur:
-        # таблица users
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                is_premium BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-        """)
-
-        # проверка недостающих колонок
-        columns = [
-            ("premium_until", "TIMESTAMP"),
-            ("searches_today", "INT DEFAULT 0"),
-            ("last_search_date", "DATE")
-        ]
-        for name, col_type in columns:
-            cur.execute(f"""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'users' AND column_name = '{name}'
-                ) THEN
-                    ALTER TABLE users ADD COLUMN {name} {col_type};
-                END IF;
-            END$$;
-            """)
-
-        # таблица requests
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS requests (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
-                query TEXT,
-                response TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-        """)
-
-        # таблица tours (на будущее)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tours (
-                id SERIAL PRIMARY KEY,
-                country TEXT,
-                city TEXT,
-                hotel TEXT,
-                price NUMERIC,
-                currency TEXT,
-                dates TEXT,
-                description TEXT,
-                source_chat TEXT,
-                message_id BIGINT,
-                posted_at TIMESTAMP DEFAULT NOW()
-            );
-        """)
-
-    logging.info("✅ Таблицы users, requests и tours готовы")
-
 def save_user(user: types.User):
     """Сохраняем пользователя в БД"""
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
