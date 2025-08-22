@@ -14,5 +14,7 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
-      - key: WEBHOOK_URL
-        value: https://tour-bot-rxi8.onrender.com
+      - key: WEBHOOK_HOST
+        value: https://triplea-travel-bot.onrender.com
+      - key: WEBHOOK_PATH
+        value: /webhook
