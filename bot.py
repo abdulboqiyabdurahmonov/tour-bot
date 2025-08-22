@@ -1,7 +1,5 @@
 import os
 import logging
-from datetime import datetime
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -11,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 
 import openai
 
-# наши функции БД импортируем отсюда
+# наши функции работы с БД
 from db_init import init_db, save_user, save_request, search_tours
 
 # ============ ЛОГИ ============
@@ -19,11 +17,10 @@ logging.basicConfig(level=logging.INFO)
 
 # ============ ENV ============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_TOKEN or not DATABASE_URL or not WEBHOOK_URL or not OPENAI_API_KEY:
+if not TELEGRAM_TOKEN or not WEBHOOK_URL or not OPENAI_API_KEY:
     raise ValueError("❌ Проверь переменные окружения!")
 
 bot = Bot(
