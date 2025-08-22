@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import httpx
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -36,7 +37,6 @@ bot = Bot(
 dp = Dispatcher()
 app = FastAPI()
 
-
 # ================= API поиск =================
 async def fetch_tours(query: str):
     """Ищем туры за последние 24 часа через collector API"""
@@ -44,11 +44,27 @@ async def fetch_tours(query: str):
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.get(SEARCH_API, params={"q": query})
             if resp.status_code == 200:
-                return resp.json()
+                tours = resp.json()
+
+                # --- фильтруем по времени ---
+                fresh = []
+                cutoff = datetime.utcnow() - timedelta(hours=24)
+
+                for t in tours:
+                    ts = t.get("created_at")
+                    if ts:
+                        try:
+                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            if dt >= cutoff:
+                                fresh.append(t)
+                        except Exception:
+                            fresh.append(t)  # если не удалось распарсить дату — оставляем
+                    else:
+                        fresh.append(t)  # если даты нет — оставляем
+                return fresh
     except Exception as e:
         logging.error(f"Ошибка при fetch_tours: {e}")
     return []
-
 
 # ================= GPT =================
 async def ask_gpt(prompt: str, premium: bool = False) -> list[str]:
@@ -95,6 +111,14 @@ async def ask_gpt(prompt: str, premium: bool = False) -> list[str]:
         logging.error(f"Ошибка GPT: {e}")
         return ["⚠️ Упс! Ошибка при обращении к AI. Попробуй ещё раз."]
 
+# ================= ВСПОМОГАТЕЛЬНОЕ =================
+async def show_typing(message: Message, text: str = "🤔 Думаю... Ищу варианты для тебя"):
+    """Показываем, что бот думает"""
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+        await message.answer(text)
+    except Exception as e:
+        logging.error(f"Ошибка show_typing: {e}")
 
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
@@ -112,10 +136,12 @@ async def cmd_start(message: Message):
     )
     await message.answer(intro)
 
-
 @dp.message(F.text)
 async def handle_message(message: Message):
     user_text = message.text.strip()
+
+    # показываем "думаю..."
+    await show_typing(message)
 
     # 1) Пробуем найти свежие туры в базе
     tours = await fetch_tours(user_text)
@@ -139,12 +165,10 @@ async def handle_message(message: Message):
     for part in replies:
         await message.answer(part)
 
-
 # ================= WEBHOOK =================
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "TripleA Travel Bot is running!"}
-
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
@@ -158,7 +182,6 @@ async def webhook(request: Request):
 
     return JSONResponse({"status": "ok"})
 
-
 @app.on_event("startup")
 async def on_startup():
     if WEBHOOK_URL:
@@ -166,7 +189,6 @@ async def on_startup():
         logging.info(f"Webhook установлен: {WEBHOOK_URL}")
     else:
         logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
-
 
 @app.on_event("shutdown")
 async def on_shutdown():
