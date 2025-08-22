@@ -2,11 +2,15 @@ import os
 import re
 import logging
 import asyncio
-import base64
 from datetime import datetime, timedelta
+
 from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
+from psycopg.rows import dict_row
+
+from fastapi import FastAPI
+import uvicorn
 
 # ============ ЛОГИ ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -20,6 +24,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
     raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64 и CHANNELS в .env")
+
+# ============ FASTAPI ============
+app = FastAPI()
 
 # ============ БД ============
 def get_conn():
@@ -50,6 +57,18 @@ def save_tour(data: dict):
             logging.info(f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}")
         except Exception as e:
             logging.error(f"❌ Ошибка при сохранении тура: {e}")
+
+def fetch_tours(query: str):
+    """Поиск туров по запросу"""
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("""
+            SELECT country, city, hotel, price, currency, dates, description, source_url, posted_at
+            FROM tours
+            WHERE (LOWER(country) LIKE %s OR LOWER(city) LIKE %s OR LOWER(description) LIKE %s)
+            ORDER BY posted_at DESC
+            LIMIT 10;
+        """, (f"%{query.lower()}%", f"%{query.lower()}%", f"%{query.lower()}%"))
+        return cur.fetchall()
 
 # ============ ПАРСЕР ============
 MONTHS = {
@@ -156,7 +175,19 @@ async def run_collector():
             await collect_once(client)
         except Exception as e:
             logging.error(f"❌ Ошибка в коллекторе: {e}")
-        await asyncio.sleep(900)
+        await asyncio.sleep(900)  # каждые 15 минут
 
+# ============ FASTAPI ENDPOINTS ============
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Collector is running"}
+
+@app.get("/search")
+async def search_tours(q: str):
+    return fetch_tours(q)
+
+# ============ MAIN ============
 if __name__ == "__main__":
-    asyncio.run(run_collector())
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_collector())
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
