@@ -8,7 +8,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
+
         # 2. проверяем и добавляем нужные поля
         columns = [
             ("premium_until", "TIMESTAMP"),
@@ -17,8 +17,16 @@ def init_db():
         ]
 
         for name, col_type in columns:
-            try:
-                cur.execute(f"ALTER TABLE users ADD COLUMN {name} {col_type};")
-            except Exception:
-                # колонка уже есть — игнорируем ошибку
-                pass
+            cur.execute(f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'users'
+                      AND column_name = '{name}'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN {name} {col_type};
+                END IF;
+            END$$;
+            """)
