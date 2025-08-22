@@ -12,7 +12,7 @@ psycopg[binary]
 python-dotenv
 
 # --- GPT ---
-openai>=1.30.0
+openai==1.40.0
 httpx
 
 # --- Google Sheets ---
@@ -24,4 +24,6 @@ telethon
 
 # --- Утилиты ---
 pytz
+
+openai==1.40.0
 
