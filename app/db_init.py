@@ -4,12 +4,15 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
             is_premium BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
 
-        # 2. проверяем и добавляем нужные поля
+        # 2. проверяем и добавляем нужные поля (если их нет)
         columns = [
             ("premium_until", "TIMESTAMP"),
             ("searches_today", "INT DEFAULT 0"),
