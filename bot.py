@@ -43,7 +43,6 @@ def init_db():
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
-                username TEXT,
                 full_name TEXT
             );
         """)
@@ -78,10 +77,10 @@ def save_user(user: types.User):
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO users (user_id, username, full_name)
-            VALUES (%s, %s, %s)
+            INSERT INTO users (user_id, full_name)
+            VALUES (%s, %s)
             ON CONFLICT (user_id) DO NOTHING;
-        """, (user.id, user.username, full_name))
+        """, (user.id, full_name))
 
 def save_request(user_id: int, query: str, response: str):
     """Сохраняем запрос юзера и ответ GPT"""
