@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -42,6 +42,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
             is_premium BOOLEAN DEFAULT FALSE,
+            premium_until TIMESTAMP,
+            searches_today INT DEFAULT 0,
+            last_search_date DATE,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
@@ -63,12 +66,30 @@ def init_db():
 async def is_premium(user_id: int):
     init_db()
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
+        cur.execute("SELECT is_premium, premium_until FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row:
-            cur.execute("INSERT INTO users (user_id, is_premium) VALUES (%s, %s)", (user_id, False))
+            cur.execute("INSERT INTO users (user_id, is_premium, searches_today, last_search_date) VALUES (%s, %s, 0, CURRENT_DATE)", (user_id, False))
             return False
+        if row["premium_until"] and row["premium_until"] > datetime.utcnow():
+            return True
         return row["is_premium"]
+
+async def increment_search(user_id: int):
+    """Счётчик бесплатных поисков (лимит 5/день)."""
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT searches_today, last_search_date FROM users WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            return 0
+        today = datetime.utcnow().date()
+        if row["last_search_date"] != today:
+            cur.execute("UPDATE users SET searches_today = 1, last_search_date = %s WHERE user_id = %s", (today, user_id))
+            return 1
+        else:
+            new_count = row["searches_today"] + 1
+            cur.execute("UPDATE users SET searches_today = %s WHERE user_id = %s", (new_count, user_id))
+            return new_count
 
 async def get_latest_tours(query: str = None, limit: int = 5, hours: int = 24, max_price: int = None):
     sql = """
@@ -101,6 +122,7 @@ def main_menu():
         [InlineKeyboardButton(text="🔥 Дешёвые туры", callback_data="cheap_tours")],
         [InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")],
         [InlineKeyboardButton(text="💰 Прайс подписки", callback_data="price")],
+        [InlineKeyboardButton(text="🔑 Купить Премиум", callback_data="buy_premium")],
     ])
 
 def back_menu():
@@ -128,7 +150,7 @@ async def ask_gpt(prompt: str) -> str:
 async def show_progress(chat_id: int, bot: Bot):
     steps = ["🤔 Думаю...", "🔍 Ищу туры...", "📊 Сравниваю варианты...", "✅ Готово!"]
     try:
-        msg = await bot.send_message(chat_id, steps[0])
+        msg = await bot.send_message(chat_id=chat_id, text=steps[0])
     except TelegramForbiddenError:
         logging.warning(f"❌ Пользователь {chat_id} заблокировал бота")
         return None
@@ -139,7 +161,11 @@ async def show_progress(chat_id: int, bot: Bot):
     for step in steps[1:]:
         await asyncio.sleep(2)
         try:
-            await bot.edit_message_text(step, chat_id, msg.message_id)
+            await bot.edit_message_text(
+                text=step,
+                chat_id=chat_id,
+                message_id=msg.message_id
+            )
         except Exception:
             pass
     return msg
@@ -171,14 +197,29 @@ async def start_cmd(message: types.Message):
     await message.answer(
         "👋 Привет, путешественник!\n\n"
         "✈️ Я помогу найти туры за последние 24 часа.\n\n"
-        "🔓 Бесплатно — страна, цена, отель, даты\n"
-        "💎 Премиум — полный пакет: описание, ссылки, детали\n\n"
+        "🔓 Бесплатно — страна, цена, отель, даты (до 5 поисков/день)\n"
+        "💎 Премиум — полный пакет: описание, ссылки, детали + безлимитные поиски\n\n"
         "Выбирай, и поехали 🌴",
         reply_markup=main_menu(),
     )
 
+@dp.message(Command("premium"))
+async def premium_info(message: types.Message):
+    await message.answer(
+        "💎 *Премиум-подписка TripleA Travel*\n\n"
+        "✅ Безлимитные поиски\n"
+        "✅ Полные описания туров\n"
+        "✅ Ссылки и детали\n"
+        "✅ Доступ к архиву за 30 дней\n"
+        "✅ Уведомления о новых турах\n\n"
+        "Стоимость: скоро 🔜\n\n"
+        "Для подключения напиши менеджеру 👉 @triplea_manager",
+        reply_markup=back_menu()
+    )
+
 @dp.message()
 async def handle_plain_text(message: types.Message):
+    user_id = message.from_user.id
     query = message.text.strip()
     max_price = None
 
@@ -189,11 +230,26 @@ async def handle_plain_text(message: types.Message):
         except Exception:
             pass
 
+    premium = await is_premium(user_id)
+
+    # проверка лимита бесплатных поисков
+    if not premium:
+        count = await increment_search(user_id)
+        if count > 5:
+            await message.answer(
+                "⚠️ Лимит бесплатных поисков (5/день) исчерпан.\n\n"
+                "🔑 Подключи Премиум, чтобы искать неограниченно!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔑 Купить Премиум", callback_data="buy_premium")],
+                    [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")]
+                ])
+            )
+            return
+
     progress_msg = await show_progress(message.chat.id, bot)
-    if not progress_msg:  # пользователь заблокировал бота или ошибка
+    if not progress_msg:
         return
 
-    premium = await is_premium(message.from_user.id)
     tours = await get_latest_tours(query=query if not max_price else None, limit=5, hours=24, max_price=max_price)
 
     if not tours:
@@ -201,7 +257,12 @@ async def handle_plain_text(message: types.Message):
         gpt_suggestion = await ask_gpt(f"Подскажи альтернативные направления для запроса: {query}")
         reply += gpt_suggestion
         try:
-            await bot.edit_message_text(reply, message.chat.id, progress_msg.message_id, reply_markup=back_menu())
+            await bot.edit_message_text(
+                text=reply,
+                chat_id=message.chat.id,
+                message_id=progress_msg.message_id,
+                reply_markup=back_menu()
+            )
         except Exception:
             pass
         return
@@ -216,7 +277,12 @@ async def handle_plain_text(message: types.Message):
         text = "\n\n".join([format_tour_basic(t) for t in tours])
 
     try:
-        await bot.edit_message_text(header + text, message.chat.id, progress_msg.message_id, reply_markup=back_menu())
+        await bot.edit_message_text(
+            text=header + text,
+            chat_id=message.chat.id,
+            message_id=progress_msg.message_id,
+            reply_markup=back_menu()
+        )
     except Exception as e:
         logging.error(f"Ошибка при обновлении сообщения: {e}")
 
@@ -239,10 +305,18 @@ async def about(callback: types.CallbackQuery):
 async def price(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "💰 Подписка TripleA Travel:\n\n"
-        "• Бесплатно — страна, цена, даты, отель (ограничено)\n"
-        "• Премиум — полная информация: описание, ссылки, детали\n\n"
+        "• Бесплатно — страна, цена, даты, отель (до 5 поисков/день)\n"
+        "• Премиум — полная информация: описание, ссылки, детали, архив, уведомления\n\n"
         "Премиум скоро 🔑",
         reply_markup=back_menu(),
+    )
+
+@dp.callback_query(F.data == "buy_premium")
+async def buy_premium(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🔑 Чтобы подключить Премиум, напиши менеджеру 👉 @triplea_manager\n\n"
+        "Скоро появится автоматическая оплата 💳",
+        reply_markup=back_menu()
     )
 
 @dp.callback_query(F.data == "find_tour")
@@ -288,3 +362,7 @@ async def webhook_handler(request: Request):
 @app.get("/healthz")
 async def health_check():
     return {"status": "ok"}
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "TripleA Travel Bot"}
