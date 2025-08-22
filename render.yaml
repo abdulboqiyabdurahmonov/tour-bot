@@ -5,7 +5,7 @@ services:
     plan: standard   # можно оставить starter, если нагрузка небольшая
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
-    autoDeploy: false   # отключает авто-деплой при каждом пуше
+    autoDeploy: false
     healthCheckPath: /
     envVars:
       - key: TELEGRAM_TOKEN
@@ -18,3 +18,22 @@ services:
         value: https://triplea-travel-bot.onrender.com
       - key: WEBHOOK_PATH
         value: /webhook
+
+  - type: worker
+    name: triplea-travel-collector
+    env: python
+    plan: starter   # можешь поднять до standard, если каналов будет много
+    buildCommand: pip install -r requirements.txt
+    startCommand: python collector.py
+    autoDeploy: false
+    envVars:
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      - key: TG_SESSION_B64
+        sync: false
+      - key: CHANNELS
+        value: "@tour1,@tour2,@tour3"
+      - key: DATABASE_URL
+        sync: false
