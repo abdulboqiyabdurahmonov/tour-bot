@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import httpx
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
@@ -12,13 +11,16 @@ from aiogram.types import Message
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
+from psycopg import connect
+from psycopg.rows import dict_row
+
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
 
 # ================= ENV =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SEARCH_API = os.getenv("SEARCH_API", "postgresql://tourbot_db_user:O6oNms2X7u3wMhVUFsTuj06v4qsto3Fo@dpg-d2hg1eqdbo4c73b11glg-a.oregon-postgres.render.com/tourbot_db")
+DATABASE_URL = os.getenv("DATABASE_URL")  # теперь вместо SEARCH_API
 
 WEBHOOK_HOST = os.getenv("WEBHOOK_URL", "https://tour-bot-rxi8.onrender.com")  # домен Render
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
@@ -28,6 +30,8 @@ if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
 if not OPENAI_API_KEY:
     raise ValueError("❌ OPENAI_API_KEY не найден в переменных окружения!")
+if not DATABASE_URL:
+    raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
 
 # ================= БОТ =================
 bot = Bot(
@@ -37,36 +41,34 @@ bot = Bot(
 dp = Dispatcher()
 app = FastAPI()
 
-# ================= API поиск =================
+# ================= БАЗА ДАННЫХ =================
 async def fetch_tours(query: str):
-    """Ищем туры за последние 24 часа через collector API"""
+    """Ищем туры за последние 24 часа напрямую из Postgres"""
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(SEARCH_API, params={"q": query})
-            if resp.status_code == 200:
-                tours = resp.json()
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        sql = """
+            SELECT country, city, hotel, price, currency, dates, source_url, created_at
+            FROM tours
+            WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
+              AND created_at >= %s
+            ORDER BY created_at DESC
+            LIMIT 10
+        """
+        params = [f"%{query}%", f"%{query}%", f"%{query}%", cutoff]
 
-                # --- фильтруем по времени ---
-                fresh = []
-                cutoff = datetime.utcnow() - timedelta(hours=24)
+        with connect(DATABASE_URL, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
 
-                for t in tours:
-                    ts = t.get("created_at")
-                    if ts:
-                        try:
-                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                            if dt >= cutoff:
-                                fresh.append(t)
-                        except Exception:
-                            fresh.append(t)  # если не удалось распарсить дату — оставляем
-                    else:
-                        fresh.append(t)  # если даты нет — оставляем
-                return fresh
+        return rows
     except Exception as e:
         logging.error(f"Ошибка при fetch_tours: {e}")
-    return []
+        return []
 
 # ================= GPT =================
+import httpx
+
 async def ask_gpt(prompt: str, premium: bool = False) -> list[str]:
     """GPT отвечает по теме путешествий"""
     try:
