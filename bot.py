@@ -32,6 +32,7 @@ bot = Bot(
 dp = Dispatcher()
 app = FastAPI()
 
+
 # ================= GPT =================
 async def ask_gpt(prompt: str, premium: bool = False) -> str:
     """
@@ -52,10 +53,9 @@ async def ask_gpt(prompt: str, premium: bool = False) -> str:
                     "messages": [
                         {"role": "system", "content": (
                             "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
-                            "Твоя задача — вдохновлять, советовать направления, описывать отели, "
-                            "подсказывать цены, погоду, культурные особенности. "
                             "Отвечай красиво, дружелюбно, но информативно. "
-                            "Избегай тем вне путешествий."
+                            "Советы, туры, отели, лайфхаки, погода, цены, культура. "
+                            "Не уходи от тематики путешествий."
                         )},
                         {"role": "user", "content": prompt},
                     ],
@@ -66,17 +66,22 @@ async def ask_gpt(prompt: str, premium: bool = False) -> str:
         data = response.json()
         answer = data["choices"][0]["message"]["content"].strip()
 
-        # Доп. логика для Free / Premium
+        # Доп. логика Free / Premium
         if premium:
-            answer += "\n\n🔗 *Источник тура:* [Нажмите здесь](https://t.me/triplea_channel)"
+            answer += "\n\n🔗 *Источник тура:* [Перейти](https://t.me/triplea_channel)"
         else:
             answer += "\n\n✨ Хочешь видеть прямые ссылки на источники туров? Подключи Premium доступ TripleA."
 
-        return answer
+        # aiogram может ругаться на очень длинные сообщения
+        MAX_LEN = 3800
+        if len(answer) > MAX_LEN:
+            parts = [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
+            return parts
+        return [answer]
 
     except Exception as e:
         logging.error(f"Ошибка GPT: {e}")
-        return "⚠️ Упс! Произошла ошибка при обращении к AI. Попробуйте ещё раз."
+        return ["⚠️ Упс! Произошла ошибка при обращении к AI. Попробуйте ещё раз."]
 
 
 # ================= ХЕНДЛЕРЫ =================
@@ -86,11 +91,11 @@ async def cmd_start(message: Message):
         "🌍 Привет! Я — *TripleA Travel Bot* ✈️\n\n"
         "Я помогу тебе найти *актуальные туры, советы по странам, лайфхаки путешественников*.\n\n"
         "💡 Просто напиши, что тебя интересует:\n"
-        "— «Хочу тур в Турцию в сентябре»\n"
-        "— «Какая погода в Бали в октябре?»\n"
-        "— «Лучшие отели для двоих в Дубае»\n\n"
-        "✨ Доступно: вся информация по турам.\n"
-        "🔒 Premium: прямая ссылка на источник тура.\n\n"
+        "• Тур в Турцию в сентябре\n"
+        "• Какая погода в Бали в октябре\n"
+        "• Лучшие отели для двоих в Дубае\n\n"
+        "✨ Доступно: вся информация по турам\n"
+        "🔒 Premium: прямая ссылка на источник тура\n\n"
         "Что тебе подсказать? 😊"
     )
     await message.answer(intro)
@@ -101,19 +106,27 @@ async def handle_message(message: Message):
     user_text = message.text.strip()
 
     # Логика Premium (например, VIP id-шники)
-    premium_users = {123456789, 987654321}  # список Telegram ID премиумов
+    premium_users = {123456789, 987654321}
     is_premium = message.from_user.id in premium_users
 
-    reply = await ask_gpt(user_text, premium=is_premium)
-    await message.answer(reply)
+    replies = await ask_gpt(user_text, premium=is_premium)
+    for part in replies:
+        await message.answer(part)
 
 
 # ================= WEBHOOK =================
+@app.get("/")
+async def root():
+    """Эндпоинт для health-check Render"""
+    return {"status": "ok", "message": "TripleA Travel Bot is running!"}
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         update = await request.json()
         await dp.feed_webhook_update(bot, update)
+        await asyncio.sleep(0)  # не блокируем event loop
     except Exception as e:
         logging.error(f"Webhook error: {e}")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
