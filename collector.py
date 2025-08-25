@@ -127,12 +127,16 @@ def guess_country(city: str | None):
     if not city:
         return None
     mapping = {
-        "Нячанг": "Вьетнам",
-        "Анталья": "Турция",
-        "Пхукет": "Таиланд",
-        "Дубай": "ОАЭ",
-        "Бали": "Индонезия",
-        "Тбилиси": "Грузия",
+    "Нячанг": "Вьетнам",
+    "Анталья": "Турция",
+    "Пхукет": "Таиланд",
+    "Паттайя": "Таиланд",
+    "Самуи": "Таиланд",
+    "Краби": "Таиланд",
+    "Бангкок": "Таиланд",
+    "Дубай": "ОАЭ",
+    "Бали": "Индонезия",
+    "Тбилиси": "Грузия",
     }
     return mapping.get(city, None)
 
@@ -151,7 +155,7 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
             price, currency = price_match.group(4), price_match.group(3)
 
     # город
-    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
+    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси|Паттайя|Самуи|Краби|Бангкок)", text, re.I)
     city = city_match.group(1) if city_match else None
     if not city:
         m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", text)
