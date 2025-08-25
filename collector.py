@@ -30,8 +30,8 @@ def save_tour(data: dict):
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("""
-                INSERT INTO tours 
-                (country, city, hotel, price, currency, dates, description, source_chat, message_id, source_url, posted_at)
+                INSERT INTO tours
+                (country, city, hotel, price, currency, dates, description, source_url, posted_at, message_id, source_chat)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (message_id, source_chat) DO NOTHING
                 RETURNING id;
@@ -43,16 +43,20 @@ def save_tour(data: dict):
                 data.get("currency"),
                 data.get("dates"),
                 data.get("description"),
-                data.get("source_chat"),
-                data.get("message_id"),
                 data.get("source_url"),
                 data.get("posted_at"),
+                data.get("message_id"),
+                data.get("source_chat"),
             ))
             inserted = cur.fetchone()
             if inserted:
-                logging.info(f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}")
+                logging.info(
+                    f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}"
+                )
             else:
-                logging.info(f"⚠️ Дубликат: {data.get('city')} | {data.get('price')} {data.get('currency')} (msg_id={data.get('message_id')})")
+                logging.info(
+                    f"⚠️ Дубликат тура: {data.get('city')} | {data.get('price')} {data.get('currency')} (message_id={data.get('message_id')})"
+                )
         except Exception as e:
             logging.error(f"❌ Ошибка при сохранении тура: {e}")
 
@@ -63,53 +67,80 @@ MONTHS = {
     "окт": "10", "ноя": "11", "дек": "12"
 }
 
-def parse_dates(text: str):
-    """Извлекаем даты из текста"""
-    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?", text)
+def _norm_year(y: str | None) -> int:
+    if not y:
+        return datetime.now().year
+    y = int(y)
+    if y < 100:
+        y += 2000 if y < 70 else 1900
+    return y
+
+def _mk_date(d, m, y) -> str:
+    return f"{int(d):02d}.{int(m):02d}.{_norm_year(y):04d}"
+
+def parse_dates(text: str) -> str | None:
+    text = text.strip()
+
+    # dd.mm(.yy|yyyy)?–dd.mm(.yy|yyyy)?
+    m = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", text)
     if m:
         d1, m1, y1, d2, m2, y2 = m.groups()
-        return f"{d1.zfill(2)}.{m1.zfill(2)}.{y1 or datetime.now().year}–{d2.zfill(2)}.{m2.zfill(2)}.{y2 or datetime.now().year}"
+        return f"{_mk_date(d1, m1, y1)}–{_mk_date(d2, m2, y2 or y1)}"
 
+    # dd–dd mon
     m = re.search(r"(\d{1,2})\s?[–\-]\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
     if m:
         d1, d2, mon = m.groups()
-        return f"{d1.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}–{d2.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}"
+        mm = MONTHS[mon[:3].lower()]
+        y = datetime.now().year
+        return f"{_mk_date(d1, mm, y)}–{_mk_date(d2, mm, y)}"
 
+    # с d по d mon
     m = re.search(r"с\s?(\d{1,2})\s?по\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
     if m:
         d1, d2, mon = m.groups()
-        return f"{d1.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}–{d2.zfill(2)}.{MONTHS[mon[:3].lower()]}.{datetime.now().year}"
+        mm = MONTHS[mon[:3].lower()]
+        y = datetime.now().year
+        return f"{_mk_date(d1, mm, y)}–{_mk_date(d2, mm, y)}"
 
     return None
 
-def guess_country(city: str):
+def clean_text_basic(s: str | None) -> str | None:
+    if not s:
+        return s
+    s = re.sub(r'[*_`]+', '', s)
+    s = s.replace('|', ' ')
+    s = re.sub(r'\s{2,}', ' ', s)
+    return s.strip()
+
+def strip_trailing_price_from_hotel(s: str | None) -> str | None:
+    if not s:
+        return s
+    return re.sub(
+        r'[\s–-]*(?:от\s*)?\d[\d\s.,]*\s*(?:USD|EUR|UZS|RUB|\$|€)\b.*$',
+        '',
+        s,
+        flags=re.I
+    ).strip()
+
+def guess_country(city: str | None):
+    if not city:
+        return None
     mapping = {
         "Нячанг": "Вьетнам",
         "Анталья": "Турция",
         "Пхукет": "Таиланд",
         "Дубай": "ОАЭ",
         "Бали": "Индонезия",
-        "Тбилиси": "Грузия"
+        "Тбилиси": "Грузия",
     }
     return mapping.get(city, None)
 
-def _norm_currency(s: str | None):
-    if not s:
-        return None
-    s = s.strip().upper()
-    repl = {
-        "СУМ": "UZS",
-        "СОМ": "UZS",
-        "РУБ": "RUB",
-        "$": "USD",
-        "€": "EUR"
-    }
-    return repl.get(s, s)
-
 def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
-    """Разбор поста"""
+    """Разбор поста в структуру тура"""
+    # цена
     price_match = re.search(
-        r"(?:(\d{2,7})(?:\s?)(USD|EUR|СУМ|РУБ|сум|руб|\$|€))|(?:(USD|EUR|\$|€)\s?(\d{2,7}))",
+        r"(?:(\d{2,6})(?:\s?)(USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€))|(?:(USD|EUR|UZS|RUB|\$|€)\s?(\d{2,6}))",
         text, re.I
     )
     price, currency = None, None
@@ -119,64 +150,59 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         elif price_match.group(3) and price_match.group(4):
             price, currency = price_match.group(4), price_match.group(3)
 
+    # город
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
     city = city_match.group(1) if city_match else None
-
     if not city:
         m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", text)
         city = m.group(1) if m else None
 
+    # отель
     hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)[^\n]*", text, re.I)
-    dates_match = parse_dates(text)
+    hotel = hotel_match.group(0).strip() if hotel_match else None
+    hotel = strip_trailing_price_from_hotel(hotel)
+    hotel = clean_text_basic(hotel)
 
-    # нормализация
-    cur = _norm_currency(currency)
-    try:
-        prc = float(price) if price else None
-    except Exception:
-        prc = None
+    # даты
+    dates_norm = parse_dates(text)
 
     return {
         "country": guess_country(city) if city else None,
         "city": city,
-        "hotel": hotel_match.group(0).strip() if hotel_match else None,
-        "price": prc,
-        "currency": cur,
-        "dates": dates_match,
-        "description": (text or "")[:500],
+        "hotel": hotel,
+        "price": float(price) if price else None,
+        "currency": (currency.upper() if currency else None),
+        "dates": dates_norm,
+        "description": text[:500],
         "source_url": link,
-        "posted_at": posted_at.replace(tzinfo=None) if posted_at else datetime.utcnow(),
+        "posted_at": posted_at.replace(tzinfo=None),
         "message_id": msg_id,
-        "source_chat": chat
+        "source_chat": chat.strip("@"),
     }
 
 # ============ КОЛЛЕКТОР ============
 async def collect_once(client: TelegramClient):
     for channel in CHANNELS:
-        if not channel.strip():
+        channel = channel.strip()
+        if not channel:
             continue
-        ch = channel.strip()
-        logging.info(f"📥 Читаю канал: {ch}")
-        async for msg in client.iter_messages(ch, limit=50):
+        logging.info(f"📥 Читаю канал: {channel}")
+        async for msg in client.iter_messages(channel, limit=50):
             if not msg.text:
                 continue
             data = parse_post(
                 msg.text,
-                f"https://t.me/{ch.strip('@')}/{msg.id}",
+                f"https://t.me/{channel.strip('@')}/{msg.id}",
                 msg.id,
-                ch.strip('@'),
+                channel,
                 msg.date
             )
-            # отбрасываем слишком «пустые» посты
-            if not any([data.get("city"), data.get("hotel"), data.get("price"), data.get("dates")]):
-                continue
             save_tour(data)
 
 async def run_collector():
     client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
     await client.start()
     logging.info("✅ Collector запущен")
-
     while True:
         try:
             await collect_once(client)
@@ -184,6 +210,5 @@ async def run_collector():
             logging.error(f"❌ Ошибка в коллекторе: {e}")
         await asyncio.sleep(900)  # каждые 15 минут
 
-# ============ MAIN ============
 if __name__ == "__main__":
     asyncio.run(run_collector())
