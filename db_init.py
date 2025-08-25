@@ -45,7 +45,6 @@ def init_db():
                 message_id BIGINT,
                 source_url TEXT,
                 posted_at TIMESTAMP DEFAULT NOW(),
-                created_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(message_id, source_chat)
             );
         """)
@@ -75,7 +74,7 @@ def search_tours(query: str):
         cur.execute("""
             SELECT * FROM tours
             WHERE country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s
-            ORDER BY created_at DESC
+            ORDER BY posted_at DESC
             LIMIT 5;
         """, (f"%{query}%", f"%{query}%", f"%{query}%"))
         return cur.fetchall()
