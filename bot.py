@@ -108,10 +108,17 @@ def fmt_price(price, currency) -> str:
         p = int(float(price))
     except Exception:
         return escape(f"{price} {currency or ''}".strip())
-    cur = (currency or "").upper()
-    if cur == "СУМ":
-        cur = "сум"
-    return escape(f"{p:,} {cur}".replace(",", " "))
+
+    cur = (currency or "").strip()
+    cur_up = cur.upper()
+    # нормализация символов
+    if cur_up in {"$", "US$", "USD$"}:
+        cur_up = "USD"
+    elif cur_up in {"€", "EUR€"}:
+        cur_up = "EUR"
+    elif cur_up == "СУМ":
+        cur_up = "сум"  # так и оставляем строчными по-русски
+    return escape(f"{p:,} {cur_up}".replace(",", " "))
 
 def safe(s: Optional[str]) -> str:
     return escape(s or "—")
@@ -126,14 +133,14 @@ def clean_text_basic(s: Optional[str]) -> str:
     return s.strip()
 
 def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
-    """Удаляет в конце строки варианты '– от 767 USD', '— 1200$', с неразрывными пробелами и т.п."""
+    """Срезает '– от 767 USD', ' - 1207$ 🥂' и т.п. в конце строки."""
     if not s:
         return s
     return re.sub(
         r'[\s\u00A0–—-]*'               # тире/пробелы/nbsp
         r'(?:от\s*)?'                   # опционально 'от'
-        r'\d[\d\s\u00A0.,]*'            # число с пробелами/точками/запятыми
-        r'\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€)\b.*$',  # валюта и всё до конца
+        r'\d[\d\s\u00A0.,]*'            # число
+        r'\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€).*$',  # валюта и ЛЮБОЙ хвост
         '',
         s,
         flags=re.I
