@@ -11,12 +11,15 @@ def get_conn():
 def init_db():
     """Создание таблиц, если их нет"""
     with get_conn() as conn, conn.cursor() as cur:
+        # Таблица пользователей
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 full_name TEXT
             );
         """)
+
+        # Таблица запросов к GPT
         cur.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -26,6 +29,8 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
+
+        # Таблица туров
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tours (
                 id SERIAL PRIMARY KEY,
@@ -38,7 +43,10 @@ def init_db():
                 description TEXT,
                 source_chat TEXT,
                 message_id BIGINT,
-                posted_at TIMESTAMP DEFAULT NOW()
+                source_url TEXT,
+                posted_at TIMESTAMP DEFAULT NOW(),
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(message_id, source_chat)
             );
         """)
     logging.info("📦 База данных инициализирована")
@@ -67,7 +75,7 @@ def search_tours(query: str):
         cur.execute("""
             SELECT * FROM tours
             WHERE country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s
-            ORDER BY posted_at DESC
+            ORDER BY created_at DESC
             LIMIT 5;
         """, (f"%{query}%", f"%{query}%", f"%{query}%"))
         return cur.fetchall()
