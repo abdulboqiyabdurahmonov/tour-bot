@@ -141,10 +141,10 @@ def guess_country(city: str | None):
     return mapping.get(city, None)
 
 def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
-    """Разбор поста в структуру тура"""
-    # цена
+    """Разбор поста"""
+    # цена + валюта
     price_match = re.search(
-        r"(?:(\d{2,6})(?:\s?)(USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€))|(?:(USD|EUR|UZS|RUB|\$|€)\s?(\d{2,6}))",
+        r'(?:(\d{2,6})(?:\s?)(USD|EUR|СУМ|сум|руб|\$|€))|(?:(USD|EUR|\$|€)\s?(\d{2,6}))',
         text, re.I
     )
     price, currency = None, None
@@ -154,34 +154,59 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         elif price_match.group(3) and price_match.group(4):
             price, currency = price_match.group(4), price_match.group(3)
 
-    # город
-    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси|Паттайя|Самуи|Краби|Бангкок)", text, re.I)
+    # 🔽🔽🔽 ВСТАВЛЯЕМ СЮДА НОРМАЛИЗАЦИЮ ВАЛЮТЫ 🔽🔽🔽
+    if currency:
+        cu = currency.strip().upper()
+        if cu in {"$", "US$", "USD$"}:
+            currency = "USD"
+        elif cu in {"€", "EUR€"}:
+            currency = "EUR"
+        elif cu in {"UZS", "СУМ", "СУМЫ", "СУМ."}:
+            currency = "UZS"
+        elif cu in {"RUB", "РУБ", "РУБ."}:
+            currency = "RUB"
+        else:
+            currency = cu
+    else:
+        # Лёгкая эвристика, если валюта не поймалась
+        low = text.lower()
+        if "сум" in low or "uzs" in low:
+            currency = "UZS"
+        elif "eur" in low or "€" in low:
+            currency = "EUR"
+        elif "usd" in low or "$" in low:
+            currency = "USD"
+    # 🔼🔼🔼 ДО СЮДА 🔼🔼🔼
+
+    # город/отель/даты как было
+    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
     city = city_match.group(1) if city_match else None
+
     if not city:
         m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", text)
         city = m.group(1) if m else None
 
-    # отель
-    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)[^\n]*", text, re.I)
-    hotel = hotel_match.group(0).strip() if hotel_match else None
-    hotel = strip_trailing_price_from_hotel(hotel)
-    hotel = clean_text_basic(hotel)
+    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
+    dates_match = parse_dates(text)
 
-    # даты
-    dates_norm = parse_dates(text)
+    # приводим цену к числу (если есть)
+    try:
+        price = float(price) if price else None
+    except Exception:
+        price = None
 
     return {
         "country": guess_country(city) if city else None,
         "city": city,
-        "hotel": hotel,
-        "price": float(price) if price else None,
-        "currency": (currency.upper() if currency else None),
-        "dates": dates_norm,
+        "hotel": hotel_match.group(0) if hotel_match else None,
+        "price": price,
+        "currency": currency,   # <— уже нормализованная
+        "dates": dates_match,
         "description": text[:500],
         "source_url": link,
         "posted_at": posted_at.replace(tzinfo=None),
         "message_id": msg_id,
-        "source_chat": chat.strip("@"),
+        "source_chat": chat
     }
 
 # ============ КОЛЛЕКТОР ============
