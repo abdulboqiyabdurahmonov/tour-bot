@@ -43,10 +43,10 @@ app = FastAPI()
 
 # ================= БАЗА ДАННЫХ =================
 async def fetch_tours(query: str):
-    """Ищем туры за последние 24 часа напрямую из Postgres"""
+    """Ищем туры: сначала за последние 24 часа, если пусто — берём последние вообще"""
     try:
         cutoff = datetime.utcnow() - timedelta(hours=24)
-        sql = """
+        sql_recent = """
             SELECT country, city, hotel, price, currency, dates, source_url, posted_at, created_at
             FROM tours
             WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
@@ -58,8 +58,20 @@ async def fetch_tours(query: str):
 
         with connect(DATABASE_URL, autocommit=True, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, params)
+                cur.execute(sql_recent, params)
                 rows = cur.fetchall()
+
+                # Если свежих туров нет → берём последние вообще
+                if not rows:
+                    sql_fallback = """
+                        SELECT country, city, hotel, price, currency, dates, source_url, posted_at, created_at
+                        FROM tours
+                        WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                    """
+                    cur.execute(sql_fallback, params[:3])  # cutoff не нужен
+                    rows = cur.fetchall()
 
         return rows
     except Exception as e:
