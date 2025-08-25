@@ -1,21 +1,33 @@
 import os
+import re
 import logging
 import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
 from html import escape
+from collections import defaultdict
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
 from psycopg import connect
 from psycopg.rows import dict_row
+
+import httpx
+from db_init import init_db  # используем твою инициализацию БД
 
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
@@ -41,30 +53,48 @@ bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 app = FastAPI()
 
-# ================= УТИЛЫ БД =================
+# ================= БД =================
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
-# ================= КЛАВЫ =================
+# ================= КЛАВИАТУРЫ =================
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🎒 Найти туры"), KeyboardButton(text="🤖 Спросить GPT")],
-        [KeyboardButton(text="🔔 Подписка"), KeyboardButton(text="⚙️ Настройки")]
+        [KeyboardButton(text="🔔 Подписка"), KeyboardButton(text="⚙️ Настройки")],
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
 )
 
 def filters_inline_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 Актуальные 72ч", callback_data="tours_recent")],
-        [InlineKeyboardButton(text="🌴 Турция", callback_data="country:Турция"),
-         InlineKeyboardButton(text="🇦🇪 ОАЭ", callback_data="country:ОАЭ")],
-        [InlineKeyboardButton(text="🇹🇭 Таиланд", callback_data="country:Таиланд"),
-         InlineKeyboardButton(text="🇻🇳 Вьетнам", callback_data="country:Вьетнам")],
-        [InlineKeyboardButton(text="➕ Ещё фильтры скоро", callback_data="noop")]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔥 Актуальные 72ч", callback_data="tours_recent")],
+            [
+                InlineKeyboardButton(text="🌴 Турция", callback_data="country:Турция"),
+                InlineKeyboardButton(text="🇦🇪 ОАЭ", callback_data="country:ОАЭ"),
+            ],
+            [
+                InlineKeyboardButton(text="🇹🇭 Таиланд", callback_data="country:Таиланд"),
+                InlineKeyboardButton(text="🇻🇳 Вьетнам", callback_data="country:Вьетнам"),
+            ],
+            [InlineKeyboardButton(text="➕ Ещё фильтры скоро", callback_data="noop")],
+        ]
+    )
 
-# ================= ПОМОЩНИКИ =================
+def sources_kb(rows: List[dict], back_to: str = "back_filters") -> InlineKeyboardMarkup:
+    """Кнопки-источники и Назад"""
+    buttons = []
+    idx = 1
+    for t in rows[:8]:  # компактно
+        url = (t.get("source_url") or "").strip()
+        if url:
+            buttons.append([InlineKeyboardButton(text=f"🔗 Открыть {idx}", url=url)])
+            idx += 1
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ================= ПОМОЩНИКИ ВЫВОДА =================
 async def show_typing(message: Message, text: str = "🤔 Думаю... Ищу варианты для тебя"):
     try:
         await bot.send_chat_action(message.chat.id, "typing")
@@ -72,7 +102,6 @@ async def show_typing(message: Message, text: str = "🤔 Думаю... Ищу �
     except Exception as e:
         logging.error(f"Ошибка show_typing: {e}")
 
-# --- HTML-safe helpers ---
 def fmt_price(price, currency) -> str:
     if price is None:
         return "—"
@@ -88,19 +117,40 @@ def fmt_price(price, currency) -> str:
 def safe(s: Optional[str]) -> str:
     return escape(s or "—")
 
-from html import escape
+def clean_text_basic(s: Optional[str]) -> str:
+    """Убирает markdown-мусор и лишние пробелы"""
+    if not s:
+        return "—"
+    s = re.sub(r'[*_`]+', '', s)
+    s = s.replace('|', ' ')
+    s = re.sub(r'\s{2,}', ' ', s)
+    return s.strip()
 
-def compile_tours_text(rows: list[dict], header: str) -> str:
+def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
+    """Срезает хвост с ценой в отеле, чтобы не дублировать «💵»"""
+    if not s:
+        return s
+    return re.sub(
+        r'[\s–-]*(?:от\s*)?\d[\d\s.,]*\s*(?:USD|EUR|UZS|RUB|\$|€)\b.*$',
+        '',
+        s,
+        flags=re.I
+    ).strip()
+
+def compile_tours_text(rows: List[dict], header: str) -> str:
     lines = []
     for t in rows:
         posted = t.get("posted_at")
-        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}\n" if isinstance(posted, datetime) else ""
-        price_str = fmt_price(t.get('price'), t.get('currency'))
+        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%М')}\n" if isinstance(posted, datetime) else ""
+        price_str = fmt_price(t.get("price"), t.get("currency"))
         src = (t.get("source_url") or "").strip()
+
+        hotel_raw = t.get("hotel")
+        hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_raw))
 
         card = (
             f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}\n"
-            f"🏨 {safe(t.get('hotel'))}\n"
+            f"🏨 {safe(hotel_clean)}\n"
             f"💵 {price_str}\n"
             f"📅 {safe(t.get('dates'))}\n"
             f"{posted_str}"
@@ -112,8 +162,8 @@ def compile_tours_text(rows: list[dict], header: str) -> str:
     body = "\n\n".join(lines) if lines else "Пока пусто. Попробуй сменить фильтр."
     return f"<b>{escape(header)}</b>\n\n{body}"
 
-def split_telegram(text: str, limit: int = 3500) -> list[str]:
-    parts = []
+def split_telegram(text: str, limit: int = 3500) -> List[str]:
+    parts: List[str] = []
     while len(text) > limit:
         cut = text.rfind("\n\n", 0, limit)
         if cut == -1:
@@ -124,11 +174,15 @@ def split_telegram(text: str, limit: int = 3500) -> list[str]:
     return parts
 
 # ================= ПОИСК ТУРОВ =================
-async def fetch_tours(query: Optional[str] = None, *, country: Optional[str] = None,
-                      hours: int = 72, limit_recent: int = 10, limit_fallback: int = 5) -> Tuple[List[dict], bool]:
-    """
-    Возвращает (rows, is_recent)
-    """
+async def fetch_tours(
+    query: Optional[str] = None,
+    *,
+    country: Optional[str] = None,
+    hours: int = 72,
+    limit_recent: int = 10,
+    limit_fallback: int = 5,
+) -> Tuple[List[dict], bool]:
+    """Возвращает (rows, is_recent)"""
     try:
         where_clauses = []
         params = []
@@ -145,11 +199,11 @@ async def fetch_tours(query: Optional[str] = None, *, country: Optional[str] = N
         with get_conn() as conn, conn.cursor() as cur:
             # recent
             sql_recent = f"""
-              SELECT country, city, hotel, price, currency, dates, source_url, posted_at
-              FROM tours
-              {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
-              ORDER BY posted_at DESC
-              LIMIT %s
+                SELECT country, city, hotel, price, currency, dates, source_url, posted_at
+                FROM tours
+                {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
+                ORDER BY posted_at DESC
+                LIMIT %s
             """
             cur.execute(sql_recent, params + [cutoff, limit_recent])
             rows = cur.fetchall()
@@ -158,11 +212,11 @@ async def fetch_tours(query: Optional[str] = None, *, country: Optional[str] = N
 
             # fallback
             sql_fb = f"""
-              SELECT country, city, hotel, price, currency, dates, source_url, posted_at
-              FROM tours
-              {where_sql}
-              ORDER BY posted_at DESC
-              LIMIT %s
+                SELECT country, city, hotel, price, currency, dates, source_url, posted_at
+                FROM tours
+                {where_sql}
+                ORDER BY posted_at DESC
+                LIMIT %s
             """
             cur.execute(sql_fb, params + [limit_fallback])
             fb_rows = cur.fetchall()
@@ -172,13 +226,9 @@ async def fetch_tours(query: Optional[str] = None, *, country: Optional[str] = N
         return [], False
 
 # ================= GPT =================
-import httpx
-from collections import defaultdict
-
 last_gpt_call = defaultdict(float)  # per-user cooldown
 
 async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[str]:
-    # кулдаун 12с на пользователя
     now = time.monotonic()
     if now - last_gpt_call[user_id] < 12.0:
         return ["😮‍💨 Подожди пару секунд — я ещё обрабатываю твой предыдущий запрос."]
@@ -188,14 +238,17 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": (
-                "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
-                "Отвечай дружелюбно и конкретно. Держись тематики: туры, отели, сезоны, визы, цены, лайфхаки."
-            )},
+            {
+                "role": "system",
+                "content": (
+                    "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
+                    "Отвечай дружелюбно и конкретно. Держись тематики: туры, отели, сезоны, визы, цены, лайфхаки."
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.6,
-        "max_tokens": 700
+        "max_tokens": 700,
     }
 
     try:
@@ -207,7 +260,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                         "Authorization": f"Bearer {OPENAI_API_KEY}",
                         "Content-Type": "application/json",
                     },
-                    json=payload
+                    json=payload,
                 )
                 if r.status_code == 200:
                     data = r.json()
@@ -221,9 +274,9 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                     else:
                         answer += "\n\n✨ Хочешь прямые ссылки на источники туров? Подключи Premium доступ TripleA."
                     MAX_LEN = 3800
-                    return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
+                    return [answer[i : i + MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
                 elif r.status_code == 429:
-                    await asyncio.sleep(1.5 ** attempt)
+                    await asyncio.sleep(1.5**attempt)
                     continue
                 else:
                     logging.error(f"OpenAI error {r.status_code}: {r.text[:400]}")
@@ -231,7 +284,9 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
     except Exception as e:
         logging.exception(f"GPT call failed: {e}")
 
-    return ["⚠️ Сервер ИИ перегружен. Попробуй ещё раз чуть позже — а пока загляни в «🎒 Найти туры» для готовых вариантов."]
+    return [
+        "⚠️ Сервер ИИ перегружен. Попробуй ещё раз чуть позже — а пока загляни в «🎒 Найти туры» для готовых вариантов."
+    ]
 
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
@@ -259,7 +314,6 @@ async def entry_sub(message: Message):
 async def entry_settings(message: Message):
     await message.answer("Скоро: язык/валюта/бюджет по умолчанию. Пока в разработке ⚙️")
 
-# --- Callbacks для фильтров
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
@@ -267,10 +321,10 @@ async def cb_recent(call: CallbackQuery):
     text = compile_tours_text(rows, "🔥 Актуальные за 72 часа")
     try:
         for chunk in split_telegram(text):
-            await call.message.answer(chunk, disable_web_page_preview=True)
+            await call.message.answer(chunk, disable_web_page_preview=True, reply_markup=sources_kb(rows))
     except Exception as e:
         logging.error("Send HTML failed (recent): %s", e)
-        await call.message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.")
+        await call.message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.", reply_markup=filters_inline_kb())
 
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
@@ -281,14 +335,25 @@ async def cb_country(call: CallbackQuery):
     text = compile_tours_text(rows, header)
     try:
         for chunk in split_telegram(text):
-            await call.message.answer(chunk, disable_web_page_preview=True)
+            await call.message.answer(chunk, disable_web_page_preview=True, reply_markup=sources_kb(rows))
     except Exception as e:
         logging.error("Send HTML failed (country): %s", e)
-        await call.message.answer(f"Не удалось показать подборку по стране {escape(country)}. Попробуй ещё раз.")
+        await call.message.answer(
+            f"Не удалось показать подборку по стране {escape(country)}. Попробуй ещё раз.",
+            reply_markup=filters_inline_kb(),
+        )
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
     await call.answer("Скоро добавим детальные фильтры 🤝", show_alert=False)
+
+@dp.callback_query(F.data == "back_filters")
+async def cb_back_filters(call: CallbackQuery):
+    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb())
+
+@dp.callback_query(F.data == "back_main")
+async def cb_back_main(call: CallbackQuery):
+    await call.message.answer("Главное меню:", reply_markup=main_kb)
 
 # --- Смарт-роутер текста: короткие запросы -> поиск, длинные -> GPT
 @dp.message(F.text & ~F.text.in_({"🎒 Найти туры", "🤖 Спросить GPT", "🔔 Подписка", "⚙️ Настройки"}))
@@ -303,10 +368,10 @@ async def smart_router(message: Message):
             text = compile_tours_text(rows, header)
             try:
                 for chunk in split_telegram(text):
-                    await message.answer(chunk, disable_web_page_preview=True)
+                    await message.answer(chunk, disable_web_page_preview=True, reply_markup=sources_kb(rows))
             except Exception as e:
                 logging.error("Send HTML failed (smart_router): %s", e)
-                await message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.")
+                await message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.", reply_markup=filters_inline_kb())
             return
 
     # иначе GPT
@@ -314,8 +379,7 @@ async def smart_router(message: Message):
     is_premium = message.from_user.id in premium_users
     replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
     for part in replies:
-        # ВАЖНО: без парсинга, чтобы не падать на markdown/html в ответе модели
-        await message.answer(part, parse_mode=None)
+        await message.answer(part, parse_mode=None)  # без парсинга
 
 # ================= WEBHOOK =================
 @app.get("/")
@@ -334,11 +398,8 @@ async def webhook(request: Request):
     return JSONResponse({"status": "ok"})
 
 # ================= START/STOP =================
-from db_init import init_db  # индексы и таблицы
-
 @app.on_event("startup")
 async def on_startup():
-    # Инициализируем БД (таблицы + индексы)
     try:
         init_db()
     except Exception as e:
@@ -350,7 +411,6 @@ async def on_startup():
     else:
         logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
 
-    # Логируем колонки таблицы tours
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""
