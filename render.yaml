@@ -22,7 +22,7 @@ services:
   - type: worker
     name: Collector
     env: python
-    plan: starter   # можешь поднять до standard, если каналов будет много
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python collector.py
     autoDeploy: false
