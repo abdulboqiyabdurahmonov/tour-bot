@@ -26,12 +26,13 @@ def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
 def save_tour(data: dict):
+    """Сохраняем тур в PostgreSQL"""
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("""
                 INSERT INTO tours 
-                (country, city, hotel, price, currency, dates, description, source_url, posted_at, message_id, source_chat, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                (country, city, hotel, price, currency, dates, description, source_url, posted_at, message_id, source_chat)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (message_id, source_chat) DO NOTHING
                 RETURNING id;
             """, (
@@ -49,9 +50,13 @@ def save_tour(data: dict):
             ))
             inserted = cur.fetchone()
             if inserted:
-                logging.info(f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}")
+                logging.info(
+                    f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}"
+                )
             else:
-                logging.info(f"⚠️ Дубликат тура: {data.get('city')} | {data.get('price')} {data.get('currency')} (message_id={data.get('message_id')})")
+                logging.info(
+                    f"⚠️ Дубликат тура: {data.get('city')} | {data.get('price')} {data.get('currency')} (message_id={data.get('message_id')})"
+                )
         except Exception as e:
             logging.error(f"❌ Ошибка при сохранении тура: {e}")
 
