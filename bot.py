@@ -222,6 +222,20 @@ async def on_startup():
     else:
         logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
 
+    # 🔎 Проверка, какие колонки реально видит бот
+    try:
+        with connect(DATABASE_URL, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'tours'
+                """)
+                cols = cur.fetchall()
+                logging.info(f"🎯 Колонки в таблице tours: {cols}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка при проверке колонок: {e}")
+
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
