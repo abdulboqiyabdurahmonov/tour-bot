@@ -88,32 +88,34 @@ def fmt_price(price, currency) -> str:
 def safe(s: Optional[str]) -> str:
     return escape(s or "—")
 
-def compile_tours_text(rows: List[dict], header: str) -> str:
+from html import escape
+
+def compile_tours_text(rows: list[dict], header: str) -> str:
     lines = []
     for t in rows:
         posted = t.get("posted_at")
-        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}<br>" if isinstance(posted, datetime) else ""
+        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}\n" if isinstance(posted, datetime) else ""
         price_str = fmt_price(t.get('price'), t.get('currency'))
         src = (t.get("source_url") or "").strip()
 
         card = (
-            f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}<br>"
-            f"🏨 {safe(t.get('hotel'))}<br>"
-            f"💵 {price_str}<br>"
-            f"📅 {safe(t.get('dates'))}<br>"
+            f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}\n"
+            f"🏨 {safe(t.get('hotel'))}\n"
+            f"💵 {price_str}\n"
+            f"📅 {safe(t.get('dates'))}\n"
             f"{posted_str}"
         )
         if src:
             card += f'🔗 <a href="{escape(src)}">Источник</a>'
-        lines.append(card)
+        lines.append(card.strip())
 
-    body = "<br><br>".join(lines) if lines else "Пока пусто. Попробуй сменить фильтр."
-    return f"<b>{escape(header)}</b><br><br>{body}"
+    body = "\n\n".join(lines) if lines else "Пока пусто. Попробуй сменить фильтр."
+    return f"<b>{escape(header)}</b>\n\n{body}"
 
-def split_telegram(text: str, limit: int = 3500) -> List[str]:
-    parts: List[str] = []
+def split_telegram(text: str, limit: int = 3500) -> list[str]:
+    parts = []
     while len(text) > limit:
-        cut = text.rfind("<br><br>", 0, limit)
+        cut = text.rfind("\n\n", 0, limit)
         if cut == -1:
             cut = limit
         parts.append(text[:cut])
