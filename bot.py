@@ -4,6 +4,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
+from html import escape
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -36,7 +37,7 @@ if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
 
 # ================= БОТ / APP =================
-bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
+bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 app = FastAPI()
 
@@ -71,35 +72,54 @@ async def show_typing(message: Message, text: str = "🤔 Думаю... Ищу �
     except Exception as e:
         logging.error(f"Ошибка show_typing: {e}")
 
+# --- HTML-safe helpers ---
 def fmt_price(price, currency) -> str:
     if price is None:
         return "—"
     try:
         p = int(float(price))
     except Exception:
-        return f"{price} {currency or ''}".strip()
+        return escape(f"{price} {currency or ''}".strip())
     cur = (currency or "").upper()
     if cur == "СУМ":
         cur = "сум"
-    return f"{p:,} {cur}".replace(",", " ")
+    return escape(f"{p:,} {cur}".replace(",", " "))
+
+def safe(s: Optional[str]) -> str:
+    return escape(s or "—")
 
 def compile_tours_text(rows: List[dict], header: str) -> str:
     lines = []
     for t in rows:
         posted = t.get("posted_at")
-        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}\n" if isinstance(posted, datetime) else ""
+        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}<br>" if isinstance(posted, datetime) else ""
         price_str = fmt_price(t.get('price'), t.get('currency'))
-        src = t.get("source_url") or ""
-        lines.append(
-            f"🌍 {t.get('country') or '—'} — {t.get('city') or '—'}\n"
-            f"🏨 {t.get('hotel') or '—'}\n"
-            f"💵 {price_str}\n"
-            f"📅 {t.get('dates') or '—'}\n"
+        src = (t.get("source_url") or "").strip()
+
+        card = (
+            f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}<br>"
+            f"🏨 {safe(t.get('hotel'))}<br>"
+            f"💵 {price_str}<br>"
+            f"📅 {safe(t.get('dates'))}<br>"
             f"{posted_str}"
-            + (f"🔗 [Источник]({src})" if src else "")
         )
-    body = "\n\n".join(lines) if lines else "Пока пусто. Попробуй сменить фильтр."
-    return f"{header}\n\n{body}"
+        if src:
+            card += f'🔗 <a href="{escape(src)}">Источник</a>'
+        lines.append(card)
+
+    body = "<br><br>".join(lines) if lines else "Пока пусто. Попробуй сменить фильтр."
+    return f"<b>{escape(header)}</b><br><br>{body}"
+
+def split_telegram(text: str, limit: int = 3500) -> List[str]:
+    parts: List[str] = []
+    while len(text) > limit:
+        cut = text.rfind("<br><br>", 0, limit)
+        if cut == -1:
+            cut = limit
+        parts.append(text[:cut])
+        text = text[cut:]
+    parts.append(text)
+    return parts
 
 # ================= ПОИСК ТУРОВ =================
 async def fetch_tours(query: Optional[str] = None, *, country: Optional[str] = None,
@@ -195,7 +215,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                         break
                     answer = msg.strip()
                     if premium:
-                        answer += "\n\n🔗 *Источник тура:* [Перейти](https://t.me/triplea_channel)"
+                        answer += "\n\n🔗 Источник тура: https://t.me/triplea_channel"
                     else:
                         answer += "\n\n✨ Хочешь прямые ссылки на источники туров? Подключи Premium доступ TripleA."
                     MAX_LEN = 3800
@@ -215,7 +235,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     text = (
-        "🌍 Привет! Я — *TripleA Travel Bot* ✈️\n\n"
+        "🌍 Привет! Я — <b>TripleA Travel Bot</b> ✈️\n\n"
         "Выбери действие ниже. «🎒 Найти туры» — быстрая актуалка из базы.\n"
         "«🤖 Спросить GPT» — умные ответы про сезоны, бюджеты и лайфхаки.\n"
     )
@@ -243,16 +263,26 @@ async def cb_recent(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
     rows, _ = await fetch_tours(None, hours=72, limit_recent=10, limit_fallback=5)
     text = compile_tours_text(rows, "🔥 Актуальные за 72 часа")
-    await call.message.answer(text)
+    try:
+        for chunk in split_telegram(text):
+            await call.message.answer(chunk, disable_web_page_preview=True)
+    except Exception as e:
+        logging.error("Send HTML failed (recent): %s", e)
+        await call.message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.")
 
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
     country = call.data.split(":", 1)[1]
     rows, is_recent = await fetch_tours(None, country=country, hours=120, limit_recent=10, limit_fallback=7)
-    header = f"🇺🇳 Страна: *{country}* — актуальные" if is_recent else f"🇺🇳 Страна: *{country}* — последние найденные"
+    header = f"🇺🇳 Страна: {country} — актуальные" if is_recent else f"🇺🇳 Страна: {country} — последние найденные"
     text = compile_tours_text(rows, header)
-    await call.message.answer(text)
+    try:
+        for chunk in split_telegram(text):
+            await call.message.answer(chunk, disable_web_page_preview=True)
+    except Exception as e:
+        logging.error("Send HTML failed (country): %s", e)
+        await call.message.answer(f"Не удалось показать подборку по стране {escape(country)}. Попробуй ещё раз.")
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
@@ -269,7 +299,12 @@ async def smart_router(message: Message):
         if rows:
             header = "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
             text = compile_tours_text(rows, header)
-            await message.answer(text)
+            try:
+                for chunk in split_telegram(text):
+                    await message.answer(chunk, disable_web_page_preview=True)
+            except Exception as e:
+                logging.error("Send HTML failed (smart_router): %s", e)
+                await message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.")
             return
 
     # иначе GPT
@@ -277,7 +312,8 @@ async def smart_router(message: Message):
     is_premium = message.from_user.id in premium_users
     replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
     for part in replies:
-        await message.answer(part)
+        # ВАЖНО: без парсинга, чтобы не падать на markdown/html в ответе модели
+        await message.answer(part, parse_mode=None)
 
 # ================= WEBHOOK =================
 @app.get("/")
