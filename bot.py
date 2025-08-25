@@ -20,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+    # aiogram 3.x
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
@@ -27,7 +28,7 @@ from psycopg import connect
 from psycopg.rows import dict_row
 
 import httpx
-from db_init import init_db  # используем твою инициализацию БД
+from db_init import init_db  # твоя инициализация БД
 
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
@@ -83,14 +84,12 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
     )
 
 def sources_kb(rows: List[dict], back_to: str = "back_filters") -> InlineKeyboardMarkup:
-    """Кнопки-источники и Назад"""
+    """Кнопки-источники (нумерованные под карточки) + Назад"""
     buttons = []
-    idx = 1
-    for t in rows[:8]:  # компактно
+    for idx, t in enumerate(rows, start=1):
         url = (t.get("source_url") or "").strip()
         if url:
-            buttons.append([InlineKeyboardButton(text=f"🔗 Открыть {idx}", url=url)])
-            idx += 1
+            buttons.append([InlineKeyboardButton(text=f"🔗 Открыть #{idx}", url=url)])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -127,32 +126,62 @@ def clean_text_basic(s: Optional[str]) -> str:
     return s.strip()
 
 def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
-    """Срезает хвост с ценой в отеле, чтобы не дублировать «💵»"""
+    """Удаляет в конце строки варианты '– от 767 USD', '— 1200$', с неразрывными пробелами и т.п."""
     if not s:
         return s
     return re.sub(
-        r'[\s–-]*(?:от\s*)?\d[\d\s.,]*\s*(?:USD|EUR|UZS|RUB|\$|€)\b.*$',
+        r'[\s\u00A0–—-]*'               # тире/пробелы/nbsp
+        r'(?:от\s*)?'                   # опционально 'от'
+        r'\d[\d\s\u00A0.,]*'            # число с пробелами/точками/запятыми
+        r'\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€)\b.*$',  # валюта и всё до конца
         '',
         s,
         flags=re.I
     ).strip()
 
+def normalize_dates_for_display(s: Optional[str]) -> str:
+    """
+    Нормализует строку вида 04.25.2025–04.25.10 -> 25.04.2025–10.04.2025.
+    Если формат не совпадает, возвращает как есть (экранированно).
+    """
+    if not s:
+        return "—"
+    s = s.strip()
+    m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})\s*[–-]\s*(\d{1,2})\.(\d{1,2})\.(\d{2,4})", s)
+    if not m:
+        return escape(s)
+
+    d1, m1, y1, d2, m2, y2 = m.groups()
+
+    def _norm(d, mo, y):
+        d = int(d); mo = int(mo); y = int(y)
+        if y < 100:
+            y += 2000 if y < 70 else 1900
+        # если "месяц" > 12, а "день" <= 12 — вероятно, поменяли местами
+        if mo > 12 and d <= 12:
+            d, mo = mo, d
+        return f"{d:02d}.{mo:02d}.{y:04d}"
+
+    return f"{_norm(d1, m1, y1)}–{_norm(d2, m2, y2)}"
+
 def compile_tours_text(rows: List[dict], header: str) -> str:
     lines = []
-    for t in rows:
+    for idx, t in enumerate(rows, start=1):
         posted = t.get("posted_at")
-        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%М')}\n" if isinstance(posted, datetime) else ""
+        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}\n" if isinstance(posted, datetime) else ""
         price_str = fmt_price(t.get("price"), t.get("currency"))
         src = (t.get("source_url") or "").strip()
 
         hotel_raw = t.get("hotel")
         hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_raw))
+        dates_norm = normalize_dates_for_display(t.get("dates"))
 
         card = (
+            f"#{idx}\n"
             f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}\n"
             f"🏨 {safe(hotel_clean)}\n"
             f"💵 {price_str}\n"
-            f"📅 {safe(t.get('dates'))}\n"
+            f"📅 {dates_norm}\n"
             f"{posted_str}"
         )
         if src:
@@ -379,7 +408,7 @@ async def smart_router(message: Message):
     is_premium = message.from_user.id in premium_users
     replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
     for part in replies:
-        await message.answer(part, parse_mode=None)  # без парсинга
+        await message.answer(part, parse_mode=None)  # без парсинга, чтобы не падать на разметке
 
 # ================= WEBHOOK =================
 @app.get("/")
