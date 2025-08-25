@@ -61,22 +61,24 @@ async def fetch_tours(query: str):
                 cur.execute(sql_recent, params)
                 rows = cur.fetchall()
 
-                # Если свежих туров нет → берём последние вообще
-                if not rows:
-                    sql_fallback = """
-                        SELECT country, city, hotel, price, currency, dates, source_url, posted_at, created_at
-                        FROM tours
-                        WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
-                        ORDER BY created_at DESC
-                        LIMIT 5
-                    """
-                    cur.execute(sql_fallback, params[:3])  # cutoff не нужен
-                    rows = cur.fetchall()
+                if rows:
+                    return rows, True  # свежие туры
 
-        return rows
+                # Если свежих нет → берём последние вообще
+                sql_fallback = """
+                    SELECT country, city, hotel, price, currency, dates, source_url, posted_at, created_at
+                    FROM tours
+                    WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
+                    ORDER BY created_at DESC
+                    LIMIT 5
+                """
+                cur.execute(sql_fallback, params[:3])
+                rows = cur.fetchall()
+                return rows, False  # старые туры
+
     except Exception as e:
         logging.error(f"Ошибка при fetch_tours: {e}")
-        return []
+        return [], False
 
 # ================= GPT =================
 import httpx
