@@ -47,7 +47,7 @@ async def fetch_tours(query: str):
     try:
         cutoff = datetime.utcnow() - timedelta(hours=24)
         sql = """
-            SELECT country, city, hotel, price, currency, dates, source_url, posted_at
+            SELECT country, city, hotel, price, currency, dates, source_url, posted_at, created_at
             FROM tours
             WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
               AND created_at >= %s
