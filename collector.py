@@ -31,7 +31,7 @@ def save_tour(data: dict):
         try:
             cur.execute("""
                 INSERT INTO tours 
-                (country, city, hotel, price, currency, dates, description, source_url, posted_at, message_id, source_chat)
+                (country, city, hotel, price, currency, dates, description, source_chat, message_id, source_url, posted_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (message_id, source_chat) DO NOTHING
                 RETURNING id;
@@ -43,20 +43,16 @@ def save_tour(data: dict):
                 data.get("currency"),
                 data.get("dates"),
                 data.get("description"),
+                data.get("source_chat"),
+                data.get("message_id"),
                 data.get("source_url"),
                 data.get("posted_at"),
-                data.get("message_id"),
-                data.get("source_chat"),
             ))
             inserted = cur.fetchone()
             if inserted:
-                logging.info(
-                    f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}"
-                )
+                logging.info(f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}")
             else:
-                logging.info(
-                    f"⚠️ Дубликат тура: {data.get('city')} | {data.get('price')} {data.get('currency')} (message_id={data.get('message_id')})"
-                )
+                logging.info(f"⚠️ Дубликат: {data.get('city')} | {data.get('price')} {data.get('currency')} (msg_id={data.get('message_id')})")
         except Exception as e:
             logging.error(f"❌ Ошибка при сохранении тура: {e}")
 
@@ -97,10 +93,23 @@ def guess_country(city: str):
     }
     return mapping.get(city, None)
 
+def _norm_currency(s: str | None):
+    if not s:
+        return None
+    s = s.strip().upper()
+    repl = {
+        "СУМ": "UZS",
+        "СОМ": "UZS",
+        "РУБ": "RUB",
+        "$": "USD",
+        "€": "EUR"
+    }
+    return repl.get(s, s)
+
 def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
     """Разбор поста"""
     price_match = re.search(
-        r"(?:(\d{2,6})(?:\s?)(USD|EUR|СУМ|сум|руб|\$|€))|(?:(USD|EUR|\$|€)\s?(\d{2,6}))",
+        r"(?:(\d{2,7})(?:\s?)(USD|EUR|СУМ|РУБ|сум|руб|\$|€))|(?:(USD|EUR|\$|€)\s?(\d{2,7}))",
         text, re.I
     )
     price, currency = None, None
@@ -117,19 +126,26 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", text)
         city = m.group(1) if m else None
 
-    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
+    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)[^\n]*", text, re.I)
     dates_match = parse_dates(text)
+
+    # нормализация
+    cur = _norm_currency(currency)
+    try:
+        prc = float(price) if price else None
+    except Exception:
+        prc = None
 
     return {
         "country": guess_country(city) if city else None,
         "city": city,
-        "hotel": hotel_match.group(0) if hotel_match else None,
-        "price": float(price) if price else None,
-        "currency": currency.upper() if currency else None,
+        "hotel": hotel_match.group(0).strip() if hotel_match else None,
+        "price": prc,
+        "currency": cur,
         "dates": dates_match,
-        "description": text[:500],
+        "description": (text or "")[:500],
         "source_url": link,
-        "posted_at": posted_at.replace(tzinfo=None),
+        "posted_at": posted_at.replace(tzinfo=None) if posted_at else datetime.utcnow(),
         "message_id": msg_id,
         "source_chat": chat
     }
@@ -139,17 +155,21 @@ async def collect_once(client: TelegramClient):
     for channel in CHANNELS:
         if not channel.strip():
             continue
-        logging.info(f"📥 Читаю канал: {channel}")
-        async for msg in client.iter_messages(channel.strip(), limit=50):
+        ch = channel.strip()
+        logging.info(f"📥 Читаю канал: {ch}")
+        async for msg in client.iter_messages(ch, limit=50):
             if not msg.text:
                 continue
             data = parse_post(
                 msg.text,
-                f"https://t.me/{channel.strip('@')}/{msg.id}",
+                f"https://t.me/{ch.strip('@')}/{msg.id}",
                 msg.id,
-                channel.strip('@'),
+                ch.strip('@'),
                 msg.date
             )
+            # отбрасываем слишком «пустые» посты
+            if not any([data.get("city"), data.get("hotel"), data.get("price"), data.get("dates")]):
+                continue
             save_tour(data)
 
 async def run_collector():
