@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
 from html import escape
 from collections import defaultdict
+import secrets
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -89,15 +90,33 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
         ]
     )
 
-def sources_kb(rows: List[dict], back_to: str = "back_filters") -> InlineKeyboardMarkup:
-    """Кнопки-источники (нумерованные под карточки) + Назад"""
+def sources_kb(
+    rows: List[dict],
+    *,
+    start_index: int = 1,
+    back_to: str = "back_filters",
+    token: Optional[str] = None,
+    next_offset: Optional[int] = None,
+) -> InlineKeyboardMarkup:
     buttons = []
-    for idx, t in enumerate(rows, start=1):
+    for idx, t in enumerate(rows, start=start_index):
         url = (t.get("source_url") or "").strip()
         if url:
             buttons.append([InlineKeyboardButton(text=f"🔗 Открыть #{idx}", url=url)])
+
+    # Показать ещё (если передан токен и рассчитан следующий offset)
+    if token and next_offset is not None:
+        buttons.append([InlineKeyboardButton(text="➡️ Показать ещё", callback_data=f"more:{token}:{next_offset}")])
+
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ================= ПАГИНАЦИЯ =================
+PAGER_STATE: dict[str, dict] = {}
+
+def _new_token() -> str:
+    # короткий токен для callback_data
+    return secrets.token_urlsafe(6).rstrip("=-_")
 
 # ================= ПОМОЩНИКИ ВЫВОДА =================
 async def show_typing(message: Message, text: str = "🤔 Думаю... Ищу варианты для тебя"):
@@ -177,9 +196,9 @@ def normalize_dates_for_display(s: Optional[str]) -> str:
 
     return f"{_norm(d1, m1, y1)}–{_norm(d2, m2, y2)}"
 
-def compile_tours_text(rows: List[dict], header: str) -> str:
+def compile_tours_text(rows: List[dict], header: str, start_index: int = 1) -> str:
     lines = []
-    for idx, t in enumerate(rows, start=1):
+    for idx, t in enumerate(rows, start=start_index):
         posted = t.get("posted_at")
         posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}\n" if isinstance(posted, datetime) else ""
         price_str = fmt_price(t.get("price"), t.get("currency"))
@@ -278,6 +297,57 @@ async def fetch_tours(
     except Exception as e:
         logging.error(f"Ошибка при fetch_tours: {e}")
         return [], False
+
+async def fetch_tours_page(
+    query: Optional[str] = None,
+    *,
+    country: Optional[str] = None,
+    currency_eq: Optional[str] = None,
+    max_price: Optional[float] = None,
+    hours: Optional[int] = None,      # если задано — фильтр по свежести posted_at
+    order_by_price: bool = False,     # для бюджетных
+    limit: int = 10,
+    offset: int = 0,
+) -> List[dict]:
+    try:
+        where_clauses = []
+        params: List = []
+
+        if query:
+            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)")
+            params += [f"%{query}%", f"%{query}%", f"%{query}%"]
+        if country:
+            where_clauses.append("country ILIKE %s")
+            params.append(country)
+        if currency_eq:
+            where_clauses.append("currency = %s")
+            params.append(currency_eq)
+        if max_price is not None:
+            where_clauses.append("price IS NOT NULL AND price <= %s")
+            params.append(max_price)
+        if hours is not None:
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            where_clauses.append("posted_at >= %s")
+            params.append(cutoff)
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
+
+        sql = f"""
+            SELECT country, city, hotel, price, currency, dates, source_url, posted_at
+            FROM tours
+            {where_sql}
+            {order_clause}
+            LIMIT %s OFFSET %s
+        """
+
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, params + [limit, offset])
+            rows = cur.fetchall()
+            return rows
+    except Exception as e:
+        logging.error(f"Ошибка fetch_tours_page: {e}")
+        return []
 
 # ================= GPT =================
 last_gpt_call = defaultdict(float)  # per-user cooldown
