@@ -79,6 +79,12 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🇹🇭 Таиланд", callback_data="country:Таиланд"),
                 InlineKeyboardButton(text="🇻🇳 Вьетнам", callback_data="country:Вьетнам"),
             ],
+            # 💸 бюджет по USD
+            [
+                InlineKeyboardButton(text="💸 ≤ $500", callback_data="budget:USD:500"),
+                InlineKeyboardButton(text="💸 ≤ $800", callback_data="budget:USD:800"),
+                InlineKeyboardButton(text="💸 ≤ $1000", callback_data="budget:USD:1000"),
+            ],
             [InlineKeyboardButton(text="➕ Ещё фильтры скоро", callback_data="noop")],
         ]
     )
@@ -214,23 +220,35 @@ async def fetch_tours(
     query: Optional[str] = None,
     *,
     country: Optional[str] = None,
+    currency_eq: Optional[str] = None,
+    max_price: Optional[float] = None,
     hours: int = 72,
     limit_recent: int = 10,
     limit_fallback: int = 5,
 ) -> Tuple[List[dict], bool]:
-    """Возвращает (rows, is_recent)"""
+    """Возвращает (rows, is_recent). Поддерживает фильтры валюты и цены."""
     try:
         where_clauses = []
         params = []
+
         if query:
             where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)")
             params += [f"%{query}%", f"%{query}%", f"%{query}%"]
         if country:
             where_clauses.append("country ILIKE %s")
             params.append(country)
+        if currency_eq:
+            where_clauses.append("currency = %s")
+            params.append(currency_eq)
+        if max_price is not None:
+            where_clauses.append("price IS NOT NULL AND price <= %s")
+            params.append(max_price)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+        # если есть фильтр по цене — сортируем сначала дешевле
+        order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if max_price is not None else "ORDER BY posted_at DESC"
 
         with get_conn() as conn, conn.cursor() as cur:
             # recent
@@ -238,7 +256,7 @@ async def fetch_tours(
                 SELECT country, city, hotel, price, currency, dates, source_url, posted_at
                 FROM tours
                 {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
-                ORDER BY posted_at DESC
+                {order_clause}
                 LIMIT %s
             """
             cur.execute(sql_recent, params + [cutoff, limit_recent])
@@ -251,7 +269,7 @@ async def fetch_tours(
                 SELECT country, city, hotel, price, currency, dates, source_url, posted_at
                 FROM tours
                 {where_sql}
-                ORDER BY posted_at DESC
+                {order_clause}
                 LIMIT %s
             """
             cur.execute(sql_fb, params + [limit_fallback])
@@ -333,6 +351,36 @@ async def cmd_start(message: Message):
         "«🤖 Спросить GPT» — умные ответы про сезоны, бюджеты и лайфхаки.\n"
     )
     await message.answer(text, reply_markup=main_kb)
+
+@dp.callback_query(F.data.startswith("budget:"))
+async def cb_budget(call: CallbackQuery):
+    # формат: budget:<CUR>:<LIMIT>
+    _, cur, limit_str = call.data.split(":", 2)
+    try:
+        limit_val = float(limit_str)
+    except Exception:
+        limit_val = None
+
+    await bot.send_chat_action(call.message.chat.id, "typing")
+
+    rows, is_recent = await fetch_tours(
+        None,
+        currency_eq=cur,
+        max_price=limit_val,
+        hours=120,            # чуть шире окно для бюджетных
+        limit_recent=12,
+        limit_fallback=12
+    )
+
+    hdr = f"💸 Бюджет: ≤ {int(limit_val)} {cur} — актуальные" if is_recent else f"💸 Бюджет: ≤ {int(limit_val)} {cur} — последние найденные"
+    text = compile_tours_text(rows, hdr)
+
+    try:
+        for chunk in split_telegram(text):
+            await call.message.answer(chunk, disable_web_page_preview=True, reply_markup=sources_kb(rows))
+    except Exception as e:
+        logging.error("Send HTML failed (budget): %s", e)
+        await call.message.answer("Не удалось отрендерить карточки по бюджету. Попробуй ещё раз.", reply_markup=filters_inline_kb())
 
 @dp.message(F.text == "🎒 Найти туры")
 async def entry_find_tours(message: Message):
