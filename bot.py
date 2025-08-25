@@ -47,11 +47,11 @@ async def fetch_tours(query: str):
     try:
         cutoff = datetime.utcnow() - timedelta(hours=24)
         sql_recent = """
-            SELECT country, city, hotel, price, currency, dates, source_url, posted_at, created_at
+            SELECT country, city, hotel, price, currency, dates, source_url, posted_at
             FROM tours
             WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
-              AND created_at >= %s
-            ORDER BY created_at DESC
+              AND posted_at >= %s
+            ORDER BY posted_at DESC
             LIMIT 10
         """
         params = [f"%{query}%", f"%{query}%", f"%{query}%", cutoff]
@@ -66,10 +66,10 @@ async def fetch_tours(query: str):
 
                 # Если свежих нет → берём последние вообще
                 sql_fallback = """
-                    SELECT country, city, hotel, price, currency, dates, source_url, posted_at, created_at
+                    SELECT country, city, hotel, price, currency, dates, source_url, posted_at
                     FROM tours
                     WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
-                    ORDER BY created_at DESC
+                    ORDER BY posted_at DESC
                     LIMIT 5
                 """
                 cur.execute(sql_fallback, params[:3])
