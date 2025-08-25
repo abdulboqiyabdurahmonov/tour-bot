@@ -152,6 +152,8 @@ async def cmd_start(message: Message):
     )
     await message.answer(intro)
 
+from datetime import datetime
+
 @dp.message(F.text)
 async def handle_message(message: Message):
     user_text = message.text.strip()
@@ -168,11 +170,21 @@ async def handle_message(message: Message):
             reply = "⚠️ Свежих туров за последние сутки нет, вот последние найденные варианты:\n\n"
 
         for t in tours:
+            created_at = t.get("created_at")
+            created_str = ""
+            if created_at:
+                try:
+                    # created_at приходит как datetime → форматируем
+                    created_str = f"🕒 Добавлено: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
+                except Exception:
+                    pass
+
             reply += (
                 f"🌍 {t.get('country') or 'Страна не указана'} — {t.get('city') or 'Город не указан'}\n"
                 f"🏨 {t.get('hotel') or 'Отель не указан'}\n"
                 f"💵 {t.get('price')} {t.get('currency')}\n"
                 f"📅 {t.get('dates') or 'Даты не указаны'}\n"
+                f"{created_str}"
                 f"🔗 [Источник]({t.get('source_url')})\n\n"
             )
         await message.answer(reply)
