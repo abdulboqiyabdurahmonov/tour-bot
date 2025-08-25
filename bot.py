@@ -159,10 +159,14 @@ async def handle_message(message: Message):
     # показываем "думаю..."
     await show_typing(message)
 
-    # 1) Пробуем найти свежие туры в базе
-    tours = await fetch_tours(user_text)
+    # 1) Пробуем найти туры
+    tours, is_recent = await fetch_tours(user_text)
     if tours:
-        reply = "🔥 Нашёл свежие туры за последние 24 часа:\n\n"
+        if is_recent:
+            reply = "🔥 Нашёл свежие туры за последние 24 часа:\n\n"
+        else:
+            reply = "⚠️ Свежих туров за последние сутки нет, вот последние найденные варианты:\n\n"
+
         for t in tours:
             reply += (
                 f"🌍 {t.get('country') or 'Страна не указана'} — {t.get('city') or 'Город не указан'}\n"
@@ -174,7 +178,7 @@ async def handle_message(message: Message):
         await message.answer(reply)
         return
 
-    # 2) Если нет туров — подключаем GPT
+    # 2) Если вообще ничего не нашли — GPT
     premium_users = {123456789}
     is_premium = message.from_user.id in premium_users
     replies = await ask_gpt(user_text, premium=is_premium)
