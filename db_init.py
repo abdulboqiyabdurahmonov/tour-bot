@@ -9,7 +9,7 @@ def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
 def init_db():
-    """Создание таблиц, если их нет"""
+    """Создание таблиц/индексов, если их нет"""
     with get_conn() as conn, conn.cursor() as cur:
         # Таблица пользователей
         cur.execute("""
@@ -48,10 +48,16 @@ def init_db():
                 UNIQUE(message_id, source_chat)
             );
         """)
+
+        # Индексы для скорости поиска
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours (posted_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_country ON tours (LOWER(country));")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_city ON tours (LOWER(city));")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_hotel ON tours (LOWER(hotel));")
+
     logging.info("📦 База данных инициализирована")
 
 def save_user(user):
-    """Сохраняем пользователя в БД (id + ФИО)"""
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
@@ -61,7 +67,6 @@ def save_user(user):
         """, (user.id, full_name))
 
 def save_request(user_id: int, query: str, response: str):
-    """Сохраняем запрос юзера и ответ GPT"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO requests (user_id, query, response)
@@ -69,11 +74,10 @@ def save_request(user_id: int, query: str, response: str):
         """, (user_id, query, response))
 
 def search_tours(query: str):
-    """Поиск туров в таблице tours"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT * FROM tours
-            WHERE country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s
+            WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
             ORDER BY posted_at DESC
             LIMIT 5;
         """, (f"%{query}%", f"%{query}%", f"%{query}%"))
