@@ -147,15 +147,25 @@ def _get_gs_client():
         _gs_client = None
         return None
 
-def _ensure_ws(spreadsheet, title: str, header: List[str]):
-    """Гарантируем наличие листа с заголовком."""
+def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
+    """Гарантируем наличие листа с именем title. Если нет — создаём и ставим шапку."""
     try:
         ws = spreadsheet.worksheet(title)
+        return ws
     except gspread.exceptions.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=title, rows=200, cols=max(10, len(header) or 10))
+        pass
+
+    # листа нет — создаём
+    try:
+        ws = spreadsheet.add_worksheet(title=title, rows=500, cols=max(12, len(header) + 2))
         if header:
-            ws.append_row(header)
-    return ws
+            # используем USER_ENTERED, чтобы даты/числа выглядели красиво
+            ws.append_row(header, value_input_option="USER_ENTERED")
+        logging.info(f"GS: created worksheet '{title}'")
+        return ws
+    except Exception as e:
+        logging.error(f"GS: failed to create worksheet '{title}': {e}")
+        raise
 
 async def load_kb_context(max_rows: int = 60) -> str:
     """Читает KB-лист и собирает факты в короткий текст для подмешивания в GPT."""
@@ -1072,19 +1082,40 @@ async def on_startup():
     except Exception as e:
         logging.error(f"Schema ensure failed: {e}")
 
-    # Пробуем прогреть Google Sheets (логируем, но не падаем)
+        # --- GS warmup (подготовим таблицу и лист "Заявки")
     try:
-        _ = _get_gs_client()
-        if _:
-            # также гарантируем, что вкладка для лидов существует
-            sh = _.open_by_key(SHEETS_SPREADSHEET_ID)
-            _ensure_ws(sh, WORKSHEET_NAME, [
-                "created_utc", "lead_id", "username", "full_name", "phone",
-                "country", "city", "hotel", "price", "currency", "dates",
-                "source_url", "posted_local"
-            ])
+        gc = _get_gs_client()
+        if not gc:
+            logging.info("GS warmup skipped: client is None (нет кредов или ID)")
+        else:
+            sid = SHEETS_SPREADSHEET_ID or "(empty)"
+            logging.info(f"GS warmup: trying open spreadsheet id='{sid}'")
+            sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
+            logging.info(f"GS warmup: opened spreadsheet title='{sh.title}'")
+
+            # логируем существующие листы — удобно для диагностики
+            try:
+                titles = [ws.title for ws in sh.worksheets()]
+                logging.info(f"GS warmup: worksheets={titles}")
+            except Exception as e_list:
+                logging.warning(f"GS: cannot list worksheets: {e_list}")
+
+            ws = _ensure_ws(
+                sh,
+                os.getenv("WORKSHEET_NAME", "Заявки"),
+                header=[
+                    "created_utc", "lead_id", "username", "full_name", "phone",
+                    "country", "city", "hotel", "price", "currency", "dates",
+                    "source_url", "posted_local"
+                ],
+            )
+            logging.info(f"✅ GS warmup: лист '{ws.title}' готов (rows={ws.row_count}, cols={ws.col_count})")
+    except gspread.SpreadsheetNotFound as e:
+        logging.error(f"GS warmup failed: spreadsheet not found by id='{SHEETS_SPREADSHEET_ID}': {e}")
+    except gspread.exceptions.APIError as e:
+        logging.error(f"GS warmup failed (APIError): {e}")
     except Exception as e:
-        logging.error(f"GS warmup failed: {e}")
+        logging.error(f"GS warmup failed (generic): {e}")
 
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
