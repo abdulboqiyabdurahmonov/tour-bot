@@ -552,13 +552,19 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
         dates_norm = normalize_dates_for_display(t.get("dates"))
         time_str = localize_dt(t.get("posted_at"))
-        user_tag = f"@{getattr(user, 'username', '')}" if getattr(user, "username", None) else f"{(user.first_name or '')} {(user.last_name or '')}".strip()
+
+        # 👇 ТОЛЬКО username (или Имя Фамилия, если username нет)
+        if getattr(user, "username", None):
+            user_label = f"@{user.username}"
+        else:
+            user_label = f"{(user.first_name or '')} {(user.last_name or '')}".strip() or "Гость"
+
         src = (t.get("source_url") or "").strip()
         src_line = f'\n🔗 <a href="{escape(src)}">Источник</a>' if src else ""
 
         text = (
             f"🆕 <b>Заявка №{lead_id}</b>\n"
-            f"👤 {escape(user_tag)} (id: <code>{user.id}</code>)\n"
+            f"👤 {escape(user_label)}\n"              # ← без user.id
             f"📞 {escape(phone)}\n"
             f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}\n"
             f"🏨 {safe(hotel_clean)}\n"
@@ -571,8 +577,12 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         if LEADS_TOPIC_ID:
             kwargs["message_thread_id"] = LEADS_TOPIC_ID
 
-        # Только текст, без send_photo:
-        msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
+        photo = (t.get("photo_url") or "").strip()
+        if photo:
+            short = text if len(text) <= 1000 else (text[:990].rstrip() + "…")
+            msg = await bot.send_photo(chat_id, photo=photo, caption=short, parse_mode="HTML", **kwargs)
+        else:
+            msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
 
         if pin:
             try:
