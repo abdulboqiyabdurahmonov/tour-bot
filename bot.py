@@ -59,7 +59,10 @@ if not DATABASE_URL:
 TZ = ZoneInfo("Asia/Tashkent")
 PAGER_STATE: Dict[str, Dict] = {}
 PAGER_TTL_SEC = 3600  # 1 час
-WANT_STATE: Dict[int, Dict] = {}  # user_id -> {"tour_id": int}
+
+# Режим «ждём телефон после Хочу этот тур»
+WANT_STATE: Dict[int, Dict] = {}  # user_id -> {"tour_id": int, "ts": float}
+WANT_TTL_SEC = 15 * 60            # 15 минут на ввод номера
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -126,6 +129,7 @@ def want_contact_kb() -> ReplyKeyboardMarkup:
         selective=True,
     )
 
+# ================= СХЕМА БД (фичи) =================
 HAS_PHOTO_URL = False
 
 def refresh_schema_flags():
@@ -250,6 +254,29 @@ def create_lead(user_id: int, tour_id: int, phone: Optional[str], note: Optional
         """, (user_id, tour_id, phone, note))
         row = cur.fetchone()
         return row["id"] if row else None
+
+# ================= ПОМОЩНИКИ РЕЖИМА ЗАЯВКИ =================
+PHONE_RE = re.compile(r"^\s*(\+?\d[\d\-\s()]{6,})\s*$")
+
+def normalize_phone_text(raw: str) -> str:
+    """Оставляем только цифры и ведущий +; если + нет — добавляем."""
+    if not raw:
+        return ""
+    has_plus = raw.strip().startswith("+")
+    digits = re.sub(r"\D+", "", raw)
+    return f"+{digits}" if not has_plus else f"+{digits}"
+
+def set_want(user_id: int, tour_id: int):
+    WANT_STATE[user_id] = {"tour_id": tour_id, "ts": time.monotonic()}
+
+def get_want(user_id: int) -> Optional[Dict]:
+    st = WANT_STATE.get(user_id)
+    if not st:
+        return None
+    if time.monotonic() - st.get("ts", 0.0) > WANT_TTL_SEC:
+        WANT_STATE.pop(user_id, None)
+        return None
+    return st
 
 # ================= ПОИСК ТУРОВ (с id и photo_url) =================
 async def fetch_tours(
@@ -759,19 +786,54 @@ async def cb_want(call: CallbackQuery):
         tour_id = int(call.data.split(":")[1])
     except Exception:
         await call.answer("Ошибка заявки.", show_alert=False); return
-    WANT_STATE[call.from_user.id] = {"tour_id": tour_id}
+    set_want(call.from_user.id, tour_id)
     await call.message.answer(
-        "Окей! Отправь контакт, чтобы менеджер связался. Нажми кнопку ниже 👇",
+        "Окей! Отправь контакт, чтобы менеджер связался. Нажми кнопку ниже 👇\n"
+        "Или просто введи номер текстом: например, +998 90 123-45-67",
         reply_markup=want_contact_kb()
     )
     await call.answer()
 
+# === НОВОЕ: принимаем номер, если пользователь в режиме заявки (введён текстом) ===
+@dp.message(F.text)
+async def on_phone_text_when_want(message: Message):
+    st = get_want(message.from_user.id)
+    if not st:
+        return  # не мешаем другим хендлерам
+
+    txt = (message.text or "").strip()
+    m = PHONE_RE.match(txt)
+    if not m:
+        await message.answer(
+            "Пришли номер (например: +998 90 123-45-67) или нажми кнопку «📲 Поделиться номером». "
+            "Режим заявки истечёт через несколько минут."
+        )
+        return
+
+    phone = normalize_phone_text(m.group(1))
+    tour_id = st["tour_id"]
+    WANT_STATE.pop(message.from_user.id, None)  # выходим из режима заявки
+
+    # создаём лид
+    lead_id = create_lead(message.from_user.id, tour_id, phone, note="from text phone")
+
+    # подтянем тур и отправим в группу заявок
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours WHERE id=%s;", (tour_id,))
+        t = cur.fetchone()
+    if t:
+        await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
+
+    await message.answer(f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞", reply_markup=main_kb)
+
 @dp.message(F.contact)
 async def on_contact(message: Message):
-    st = WANT_STATE.pop(message.from_user.id, None)
+    st = get_want(message.from_user.id)
     if not st:
         await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
         return
+    WANT_STATE.pop(message.from_user.id, None)
+
     phone = message.contact.phone_number
     tour_id = st["tour_id"]
     lead_id = create_lead(message.from_user.id, tour_id, phone, note="from contact share")
@@ -800,7 +862,7 @@ async def cb_back_filters(call: CallbackQuery):
 async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb)
 
-# --- Смарт-роутер текста
+# --- Смарт-роутер текста (стоит НИЖЕ хендлера on_phone_text_when_want) ---
 @dp.message(F.text & ~F.text.in_({"🎒 Найти туры", "🤖 Спросить GPT", "🔔 Подписка", "⚙️ Настройки"}))
 async def smart_router(message: Message):
     user_text = message.text.strip()
@@ -854,7 +916,9 @@ async def on_startup():
         init_db()
     except Exception as e:
         logging.error(f"Ошибка init_db(): {e}")
-        refresh_schema_flags()
+
+    # всегда обновляем флаги схемы после init_db
+    refresh_schema_flags()
 
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
