@@ -3,6 +3,9 @@ import re
 import logging
 import asyncio
 import time
+import json, base64
+from google.oauth2 import service_account
+import gspread
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict
 from html import escape
