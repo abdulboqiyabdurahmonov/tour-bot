@@ -286,13 +286,12 @@ def unset_favorite(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM favorites WHERE user_id=%s AND tour_id=%s;", (user_id, tour_id))
 
-def create_lead(user_id: int, tour_id: int, phone: Optional[str], note: Optional[str] = None):
+def create_lead(tour_id: int, phone: Optional[str], note: Optional[str] = None):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO leads(user_id, tour_id, phone, note)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO leads(tour_id, phone, note) VALUES (%s, %s, %s)
             RETURNING id;
-        """, (user_id, tour_id, phone, note))
+        """, (tour_id, phone, note))
         row = cur.fetchone()
         return row["id"] if row else None
 
