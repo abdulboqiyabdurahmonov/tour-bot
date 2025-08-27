@@ -126,6 +126,22 @@ def want_contact_kb() -> ReplyKeyboardMarkup:
         selective=True,
     )
 
+HAS_PHOTO_URL = False
+
+def refresh_schema_flags():
+    global HAS_PHOTO_URL
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1 
+                FROM information_schema.columns
+                WHERE table_name='tours' AND column_name='photo_url'
+            """)
+            HAS_PHOTO_URL = cur.fetchone() is not None
+            logging.info(f"🧭 HAS_PHOTO_URL={HAS_PHOTO_URL}")
+    except Exception as e:
+        logging.warning(f"refresh_schema_flags failed: {e}")
+
 # ================= УТИЛИТЫ ПАГИНАЦИИ =================
 def _new_token() -> str:
     return secrets.token_urlsafe(6).rstrip("=-_")
