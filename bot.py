@@ -566,6 +566,7 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         if LEADS_TOPIC_ID:
             kwargs["message_thread_id"] = LEADS_TOPIC_ID
 
+        # Только текст, без send_photo:
         msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
 
         if pin:
@@ -841,7 +842,7 @@ async def on_contact(message: Message):
 
     # создаём лид и только ПОСЛЕ этого удаляем pending
     try:
-        lead_id = create_lead(message.from_user.id, tour_id, phone, note="from contact share")
+        lead_id = create_lead(tour_id, phone, note="from contact share")
     except Exception as e:
         logging.error(f"create_lead failed: {e}")
         await message.answer("Упс, не смог записать заявку 😕 Попробуй ещё раз чуть позже или напиши менеджеру.")
