@@ -21,7 +21,6 @@ from aiogram.types import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ContentType,
 )
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
@@ -30,7 +29,7 @@ from psycopg import connect
 from psycopg.rows import dict_row
 
 import httpx
-from db_init import init_db  # и get_conn из него использовать можно
+from db_init import init_db, get_config, set_config  # конфиг из БД
 
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +42,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", os.getenv("WEBHOOK_URL", "https://tour-bot-rxi8.onrender.com"))
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
+# Группа заявок и настройки админ-команд (можно задать тут, а потом менять через /setleadgroup)
+LEADS_CHAT_ID_ENV = (os.getenv("LEADS_CHAT_ID") or "").strip()
+LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)     # если используешь Темы/Форумы в супергруппе
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)       # кто может выполнять команды админа
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
@@ -62,15 +66,18 @@ bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 app = FastAPI()
 
-from aiogram.filters import Command
-
-@dp.message(Command("chatid"))
-async def get_chat_id(message: Message):
-    await message.reply(f"chat_id этой группы: {message.chat.id}")
-
 # ================= БД =================
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+
+# ================= УТИЛИТЫ КОНФИГА =================
+def resolve_leads_chat_id() -> int:
+    """Читаем LEADS_CHAT_ID из БД (app_config), если там пусто — из ENV."""
+    val = get_config("LEADS_CHAT_ID", LEADS_CHAT_ID_ENV)
+    try:
+        return int(val) if val else 0
+    except Exception:
+        return 0
 
 # ================= КЛАВИАТУРЫ =================
 main_kb = ReplyKeyboardMarkup(
@@ -402,7 +409,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
         "⚠️ Сервер ИИ перегружен. Попробуй ещё раз чуть позже — а пока загляни в «🎒 Найти туры» для готовых вариантов."
     ]
 
-# ================= РЕНДЕР КАРТОЧЕК =================
+# ================= РЕНДЕР КАРТОЧЕК И УВЕДОМЛЕНИЕ В ГРУППУ =================
 def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
     open_btn = []
     url = (t.get("source_url") or "").strip()
@@ -445,10 +452,7 @@ async def send_tour_card(chat_id: int, user_id: int, t: dict):
 
     photo = (t.get("photo_url") or "").strip()
     if photo:
-        # Telegram ограничивает caption ~1024, оставляем ключевое
-        short_caption = caption
-        if len(short_caption) > 1000:
-            short_caption = short_caption[:990].rstrip() + "…"
+        short_caption = caption if len(caption) <= 1000 else caption[:990].rstrip() + "…"
         try:
             await bot.send_photo(chat_id, photo=photo, caption=short_caption, reply_markup=kb)
             return
@@ -460,9 +464,54 @@ async def send_tour_card(chat_id: int, user_id: int, t: dict):
 async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
     for t in rows:
         await send_tour_card(chat_id, user_id, t)
-        await asyncio.sleep(0)  # уступим event loop
-    # Кнопка «Показать ещё» отдельным сообщением
+        await asyncio.sleep(0)
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
+
+async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
+    """Отправляет карточку лида в группу заявок (поддерживает темы)."""
+    chat_id = resolve_leads_chat_id()
+    if not chat_id:
+        logging.warning("notify_leads_group: LEADS_CHAT_ID не задан")
+        return
+
+    try:
+        price_str = fmt_price(t.get("price"), t.get("currency"))
+        hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(t.get("hotel")))
+        dates_norm = normalize_dates_for_display(t.get("dates"))
+        time_str = localize_dt(t.get("posted_at"))
+        user_tag = f"@{getattr(user, 'username', '')}" if getattr(user, "username", None) else f"{(user.first_name or '')} {(user.last_name or '')}".strip()
+        src = (t.get("source_url") or "").strip()
+        src_line = f'\n🔗 <a href="{escape(src)}">Источник</a>' if src else ""
+
+        text = (
+            f"🆕 <b>Заявка №{lead_id}</b>\n"
+            f"👤 {escape(user_tag)} (id: <code>{user.id}</code>)\n"
+            f"📞 {escape(phone)}\n"
+            f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}\n"
+            f"🏨 {safe(hotel_clean)}\n"
+            f"💵 {price_str}\n"
+            f"📅 {dates_norm}\n"
+            f"{time_str}{src_line}"
+        ).strip()
+
+        kwargs = {}
+        if LEADS_TOPIC_ID:
+            kwargs["message_thread_id"] = LEADS_TOPIC_ID
+
+        photo = (t.get("photo_url") or "").strip()
+        if photo:
+            short = text if len(text) <= 1000 else (text[:990].rstrip() + "…")
+            msg = await bot.send_photo(chat_id, photo=photo, caption=short, parse_mode="HTML", **kwargs)
+        else:
+            msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
+
+        if pin:
+            try:
+                await bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
+            except Exception as e:
+                logging.warning(f"pin failed: {e}")
+    except Exception as e:
+        logging.error(f"notify_leads_group failed: {e}")
 
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
@@ -473,6 +522,43 @@ async def cmd_start(message: Message):
         "«🤖 Спросить GPT» — умные ответы про сезоны, бюджеты и лайфхаки.\n"
     )
     await message.answer(text, reply_markup=main_kb)
+
+@dp.message(Command("chatid"))
+async def cmd_chatid(message: Message):
+    await message.reply(f"chat_id: {message.chat.id}\nthread_id: {getattr(message, 'message_thread_id', None)}")
+
+@dp.message(Command("setleadgroup"))
+async def cmd_setleadgroup(message: Message):
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.reply("Недостаточно прав.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply("Использование: /setleadgroup -100xxxxxxxxxx")
+        return
+    new_id = parts[1].strip()
+    try:
+        int(new_id)
+    except:
+        await message.reply("Неверный chat_id.")
+        return
+    set_config("LEADS_CHAT_ID", new_id)
+    await message.reply(f"LEADS_CHAT_ID обновлён: {new_id}")
+
+@dp.message(Command("leadstest"))
+async def cmd_leadstest(message: Message):
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.reply("Недостаточно прав.")
+        return
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours ORDER BY posted_at DESC LIMIT 1;")
+        t = cur.fetchone()
+    if not t:
+        await message.reply("В базе нет туров для теста.")
+        return
+    fake_lead_id = 9999
+    await notify_leads_group(t, lead_id=fake_lead_id, user=message.from_user, phone="+99890XXXXXXX", pin=False)
+    await message.reply("Тестовая заявка отправлена в группу.")
 
 @dp.message(F.text == "🎒 Найти туры")
 async def entry_find_tours(message: Message):
@@ -630,7 +716,6 @@ async def cb_fav_add(call: CallbackQuery):
     set_favorite(call.from_user.id, tour_id)
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
 
-    # Обновим клавиатуру на сообщении
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
@@ -672,7 +757,16 @@ async def on_contact(message: Message):
         await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
         return
     phone = message.contact.phone_number
-    lead_id = create_lead(message.from_user.id, st["tour_id"], phone, note="from contact share")
+    tour_id = st["tour_id"]
+    lead_id = create_lead(message.from_user.id, tour_id, phone, note="from contact share")
+
+    # подтянем тур и отправим в группу заявок
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours WHERE id=%s;", (tour_id,))
+        t = cur.fetchone()
+    if t:
+        await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
+
     await message.answer(
         f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞",
         reply_markup=main_kb
