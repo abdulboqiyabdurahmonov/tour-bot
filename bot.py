@@ -976,6 +976,7 @@ async def on_contact(message: Message):
 
     if t and lead_id:
         await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
+        append_lead_to_sheet(lead_id, message.from_user, phone, t)
         await message.answer(f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞", reply_markup=main_kb)
     else:
         await message.answer("Контакт получен, но не удалось создать заявку. Попробуй ещё раз или напиши менеджеру.", reply_markup=main_kb)
