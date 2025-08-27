@@ -50,22 +50,11 @@ LEADS_CHAT_ID_ENV = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 
-SHEETS_CREDENTIALS_B64 = os.getenv("SHEETS_CREDENTIALS_B64", "").strip()
-SHEETS_SPREADSHEET_ID = os.getenv("SHEETS_SPREADSHEET_ID", "").strip()
-
-# Авторизация
-creds = Credentials.from_service_account_info(eval(GOOGLE_CREDENTIALS_JSON), scopes=[
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-])
-gc = gspread.authorize(creds)
-
-# Открываем таблицу
-sh = gc.open_by_key(SPREADSHEET_ID)
-
-# Берём имя вкладки из ENV (или "Заявки" по умолчанию)
-WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Заявки")
-worksheet = sh.worksheet(WORKSHEET_NAME)
+# Google Sheets ENV
+SHEETS_CREDENTIALS_B64 = (os.getenv("SHEETS_CREDENTIALS_B64") or "").strip()
+SHEETS_SPREADSHEET_ID = (os.getenv("SHEETS_SPREADSHEET_ID") or "").strip()
+WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Заявки")  # имя вкладки для лидов
+KB_SHEET_NAME = os.getenv("KB_SHEET_NAME", "KB")        # лист для актуальных фактов
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
@@ -100,31 +89,36 @@ def ensure_pending_wants_table():
         """)
 
 def ensure_leads_schema():
-    """Создаёт таблицу leads (если её нет) и добавляет недостающие колонки."""
+    """
+    Создаёт таблицу leads (если её нет) и добавляет недостающие колонки.
+    Схема согласована с create_lead(full_name, phone, tour_id, note).
+    """
     with get_conn() as conn, conn.cursor() as cur:
-        # если нет таблицы — создадим минимально нужную
         cur.execute("""
             CREATE TABLE IF NOT EXISTS leads (
                 id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tour_id INTEGER,
+                full_name TEXT NOT NULL DEFAULT '',
                 phone TEXT,
+                tour_id INTEGER,
                 note TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                user_id BIGINT
             );
         """)
-        # а если есть — догоним недостающие колонки
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS user_id BIGINT;")
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tour_id INTEGER;")
+        # догоним недостающие колонки (на случай старой схемы)
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT '';")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone TEXT;")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tour_id INTEGER;")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS note TEXT;")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS user_id BIGINT;")
         cur.execute("CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads(created_at);")
 
-# ============== GOOGLE SHEETS (KB + Leads) ==============
+# ============== GOOGLE SHEETS (robust init + KB + Leads) ==============
 _gs_client = None
 
 def _get_gs_client():
+    """Ленивая инициализация gspread-клиента. Поддержка base64 JSON или прямого JSON."""
     global _gs_client
     if _gs_client is not None:
         return _gs_client
@@ -133,24 +127,32 @@ def _get_gs_client():
         _gs_client = None
         return None
     try:
-        info = json.loads(base64.b64decode(SHEETS_CREDENTIALS_B64))
+        # Пытаемся как base64 (валидируем). Если не base64 — пробуем как обычный JSON.
+        try:
+            decoded = base64.b64decode(SHEETS_CREDENTIALS_B64, validate=True)
+            info = json.loads(decoded.decode("utf-8"))
+        except Exception:
+            info = json.loads(SHEETS_CREDENTIALS_B64)
+
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
         creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
         _gs_client = gspread.authorize(creds)
+        logging.info("✅ Google Sheets авторизация успешно выполнена")
         return _gs_client
     except Exception as e:
         logging.error(f"GS init failed: {e}")
         _gs_client = None
         return None
 
-def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
+def _ensure_ws(spreadsheet, title: str, header: List[str]):
+    """Гарантируем наличие листа с заголовком."""
     try:
         ws = spreadsheet.worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=title, rows=200, cols=max(10, len(header)))
+        ws = spreadsheet.add_worksheet(title=title, rows=200, cols=max(10, len(header) or 10))
         if header:
             ws.append_row(header)
     return ws
@@ -163,7 +165,7 @@ async def load_kb_context(max_rows: int = 60) -> str:
             return ""
         sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
         try:
-            ws = sh.worksheet("KB")
+            ws = sh.worksheet(KB_SHEET_NAME)
         except gspread.exceptions.WorksheetNotFound:
             return ""
         rows = ws.get_all_records()  # list[dict]
@@ -183,7 +185,7 @@ async def load_kb_context(max_rows: int = 60) -> str:
         return ""
 
 def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
-    """Добавляет заявку в лист Leads."""
+    """Добавляет заявку в лист (WORKSHEET_NAME, по умолчанию «Заявки»)."""
     try:
         gc = _get_gs_client()
         if not gc:
@@ -194,7 +196,7 @@ def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
             "country", "city", "hotel", "price", "currency", "dates",
             "source_url", "posted_local"
         ]
-        ws = _ensure_ws(sh, "Leads", header)
+        ws = _ensure_ws(sh, WORKSHEET_NAME, header)
         full_name = f"{(getattr(user, 'first_name', '') or '').strip()} {(getattr(user, 'last_name', '') or '').strip()}".strip()
         username = f"@{user.username}" if getattr(user, "username", None) else ""
         posted_local = localize_dt(t.get("posted_at"))
@@ -342,7 +344,7 @@ def normalize_dates_for_display(s: Optional[str]) -> str:
         d = int(d); mo = int(mo); y = int(y)
         if y < 100: y += 2000 if y < 70 else 1900
         if mo > 12 and d <= 12: d, mo = mo, d
-        return f"{d:02d}.{mo:02d}.{y:04d}"
+        return f"{d:02d}.{mo:02d}.{y:04d}"""
     return f"{_norm(d1, m1, y1)}–{_norm(d2, m2, y2)}"
 
 def localize_dt(dt: Optional[datetime]) -> str:
@@ -657,6 +659,7 @@ async def send_tour_card(chat_id: int, user_id: int, t: dict):
     fav = is_favorite(user_id, t["id"])
     kb = tour_inline_kb(t, fav)
     caption = build_card_text(t)
+    # Только текст (без фото) для пользователя:
     await bot.send_message(chat_id, caption, reply_markup=kb, disable_web_page_preview=True)
 
 async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
@@ -666,6 +669,7 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
 async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
+    """Отправляет карточку лида в группу заявок (поддерживает темы). Не показываем user_id."""
     chat_id = resolve_leads_chat_id()
     if not chat_id:
         logging.warning("notify_leads_group: LEADS_CHAT_ID не задан")
@@ -1064,9 +1068,23 @@ async def on_startup():
 
     try:
         ensure_pending_wants_table()
-        ensure_leads_schema()  # <- автомиграция leads, чтобы точно был user_id
+        ensure_leads_schema()
     except Exception as e:
         logging.error(f"Schema ensure failed: {e}")
+
+    # Пробуем прогреть Google Sheets (логируем, но не падаем)
+    try:
+        _ = _get_gs_client()
+        if _:
+            # также гарантируем, что вкладка для лидов существует
+            sh = _.open_by_key(SHEETS_SPREADSHEET_ID)
+            _ensure_ws(sh, WORKSHEET_NAME, [
+                "created_utc", "lead_id", "username", "full_name", "phone",
+                "country", "city", "hotel", "price", "currency", "dates",
+                "source_url", "posted_local"
+            ])
+    except Exception as e:
+        logging.error(f"GS warmup failed: {e}")
 
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
