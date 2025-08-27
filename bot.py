@@ -53,6 +53,20 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 SHEETS_CREDENTIALS_B64 = os.getenv("SHEETS_CREDENTIALS_B64", "").strip()
 SHEETS_SPREADSHEET_ID = os.getenv("SHEETS_SPREADSHEET_ID", "").strip()
 
+# Авторизация
+creds = Credentials.from_service_account_info(eval(GOOGLE_CREDENTIALS_JSON), scopes=[
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+])
+gc = gspread.authorize(creds)
+
+# Открываем таблицу
+sh = gc.open_by_key(SPREADSHEET_ID)
+
+# Берём имя вкладки из ENV (или "Заявки" по умолчанию)
+WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Заявки")
+worksheet = sh.worksheet(WORKSHEET_NAME)
+
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
 if not OPENAI_API_KEY:
