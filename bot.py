@@ -104,6 +104,103 @@ def ensure_leads_schema():
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
         cur.execute("CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads(created_at);")
 
+# ============== GOOGLE SHEETS (KB + Leads) ==============
+_gs_client = None
+
+def _get_gs_client():
+    global _gs_client
+    if _gs_client is not None:
+        return _gs_client
+    if not (SHEETS_CREDENTIALS_B64 and SHEETS_SPREADSHEET_ID):
+        logging.info("GS: credentials or spreadsheet id not set")
+        _gs_client = None
+        return None
+    try:
+        info = json.loads(base64.b64decode(SHEETS_CREDENTIALS_B64))
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        _gs_client = gspread.authorize(creds)
+        return _gs_client
+    except Exception as e:
+        logging.error(f"GS init failed: {e}")
+        _gs_client = None
+        return None
+
+def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
+    try:
+        ws = spreadsheet.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=title, rows=200, cols=max(10, len(header)))
+        if header:
+            ws.append_row(header)
+    return ws
+
+async def load_kb_context(max_rows: int = 60) -> str:
+    """Читает KB-лист и собирает факты в короткий текст для подмешивания в GPT."""
+    try:
+        gc = _get_gs_client()
+        if not gc:
+            return ""
+        sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
+        try:
+            ws = sh.worksheet("KB")
+        except gspread.exceptions.WorksheetNotFound:
+            return ""
+        rows = ws.get_all_records()  # list[dict]
+        lines = []
+        for r in rows[:max_rows]:
+            topic = (r.get("topic") or r.get("Тема") or r.get("topic/country") or "").strip()
+            fact = (r.get("fact") or r.get("Факт") or r.get("note") or "").strip()
+            if not fact:
+                continue
+            if topic:
+                lines.append(f"- [{topic}] {fact}")
+            else:
+                lines.append(f"- {fact}")
+        return "\n".join(lines)
+    except Exception as e:
+        logging.warning(f"KB load failed: {e}")
+        return ""
+
+def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
+    """Добавляет заявку в лист Leads."""
+    try:
+        gc = _get_gs_client()
+        if not gc:
+            return
+        sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
+        header = [
+            "created_utc", "lead_id", "username", "full_name", "phone",
+            "country", "city", "hotel", "price", "currency", "dates",
+            "source_url", "posted_local"
+        ]
+        ws = _ensure_ws(sh, "Leads", header)
+        full_name = f"{(getattr(user, 'first_name', '') or '').strip()} {(getattr(user, 'last_name', '') or '').strip()}".strip()
+        username = f"@{user.username}" if getattr(user, "username", None) else ""
+        posted_local = localize_dt(t.get("posted_at"))
+        hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description")) or "Пакетный тур"
+        hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text))
+        ws.append_row([
+            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            int(lead_id),
+            username,
+            full_name,
+            phone,
+            t.get("country") or "",
+            t.get("city") or "",
+            hotel_clean,
+            t.get("price") or "",
+            (t.get("currency") or "").upper(),
+            t.get("dates") or "",
+            t.get("source_url") or "",
+            posted_local,
+        ], value_input_option="USER_ENTERED")
+    except Exception as e:
+        logging.error(f"append_lead_to_sheet failed: {e}")
+
 # ================= УТИЛИТЫ КОНФИГА =================
 def resolve_leads_chat_id() -> int:
     val = get_config("LEADS_CHAT_ID", LEADS_CHAT_ID_ENV)
