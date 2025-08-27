@@ -22,7 +22,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from aiogram.filters import Command
+ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
 from psycopg import connect
@@ -43,10 +43,9 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", os.getenv("WEBHOOK_URL", "https://tour-
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-# Группа заявок и настройки админ-команд (можно задать тут, а потом менять через /setleadgroup)
 LEADS_CHAT_ID_ENV = (os.getenv("LEADS_CHAT_ID") or "").strip()
-LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)     # если используешь Темы/Форумы в супергруппе
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)       # кто может выполнять команды админа
+LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
@@ -58,8 +57,8 @@ if not DATABASE_URL:
 # ================= КОНСТАНТЫ =================
 TZ = ZoneInfo("Asia/Tashkent")
 PAGER_STATE: Dict[str, Dict] = {}
-PAGER_TTL_SEC = 3600  # 1 час
-WANT_STATE: Dict[int, Dict] = {}  # in-memory fallback на случай, если не успели записать в БД
+PAGER_TTL_SEC = 3600
+WANT_STATE: Dict[int, Dict] = {}
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -70,7 +69,6 @@ app = FastAPI()
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
-# Создадим (если нет) таблицу для «висящих» заявок
 def ensure_pending_wants_table():
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
@@ -81,9 +79,30 @@ def ensure_pending_wants_table():
             );
         """)
 
+def ensure_leads_schema():
+    """Создаёт таблицу leads (если её нет) и добавляет недостающие колонки."""
+    with get_conn() as conn, conn.cursor() as cur:
+        # если нет таблицы — создадим минимально нужную
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS leads (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT,
+                tour_id INTEGER,
+                phone TEXT,
+                note TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+        """)
+        # а если есть — догоним недостающие колонки
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS user_id BIGINT;")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tour_id INTEGER;")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone TEXT;")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS note TEXT;")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+        cur.execute("CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads(created_at);")
+
 # ================= УТИЛИТЫ КОНФИГА =================
 def resolve_leads_chat_id() -> int:
-    """Читаем LEADS_CHAT_ID из БД (app_config), если там пусто — из ENV."""
     val = get_config("LEADS_CHAT_ID", LEADS_CHAT_ID_ENV)
     try:
         return int(val) if val else 0
@@ -137,7 +156,7 @@ def want_contact_kb() -> ReplyKeyboardMarkup:
         selective=True,
     )
 
-# ================= УТИЛИТЫ ПАГИНАЦИИ =================
+# ================= ПАГИНАЦИЯ =================
 def _new_token() -> str:
     return secrets.token_urlsafe(6).rstrip("=-_")
 
@@ -156,7 +175,7 @@ def _touch_state(token: str):
     if st:
         st["ts"] = time.monotonic()
 
-# ================= ПОМОЩНИКИ ФОРМАТОВ =================
+# ================= ФОРМАТЫ =================
 def fmt_price(price, currency) -> str:
     if price is None:
         return "—"
@@ -164,7 +183,6 @@ def fmt_price(price, currency) -> str:
         p = int(float(price))
     except Exception:
         return escape(f"{price} {currency or ''}".strip())
-
     cur = (currency or "").strip().upper()
     if cur in {"$", "US$", "USD$", "USD"}:
         cur = "USD"
@@ -201,7 +219,6 @@ def normalize_dates_for_display(s: Optional[str]) -> str:
     s = s.strip()
     m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})\s*[–-]\s*(\d{1,2})\.(\d{1,2})\.(\d{2,4})", s)
     if not m:
-        # если формат «Октябрь · 8д / 7н», отдадим как есть
         return escape(s)
     d1, m1, y1, d2, m2, y2 = m.groups()
     def _norm(d, mo, y):
@@ -221,14 +238,13 @@ def localize_dt(dt: Optional[datetime]) -> str:
     except Exception:
         return f"🕒 {dt.strftime('%d.%m.%Y %H:%M')}"
 
-# ====== ДОП. ФОЛЛБЭКИ ДЛЯ КАРТОЧКИ (если нет hotel) ======
+# ====== ДОП. ФОЛЛБЭКИ ======
 CONTACT_STOP_WORDS = (
     "заброниров", "брониров", "звоните", "тел:", "телефон", "whatsapp", "вацап",
     "менеджер", "директ", "адрес", "@", "+998", "+7", "+380", "call-центр", "колл-центр"
 )
 
 def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
-    """Берём первую информативную строку описания как заголовок, если hotel пуст."""
     if not desc:
         return None
     for raw in desc.splitlines():
@@ -238,7 +254,6 @@ def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
         low = line.lower()
         if any(sw in low for sw in CONTACT_STOP_WORDS):
             break
-        # Отсеиваем явные строки про цену/даты — просто пропустим их
         if re.search(r"\b(\d{3,5}\s?(usd|eur|uzs)|\d+д|\d+н|all ?inclusive|ai|hb|bb|fb)\b", low, re.I):
             pass
         line = re.sub(r"^[\W_]{0,3}", "", line).strip()
@@ -246,7 +261,6 @@ def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
     return None
 
 def extract_meal(text_a: Optional[str], text_b: Optional[str] = None) -> Optional[str]:
-    """AI/HB/BB/FB/UAI — ищем в двух кусках текста (hotel/description)."""
     joined = " ".join([t or "" for t in (text_a, text_b)]).lower()
     if re.search(r"\buai\b|ultra\s*all", joined): return "UAI (ultra)"
     if re.search(r"\bai\b|all\s*inclusive|всё включено|все включено", joined): return "AI (всё включено)"
@@ -255,7 +269,7 @@ def extract_meal(text_a: Optional[str], text_b: Optional[str] = None) -> Optiona
     if re.search(r"\bfb\b|полный\s*панс", joined): return "FB (полный)"
     return None
 
-# ================= ДБ-ХЕЛПЕРЫ (избранное/лиды/ожидание контакта) =================
+# ================= ДБ-ХЕЛПЕРЫ =================
 def is_favorite(user_id: int, tour_id: int) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM favorites WHERE user_id=%s AND tour_id=%s LIMIT 1;", (user_id, tour_id))
@@ -275,7 +289,8 @@ def unset_favorite(user_id: int, tour_id: int):
 def create_lead(user_id: int, tour_id: int, phone: Optional[str], note: Optional[str] = None):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO leads(user_id, tour_id, phone, note) VALUES (%s, %s, %s, %s)
+            INSERT INTO leads(user_id, tour_id, phone, note)
+            VALUES (%s, %s, %s, %s)
             RETURNING id;
         """, (user_id, tour_id, phone, note))
         row = cur.fetchone()
@@ -288,14 +303,17 @@ def set_pending_want(user_id: int, tour_id: int):
             ON CONFLICT (user_id) DO UPDATE SET tour_id = EXCLUDED.tour_id, created_at = now();
         """, (user_id, tour_id))
 
-def pop_pending_want(user_id: int) -> Optional[int]:
+def get_pending_want(user_id: int) -> Optional[int]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT tour_id FROM pending_wants WHERE user_id=%s;", (user_id,))
         row = cur.fetchone()
-        cur.execute("DELETE FROM pending_wants WHERE user_id=%s;", (user_id,))
         return row["tour_id"] if row else None
 
-# ================= ПОИСК ТУРОВ (с id; photo_url можно выбирать, но не используем) =================
+def del_pending_want(user_id: int):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM pending_wants WHERE user_id=%s;", (user_id,))
+
+# ================= ПОИСК ТУРОВ =================
 async def fetch_tours(
     query: Optional[str] = None,
     *,
@@ -306,7 +324,6 @@ async def fetch_tours(
     limit_recent: int = 10,
     limit_fallback: int = 5,
 ) -> Tuple[List[dict], bool]:
-    """Возвращает (rows, is_recent)."""
     try:
         where_clauses = []
         params = []
@@ -469,7 +486,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
         "⚠️ Сервер ИИ перегружен. Попробуй ещё раз чуть позже — а пока загляни в «🎒 Найти туры» для готовых вариантов."
     ]
 
-# ================= РЕНДЕР КАРТОЧЕК И УВЕДОМЛЕНИЕ В ГРУППУ =================
+# ================= КАРТОЧКИ/УВЕДОМЛЕНИЯ =================
 def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
     open_btn = []
     url = (t.get("source_url") or "").strip()
@@ -491,18 +508,12 @@ def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
 
 def build_card_text(t: dict) -> str:
     price_str = fmt_price(t.get("price"), t.get("currency"))
-
-    # hotel c фоллбэком на первую информативную строку описания
     hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
     hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
-
-    # питание (если сможем распознать)
     meal = extract_meal(t.get("hotel"), t.get("description"))
     meal_line = f"\n🍽 {meal}" if meal else ""
-
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
-
     parts = [
         f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}",
         f"🏨 {safe(hotel_clean)}{meal_line}",
@@ -514,7 +525,6 @@ def build_card_text(t: dict) -> str:
     return "\n".join(parts)
 
 async def send_tour_card(chat_id: int, user_id: int, t: dict):
-    """Теперь ВСЕГДА шлём текст (без фото)."""
     fav = is_favorite(user_id, t["id"])
     kb = tour_inline_kb(t, fav)
     caption = build_card_text(t)
@@ -527,7 +537,6 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
 async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
-    """Отправляет карточку лида в группу заявок (поддерживает темы). Без фото."""
     chat_id = resolve_leads_chat_id()
     if not chat_id:
         logging.warning("notify_leads_group: LEADS_CHAT_ID не задан")
@@ -799,7 +808,6 @@ async def cb_want(call: CallbackQuery):
     except Exception:
         await call.answer("Ошибка заявки.", show_alert=False); return
 
-    # Пишем в память и в БД (надежный вариант)
     WANT_STATE[call.from_user.id] = {"tour_id": tour_id}
     try:
         set_pending_want(call.from_user.id, tour_id)
@@ -814,16 +822,16 @@ async def cb_want(call: CallbackQuery):
 
 @dp.message(F.contact)
 async def on_contact(message: Message):
-    # 1) сначала пытаемся взять из памяти
-    st = WANT_STATE.pop(message.from_user.id, None)
+    # 1) память процесса (если ещё жива)
+    st = WANT_STATE.get(message.from_user.id)
     tour_id = st["tour_id"] if st else None
 
-    # 2) если в памяти нет — берём из БД (устойчиво к рестартам)
+    # 2) устойчивая БД — только читаем (НЕ удаляем)
     if not tour_id:
         try:
-            tour_id = pop_pending_want(message.from_user.id)
+            tour_id = get_pending_want(message.from_user.id)
         except Exception as e:
-            logging.warning(f"pop_pending_want failed: {e}")
+            logging.warning(f"get_pending_want failed: {e}")
 
     if not tour_id:
         await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
@@ -831,7 +839,21 @@ async def on_contact(message: Message):
         return
 
     phone = message.contact.phone_number
-    lead_id = create_lead(message.from_user.id, tour_id, phone, note="from contact share")
+
+    # создаём лид и только ПОСЛЕ этого удаляем pending
+    try:
+        lead_id = create_lead(message.from_user.id, tour_id, phone, note="from contact share")
+    except Exception as e:
+        logging.error(f"create_lead failed: {e}")
+        await message.answer("Упс, не смог записать заявку 😕 Попробуй ещё раз чуть позже или напиши менеджеру.")
+        return
+
+    # удаляем pending
+    WANT_STATE.pop(message.from_user.id, None)
+    try:
+        del_pending_want(message.from_user.id)
+    except Exception as e:
+        logging.warning(f"del_pending_want failed: {e}")
 
     # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
@@ -912,11 +934,11 @@ async def on_startup():
     except Exception as e:
         logging.error(f"Ошибка init_db(): {e}")
 
-    # гарантируем таблицу для «ожидания контакта»
     try:
         ensure_pending_wants_table()
+        ensure_leads_schema()  # <- автомиграция leads, чтобы точно был user_id
     except Exception as e:
-        logging.error(f"ensure_pending_wants_table failed: {e}")
+        logging.error(f"Schema ensure failed: {e}")
 
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
