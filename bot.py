@@ -22,7 +22,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
- from aiogram.filters import Command
+from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
 from psycopg import connect
