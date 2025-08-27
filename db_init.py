@@ -9,7 +9,7 @@ def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
 def init_db():
-    """Создание таблиц/индексов, если их нет"""
+    """Создание таблиц/индексов и лёгкие миграции."""
     with get_conn() as conn, conn.cursor() as cur:
         # Пользователи
         cur.execute("""
@@ -30,7 +30,7 @@ def init_db():
             );
         """)
 
-        # Туры (+ photo_url для карточек)
+        # Туры (включая photo_url)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tours (
                 id SERIAL PRIMARY KEY,
@@ -50,8 +50,8 @@ def init_db():
             );
         """)
 
-        # --- МИГРАЦИИ СХЕМЫ (после CREATE TABLE) ---
-cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
+        # --- ЛЁГКИЕ МИГРАЦИИ (на случай старой схемы) ---
+        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
 
         # Избранное
         cur.execute("""
@@ -63,7 +63,7 @@ cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
             );
         """)
 
-        # Лиды (заявки)
+        # Лиды
         cur.execute("""
             CREATE TABLE IF NOT EXISTS leads (
                 id SERIAL PRIMARY KEY,
@@ -75,7 +75,7 @@ cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
             );
         """)
 
-        # Конфиг бота (key-value)
+        # KV-конфиг
         cur.execute("""
             CREATE TABLE IF NOT EXISTS app_config (
                 key TEXT PRIMARY KEY,
@@ -83,7 +83,7 @@ cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
             );
         """)
 
-        # Индексы для скорости поиска
+        # Индексы
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours (posted_at DESC);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_country ON tours (LOWER(country));")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_city ON tours (LOWER(city));")
@@ -126,6 +126,6 @@ def get_config(key: str, default: str | None = None) -> str | None:
 def set_config(key: str, val: str):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO app_config(key, val) VALUES (%s,%s)
+            INSERT INTO app_config(key, val) VALUES (%s, %s)
             ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
         """, (key, val))
