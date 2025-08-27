@@ -46,12 +46,16 @@ def init_db():
                 source_url TEXT,
                 photo_url TEXT,
                 posted_at TIMESTAMP DEFAULT NOW(),
+                -- старый уникальный составной ключ
                 UNIQUE(message_id, source_chat)
             );
         """)
 
         # --- ЛЁГКИЕ МИГРАЦИИ (на случай старой схемы) ---
         cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
+        # >>> SAN: stable_key для идемпотентности и дедупликации
+        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS stable_key TEXT;")
+        # <<< SAN: stable_key
 
         # Избранное
         cur.execute("""
@@ -88,6 +92,10 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_country ON tours (LOWER(country));")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_city ON tours (LOWER(city));")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_hotel ON tours (LOWER(hotel));")
+        # >>> SAN: уникальные индексы
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tours_stable_key ON tours (stable_key);")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tours_source_msg ON tours (source_chat, message_id);")
+        # <<< SAN: уникальные индексы
 
     logging.info("📦 База данных инициализирована")
 
