@@ -440,24 +440,32 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
 
     last_gpt_call[user_id] = now
 
+    # Подмешаем актуальные факты из Google Sheet (лист KB), если есть
+    kb_text = await load_kb_context()
+
+    system_text = (
+        "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
+        "Отвечай дружелюбно и конкретно. Держись тематики: туры, отели, сезоны, визы, цены, лайфхаки. "
+        f"Считай текущую дату/время: {datetime.now(TZ).strftime('%d.%m.%Y %H:%M %Z')}. "
+        "Если дан блок «АКТУАЛЬНЫЕ ФАКТЫ», приводи информацию в первую очередь из него."
+    )
+
+    user_content = prompt
+    if kb_text:
+        user_content = f"АКТУАЛЬНЫЕ ФАКТЫ (из внутренней базы):\n{kb_text}\n\nВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{prompt}"
+
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
-                    "Отвечай дружелюбно и конкретно. Держись тематики: туры, отели, сезоны, визы, цены, лайфхаки."
-                ),
-            },
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_content},
         ],
         "temperature": 0.6,
         "max_tokens": 700,
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=12.0) as client:
             for attempt in range(3):
                 r = await client.post(
                     "https://api.openai.com/v1/chat/completions",
@@ -479,9 +487,9 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                     else:
                         answer += "\n\n✨ Хочешь прямые ссылки на источники туров? Подключи Premium доступ TripleA."
                     MAX_LEN = 3800
-                    return [answer[i : i + MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
+                    return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
                 elif r.status_code == 429:
-                    await asyncio.sleep(1.5**attempt)
+                    await asyncio.sleep(1.5 ** attempt)
                     continue
                 else:
                     logging.error(f"OpenAI error {r.status_code}: {r.text[:400]}")
