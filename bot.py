@@ -59,7 +59,7 @@ if not DATABASE_URL:
 TZ = ZoneInfo("Asia/Tashkent")
 PAGER_STATE: Dict[str, Dict] = {}
 PAGER_TTL_SEC = 3600  # 1 час
-WANT_STATE: Dict[int, Dict] = {}  # user_id -> {"tour_id": int}
+WANT_STATE: Dict[int, Dict] = {}  # in-memory fallback на случай, если не успели записать в БД
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -69,6 +69,17 @@ app = FastAPI()
 # ================= БД =================
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+
+# Создадим (если нет) таблицу для «висящих» заявок
+def ensure_pending_wants_table():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS pending_wants (
+                user_id BIGINT PRIMARY KEY,
+                tour_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+        """)
 
 # ================= УТИЛИТЫ КОНФИГА =================
 def resolve_leads_chat_id() -> int:
@@ -227,10 +238,9 @@ def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
         low = line.lower()
         if any(sw in low for sw in CONTACT_STOP_WORDS):
             break
-        # Отсеиваем явные строки про цену/даты
+        # Отсеиваем явные строки про цену/даты — просто пропустим их
         if re.search(r"\b(\d{3,5}\s?(usd|eur|uzs)|\d+д|\d+н|all ?inclusive|ai|hb|bb|fb)\b", low, re.I):
             pass
-        # уберём лидирующие эмодзи/иконки
         line = re.sub(r"^[\W_]{0,3}", "", line).strip()
         return line[:80]
     return None
@@ -245,7 +255,7 @@ def extract_meal(text_a: Optional[str], text_b: Optional[str] = None) -> Optiona
     if re.search(r"\bfb\b|полный\s*панс", joined): return "FB (полный)"
     return None
 
-# ================= ДБ-ХЕЛПЕРЫ (избранное/лиды) =================
+# ================= ДБ-ХЕЛПЕРЫ (избранное/лиды/ожидание контакта) =================
 def is_favorite(user_id: int, tour_id: int) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM favorites WHERE user_id=%s AND tour_id=%s LIMIT 1;", (user_id, tour_id))
@@ -271,7 +281,21 @@ def create_lead(user_id: int, tour_id: int, phone: Optional[str], note: Optional
         row = cur.fetchone()
         return row["id"] if row else None
 
-# ================= ПОИСК ТУРОВ (без photo_url) =================
+def set_pending_want(user_id: int, tour_id: int):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO pending_wants(user_id, tour_id) VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET tour_id = EXCLUDED.tour_id, created_at = now();
+        """, (user_id, tour_id))
+
+def pop_pending_want(user_id: int) -> Optional[int]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT tour_id FROM pending_wants WHERE user_id=%s;", (user_id,))
+        row = cur.fetchone()
+        cur.execute("DELETE FROM pending_wants WHERE user_id=%s;", (user_id,))
+        return row["tour_id"] if row else None
+
+# ================= ПОИСК ТУРОВ (с id; photo_url можно выбирать, но не используем) =================
 async def fetch_tours(
     query: Optional[str] = None,
     *,
@@ -306,7 +330,7 @@ async def fetch_tours(
 
         with get_conn() as conn, conn.cursor() as cur:
             sql_recent = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
                 FROM tours
                 {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
                 {order_clause}
@@ -318,7 +342,7 @@ async def fetch_tours(
                 return rows, True
 
             sql_fb = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
                 FROM tours
                 {where_sql}
                 {order_clause}
@@ -367,7 +391,7 @@ async def fetch_tours_page(
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
 
         sql = f"""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description
+            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
             FROM tours
             {where_sql}
             {order_clause}
@@ -490,6 +514,7 @@ def build_card_text(t: dict) -> str:
     return "\n".join(parts)
 
 async def send_tour_card(chat_id: int, user_id: int, t: dict):
+    """Теперь ВСЕГДА шлём текст (без фото)."""
     fav = is_favorite(user_id, t["id"])
     kb = tour_inline_kb(t, fav)
     caption = build_card_text(t)
@@ -502,7 +527,7 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
 async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
-    """Отправляет карточку лида в группу заявок (только текст, без фото)."""
+    """Отправляет карточку лида в группу заявок (поддерживает темы). Без фото."""
     chat_id = resolve_leads_chat_id()
     if not chat_id:
         logging.warning("notify_leads_group: LEADS_CHAT_ID не задан")
@@ -581,7 +606,7 @@ async def cmd_leadstest(message: Message):
         await message.reply("Недостаточно прав.")
         return
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours ORDER BY posted_at DESC LIMIT 1;")
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours ORDER BY posted_at DESC LIMIT 1;")
         t = cur.fetchone()
     if not t:
         await message.reply("В базе нет туров для теста.")
@@ -747,7 +772,7 @@ async def cb_fav_add(call: CallbackQuery):
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True))
@@ -762,7 +787,7 @@ async def cb_fav_rm(call: CallbackQuery):
     await call.answer("Убрано из избранного 🤍", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False))
@@ -773,7 +798,14 @@ async def cb_want(call: CallbackQuery):
         tour_id = int(call.data.split(":")[1])
     except Exception:
         await call.answer("Ошибка заявки.", show_alert=False); return
+
+    # Пишем в память и в БД (надежный вариант)
     WANT_STATE[call.from_user.id] = {"tour_id": tour_id}
+    try:
+        set_pending_want(call.from_user.id, tour_id)
+    except Exception as e:
+        logging.warning(f"set_pending_want failed: {e}")
+
     await call.message.answer(
         "Окей! Отправь контакт, чтобы менеджер связался. Нажми кнопку ниже 👇",
         reply_markup=want_contact_kb()
@@ -782,17 +814,28 @@ async def cb_want(call: CallbackQuery):
 
 @dp.message(F.contact)
 async def on_contact(message: Message):
+    # 1) сначала пытаемся взять из памяти
     st = WANT_STATE.pop(message.from_user.id, None)
-    if not st:
+    tour_id = st["tour_id"] if st else None
+
+    # 2) если в памяти нет — берём из БД (устойчиво к рестартам)
+    if not tour_id:
+        try:
+            tour_id = pop_pending_want(message.from_user.id)
+        except Exception as e:
+            logging.warning(f"pop_pending_want failed: {e}")
+
+    if not tour_id:
         await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
+        logging.info(f"Contact came without pending want (user_id={message.from_user.id})")
         return
+
     phone = message.contact.phone_number
-    tour_id = st["tour_id"]
     lead_id = create_lead(message.from_user.id, tour_id, phone, note="from contact share")
 
     # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
@@ -868,6 +911,12 @@ async def on_startup():
         init_db()
     except Exception as e:
         logging.error(f"Ошибка init_db(): {e}")
+
+    # гарантируем таблицу для «ожидания контакта»
+    try:
+        ensure_pending_wants_table()
+    except Exception as e:
+        logging.error(f"ensure_pending_wants_table failed: {e}")
 
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
