@@ -286,14 +286,19 @@ def unset_favorite(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM favorites WHERE user_id=%s AND tour_id=%s;", (user_id, tour_id))
 
-def create_lead(tour_id: int, phone: Optional[str], note: Optional[str] = None):
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO leads(tour_id, phone, note) VALUES (%s, %s, %s)
-            RETURNING id;
-        """, (tour_id, phone, note))
-        row = cur.fetchone()
-        return row["id"] if row else None
+def create_lead(tour_id: int, phone: Optional[str], full_name: str, note: Optional[str] = None):
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO leads (full_name, phone, tour_id, note)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id;
+            """, (full_name, phone, tour_id, note))
+            row = cur.fetchone()
+            return row["id"] if row else None
+    except Exception as e:
+        logging.error(f"create_lead failed: {e}")
+        return None
 
 def set_pending_want(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
@@ -822,50 +827,37 @@ async def cb_want(call: CallbackQuery):
 
 @dp.message(F.contact)
 async def on_contact(message: Message):
-    # 1) память процесса (если ещё жива)
-    st = WANT_STATE.get(message.from_user.id)
-    tour_id = st["tour_id"] if st else None
-
-    # 2) устойчивая БД — только читаем (НЕ удаляем)
-    if not tour_id:
-        try:
-            tour_id = get_pending_want(message.from_user.id)
-        except Exception as e:
-            logging.warning(f"get_pending_want failed: {e}")
-
-    if not tour_id:
-        await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
+    st = WANT_STATE.pop(message.from_user.id, None)
+    if not st:
         logging.info(f"Contact came without pending want (user_id={message.from_user.id})")
+        await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
         return
 
     phone = message.contact.phone_number
+    tour_id = st["tour_id"]
 
-    # создаём лид и только ПОСЛЕ этого удаляем pending
-    try:
-        lead_id = create_lead(tour_id, phone, note="from contact share")
-    except Exception as e:
-        logging.error(f"create_lead failed: {e}")
-        await message.answer("Упс, не смог записать заявку 😕 Попробуй ещё раз чуть позже или напиши менеджеру.")
-        return
+    # Безопасно формируем ФИО
+    full_name = (getattr(message.from_user, "full_name", "") or "").strip()
+    if not full_name:
+        parts = [(message.from_user.first_name or ""), (message.from_user.last_name or "")]
+        full_name = " ".join(p for p in parts if p).strip() or \
+                    (f"@{message.from_user.username}" if message.from_user.username else "Telegram user")
 
-    # удаляем pending
-    WANT_STATE.pop(message.from_user.id, None)
-    try:
-        del_pending_want(message.from_user.id)
-    except Exception as e:
-        logging.warning(f"del_pending_want failed: {e}")
+    lead_id = create_lead(tour_id, phone, full_name, note="from contact share")
 
     # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("""
+            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+            FROM tours WHERE id=%s;
+        """, (tour_id,))
         t = cur.fetchone()
-    if t:
-        await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
 
-    await message.answer(
-        f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞",
-        reply_markup=main_kb
-    )
+    if t and lead_id:
+        await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
+        await message.answer(f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞", reply_markup=main_kb)
+    else:
+        await message.answer("Контакт получен, но не удалось создать заявку. Попробуй ещё раз или напиши менеджеру.", reply_markup=main_kb)
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
