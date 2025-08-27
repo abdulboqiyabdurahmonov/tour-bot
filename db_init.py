@@ -72,6 +72,14 @@ def init_db():
             );
         """)
 
+        # Конфиг бота (key-value)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_config (
+                key TEXT PRIMARY KEY,
+                val TEXT
+            );
+        """)
+
         # Индексы для скорости поиска
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours (posted_at DESC);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_country ON tours (LOWER(country));")
@@ -105,3 +113,16 @@ def search_tours(query: str):
             LIMIT 5;
         """, (f"%{query}%", f"%{query}%", f"%{query}%"))
         return cur.fetchall()
+
+def get_config(key: str, default: str | None = None) -> str | None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT val FROM app_config WHERE key=%s;", (key,))
+        row = cur.fetchone()
+        return row["val"] if row else default
+
+def set_config(key: str, val: str):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO app_config(key, val) VALUES (%s,%s)
+            ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
+        """, (key, val))
