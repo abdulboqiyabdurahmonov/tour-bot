@@ -39,7 +39,22 @@ services:
         sync: false
 
     envVars:
+  - key: TELEGRAM_TOKEN
+    sync: false
+  - key: OPENAI_API_KEY
+    sync: false
+  - key: DATABASE_URL
+    sync: false
+  - key: WEBHOOK_HOST
+    value: https://tour-bot-rxi8.onrender.com
+  - key: WEBHOOK_PATH
+    value: /webhook
   - key: LEADS_CHAT_ID
-    value: "-4806023117"
+    value: "-4806023117"   # твой ID группы заявок
+  - key: LEADS_TOPIC_ID
+    value: ""              # если не используешь Темы, оставь пустым
+  - key: ADMIN_USER_ID
+    value: "557891018"     # твой user_id для админ-команд
+
 
 
