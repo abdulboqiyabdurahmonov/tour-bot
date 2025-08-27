@@ -59,10 +59,7 @@ if not DATABASE_URL:
 TZ = ZoneInfo("Asia/Tashkent")
 PAGER_STATE: Dict[str, Dict] = {}
 PAGER_TTL_SEC = 3600  # 1 час
-
-# Режим «ждём телефон после Хочу этот тур»
-WANT_STATE: Dict[int, Dict] = {}  # user_id -> {"tour_id": int, "ts": float}
-WANT_TTL_SEC = 15 * 60            # 15 минут на ввод номера
+WANT_STATE: Dict[int, Dict] = {}  # user_id -> {"tour_id": int}
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -129,7 +126,6 @@ def want_contact_kb() -> ReplyKeyboardMarkup:
         selective=True,
     )
 
-# ================= СХЕМА БД (фичи) =================
 HAS_PHOTO_URL = False
 
 def refresh_schema_flags():
@@ -210,6 +206,7 @@ def normalize_dates_for_display(s: Optional[str]) -> str:
     s = s.strip()
     m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})\s*[–-]\s*(\d{1,2})\.(\d{1,2})\.(\d{2,4})", s)
     if not m:
+        # если формат «Октябрь · 8д / 7н», отдадим как есть
         return escape(s)
     d1, m1, y1, d2, m2, y2 = m.groups()
     def _norm(d, mo, y):
@@ -228,6 +225,42 @@ def localize_dt(dt: Optional[datetime]) -> str:
         return f"🕒 {dt_local.strftime('%d.%m.%Y %H:%M')} (TST)"
     except Exception:
         return f"🕒 {dt.strftime('%d.%m.%Y %H:%M')}"
+
+# ====== ДОП. ФОЛЛБЭКИ ДЛЯ КАРТОЧКИ (если нет hotel) ======
+CONTACT_STOP_WORDS = (
+    "заброниров", "брониров", "звоните", "тел:", "телефон", "whatsapp", "вацап",
+    "менеджер", "директ", "адрес", "@", "+998", "+7", "+380", "call-центр", "колл-центр"
+)
+
+def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
+    """Берём первую информативную строку описания как заголовок, если hotel пуст."""
+    if not desc:
+        return None
+    for raw in desc.splitlines():
+        line = raw.strip(" •–—-")
+        if not line or len(line) < 6:
+            continue
+        low = line.lower()
+        if any(sw in low for sw in CONTACT_STOP_WORDS):
+            break
+        # Отсеиваем явные строки про цену/даты
+        if re.search(r"\b(\d{3,5}\s?(usd|eur|uzs)|\d+д|\d+н|all ?inclusive|ai|hb|bb|fb)\b", low, re.I):
+            # это ок, но лучше не как title — перескочим к следующей
+            pass
+        # уберём лидирующие эмодзи/иконки
+        line = re.sub(r"^[\W_]{0,3}", "", line).strip()
+        return line[:80]
+    return None
+
+def extract_meal(text_a: Optional[str], text_b: Optional[str] = None) -> Optional[str]:
+    """AI/HB/BB/FB/UAI — ищем в двух кусках текста (hotel/description)."""
+    joined = " ".join([t or "" for t in (text_a, text_b)]).lower()
+    if re.search(r"\buai\b|ultra\s*all", joined): return "UAI (ultra)"
+    if re.search(r"\bai\b|all\s*inclusive|всё включено|все включено", joined): return "AI (всё включено)"
+    if re.search(r"\bhb\b|полупанси", joined): return "HB (полупансион)"
+    if re.search(r"\bbb\b|завтра(к|ки)", joined): return "BB (завтраки)"
+    if re.search(r"\bfb\b|полный\s*панс", joined): return "FB (полный)"
+    return None
 
 # ================= ДБ-ХЕЛПЕРЫ (избранное/лиды) =================
 def is_favorite(user_id: int, tour_id: int) -> bool:
@@ -255,29 +288,6 @@ def create_lead(user_id: int, tour_id: int, phone: Optional[str], note: Optional
         row = cur.fetchone()
         return row["id"] if row else None
 
-# ================= ПОМОЩНИКИ РЕЖИМА ЗАЯВКИ =================
-PHONE_RE = re.compile(r"^\s*(\+?\d[\d\-\s()]{6,})\s*$")
-
-def normalize_phone_text(raw: str) -> str:
-    """Оставляем только цифры и ведущий +; если + нет — добавляем."""
-    if not raw:
-        return ""
-    has_plus = raw.strip().startswith("+")
-    digits = re.sub(r"\D+", "", raw)
-    return f"+{digits}" if not has_plus else f"+{digits}"
-
-def set_want(user_id: int, tour_id: int):
-    WANT_STATE[user_id] = {"tour_id": tour_id, "ts": time.monotonic()}
-
-def get_want(user_id: int) -> Optional[Dict]:
-    st = WANT_STATE.get(user_id)
-    if not st:
-        return None
-    if time.monotonic() - st.get("ts", 0.0) > WANT_TTL_SEC:
-        WANT_STATE.pop(user_id, None)
-        return None
-    return st
-
 # ================= ПОИСК ТУРОВ (с id и photo_url) =================
 async def fetch_tours(
     query: Optional[str] = None,
@@ -295,8 +305,8 @@ async def fetch_tours(
         params = []
 
         if query:
-            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)")
-            params += [f"%{query}%", f"%{query}%", f"%{query}%"]
+            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
+            params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
         if country:
             where_clauses.append("country ILIKE %s")
             params.append(f"%{country}%")
@@ -313,7 +323,7 @@ async def fetch_tours(
 
         with get_conn() as conn, conn.cursor() as cur:
             sql_recent = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
                 FROM tours
                 {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
                 {order_clause}
@@ -325,7 +335,7 @@ async def fetch_tours(
                 return rows, True
 
             sql_fb = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
                 FROM tours
                 {where_sql}
                 {order_clause}
@@ -354,8 +364,8 @@ async def fetch_tours_page(
         params: List = []
 
         if query:
-            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)")
-            params += [f"%{query}%", f"%{query}%", f"%{query}%"]
+            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
+            params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
         if country:
             where_clauses.append("country ILIKE %s")
             params.append(f"%{country}%")
@@ -374,7 +384,7 @@ async def fetch_tours_page(
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
 
         sql = f"""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url
+            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
             FROM tours
             {where_sql}
             {order_clause}
@@ -474,13 +484,21 @@ def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
 
 def build_card_text(t: dict) -> str:
     price_str = fmt_price(t.get("price"), t.get("currency"))
-    hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(t.get("hotel")))
+
+    # hotel c фоллбэком на первую информативную строку описания
+    hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
+    hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
+
+    # питание (если сможем распознать)
+    meal = extract_meal(t.get("hotel"), t.get("description"))
+    meal_line = f"\n🍽 {meal}" if meal else ""
+
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
 
     parts = [
         f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}",
-        f"🏨 {safe(hotel_clean)}",
+        f"🏨 {safe(hotel_clean)}{meal_line}",
         f"💵 {price_str}",
         f"📅 {dates_norm}",
     ]
@@ -519,7 +537,8 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
 
     try:
         price_str = fmt_price(t.get("price"), t.get("currency"))
-        hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(t.get("hotel")))
+        hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
+        hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
         dates_norm = normalize_dates_for_display(t.get("dates"))
         time_str = localize_dt(t.get("posted_at"))
         user_tag = f"@{getattr(user, 'username', '')}" if getattr(user, "username", None) else f"{(user.first_name or '')} {(user.last_name or '')}".strip()
@@ -594,7 +613,7 @@ async def cmd_leadstest(message: Message):
         await message.reply("Недостаточно прав.")
         return
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours ORDER BY posted_at DESC LIMIT 1;")
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours ORDER BY posted_at DESC LIMIT 1;")
         t = cur.fetchone()
     if not t:
         await message.reply("В базе нет туров для теста.")
@@ -760,7 +779,7 @@ async def cb_fav_add(call: CallbackQuery):
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True))
@@ -775,7 +794,7 @@ async def cb_fav_rm(call: CallbackQuery):
     await call.answer("Убрано из избранного 🤍", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False))
@@ -786,61 +805,26 @@ async def cb_want(call: CallbackQuery):
         tour_id = int(call.data.split(":")[1])
     except Exception:
         await call.answer("Ошибка заявки.", show_alert=False); return
-    set_want(call.from_user.id, tour_id)
+    WANT_STATE[call.from_user.id] = {"tour_id": tour_id}
     await call.message.answer(
-        "Окей! Отправь контакт, чтобы менеджер связался. Нажми кнопку ниже 👇\n"
-        "Или просто введи номер текстом: например, +998 90 123-45-67",
+        "Окей! Отправь контакт, чтобы менеджер связался. Нажми кнопку ниже 👇",
         reply_markup=want_contact_kb()
     )
     await call.answer()
 
-# === НОВОЕ: принимаем номер, если пользователь в режиме заявки (введён текстом) ===
-@dp.message(F.text)
-async def on_phone_text_when_want(message: Message):
-    st = get_want(message.from_user.id)
-    if not st:
-        return  # не мешаем другим хендлерам
-
-    txt = (message.text or "").strip()
-    m = PHONE_RE.match(txt)
-    if not m:
-        await message.answer(
-            "Пришли номер (например: +998 90 123-45-67) или нажми кнопку «📲 Поделиться номером». "
-            "Режим заявки истечёт через несколько минут."
-        )
-        return
-
-    phone = normalize_phone_text(m.group(1))
-    tour_id = st["tour_id"]
-    WANT_STATE.pop(message.from_user.id, None)  # выходим из режима заявки
-
-    # создаём лид
-    lead_id = create_lead(message.from_user.id, tour_id, phone, note="from text phone")
-
-    # подтянем тур и отправим в группу заявок
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours WHERE id=%s;", (tour_id,))
-        t = cur.fetchone()
-    if t:
-        await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
-
-    await message.answer(f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞", reply_markup=main_kb)
-
 @dp.message(F.contact)
 async def on_contact(message: Message):
-    st = get_want(message.from_user.id)
+    st = WANT_STATE.pop(message.from_user.id, None)
     if not st:
         await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
         return
-    WANT_STATE.pop(message.from_user.id, None)
-
     phone = message.contact.phone_number
     tour_id = st["tour_id"]
     lead_id = create_lead(message.from_user.id, tour_id, phone, note="from contact share")
 
     # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
@@ -862,7 +846,7 @@ async def cb_back_filters(call: CallbackQuery):
 async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb)
 
-# --- Смарт-роутер текста (стоит НИЖЕ хендлера on_phone_text_when_want) ---
+# --- Смарт-роутер текста
 @dp.message(F.text & ~F.text.in_({"🎒 Найти туры", "🤖 Спросить GPT", "🔔 Подписка", "⚙️ Настройки"}))
 async def smart_router(message: Message):
     user_text = message.text.strip()
@@ -916,8 +900,6 @@ async def on_startup():
         init_db()
     except Exception as e:
         logging.error(f"Ошибка init_db(): {e}")
-
-    # всегда обновляем флаги схемы после init_db
     refresh_schema_flags()
 
     if WEBHOOK_URL:
