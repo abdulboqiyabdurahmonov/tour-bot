@@ -8,6 +8,13 @@ from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
 
+# >>> SAN: imports
+from utils.sanitazer import (
+    San, TourDraft, build_tour_key,
+    safe_run, RetryPolicy
+)
+# <<< SAN: imports
+
 # ============ ЛОГИ ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -25,42 +32,42 @@ if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
 def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
-def save_tour(data: dict):
-    """Сохраняем тур в PostgreSQL (без фото)"""
-    with get_conn() as conn, conn.cursor() as cur:
-        try:
-            cur.execute("""
-                INSERT INTO tours
-                (country, city, hotel, price, currency, dates, description, source_url, posted_at, message_id, source_chat)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (message_id, source_chat) DO NOTHING
-                RETURNING id;
-            """, (
-                data.get("country"),
-                data.get("city"),
-                data.get("hotel"),
-                data.get("price"),
-                data.get("currency"),
-                data.get("dates"),
-                data.get("description"),
-                data.get("source_url"),
-                data.get("posted_at"),
-                data.get("message_id"),
-                data.get("source_chat"),
-            ))
-            inserted = cur.fetchone()
-            if inserted:
-                logging.info(
-                    f"💾 Сохранил тур: {data.get('country')} | {data.get('city')} | {data.get('price')} {data.get('currency')}"
-                )
-            else:
-                logging.info(
-                    f"⚠️ Дубликат тура: {data.get('city')} | {data.get('price')} {data.get('currency')} (message_id={data.get('message_id')})"
-                )
-        except Exception as e:
-            logging.error(f"❌ Ошибка при сохранении тура: {e}")
+# >>> SAN: UPSERT с устойчивостью + stable_key
+SQL_UPSERT_TOUR = """
+INSERT INTO tours(
+    country, city, hotel, price, currency, dates, description,
+    source_url, posted_at, message_id, source_chat, stable_key
+)
+VALUES (%(country)s, %(city)s, %(hotel)s, %(price)s, %(currency)s, %(dates)s, %(description)s,
+        %(source_url)s, %(posted_at)s, %(message_id)s, %(source_chat)s, %(stable_key)s)
+ON CONFLICT (message_id, source_chat) DO UPDATE SET
+    country     = EXCLUDED.country,
+    city        = EXCLUDED.city,
+    hotel       = EXCLUDED.hotel,
+    price       = EXCLUDED.price,
+    currency    = EXCLUDED.currency,
+    dates       = EXCLUDED.dates,
+    description = EXCLUDED.description,
+    source_url  = EXCLUDED.source_url,
+    posted_at   = EXCLUDED.posted_at,
+    stable_key  = EXCLUDED.stable_key;
+"""
 
-# ============ ПАРСЕР ============
+def save_tour(data: dict):
+    """Сохраняем тур в PostgreSQL (без фото), устойчиво и идемпотентно."""
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(SQL_UPSERT_TOUR, data)
+            logging.info(
+                f"💾 Сохранил/обновил тур: {data.get('city')} | {data.get('price')} {data.get('currency')} "
+                f"(msg={data.get('message_id')}, key={data.get('stable_key')})"
+            )
+    except Exception as e:
+        logging.error(f"❌ Ошибка при сохранении тура: {e}")
+# <<< SAN: UPSERT
+
+
+# ============ ПАРСЕР (твои хелперы оставил; встроил San/TourDraft) ============
 MONTHS = {
     "янв": "01", "фев": "02", "мар": "03", "апр": "04", "май": "05", "мая": "05",
     "июн": "06", "июл": "07", "авг": "08", "сен": "09", "сент": "09",
@@ -148,23 +155,46 @@ def _amount_to_float(s: str | None) -> float | None:
     except Exception:
         return None
 
-def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
-    """Разбор поста (без картинок)"""
-    # цена + валюта: "от 799$", "799 USD", "$ 799", "EUR 1 099"
-    price_match = re.search(
-        r'(?:(?:от\s*)?(\d[\d\s.,]{2,}))\s*(USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€)\b|(?:(USD|EUR|\$|€)\s*(\d[\d\s.,]{2,}))',
-        text, re.I
-    )
-    price, currency = None, None
-    if price_match:
-        if price_match.group(1) and price_match.group(2):
-            price, currency = price_match.group(1), price_match.group(2)
-        elif price_match.group(3) and price_match.group(4):
-            currency, price = price_match.group(3), price_match.group(4)
 
-    # нормализация валюты
+# >>> SAN: единый парсинг через San/TourDraft + твои эвристики
+def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
+    """Разбор поста (без картинок), устойчивый к мусору и форматам."""
+    raw = text or ""
+    # 1) Жёсткая чистка, чтобы regex-ы не сыпались
+    cleaned = San.clean_text(raw)
+
+    # 2) Базовые поля через наш универсальный парсер
+    draft = TourDraft.from_raw(cleaned)
+
+    # 3) Город/отель/даты: дополняем твоими правилами
+    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", cleaned, re.I)
+    city = city_match.group(1) if city_match else None
+    if not city:
+        m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", cleaned)
+        city = m.group(1) if m else None
+
+    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", cleaned)
+    hotel = strip_trailing_price_from_hotel(hotel_match.group(0)) if hotel_match else None
+
+    # Если наш простой словарь дат дал пусто — попробуем твою функцию
+    dates = draft.dates or parse_dates(cleaned)
+
+    # 4) Цена/валюта — оставляем из draft, при необходимости fallback на старый паттерн
+    price, currency = draft.price, draft.currency
+    if price is None or currency is None:
+        price_match = re.search(
+            r'(?:(?:от\s*)?(\d[\d\s.,]{2,}))\s*(USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€)\b|(?:(USD|EUR|\$|€)\s*(\d[\d\s.,]{2,}))',
+            cleaned, re.I
+        )
+        if price_match:
+            if price_match.group(1) and price_match.group(2):
+                price, currency = _amount_to_float(price_match.group(1)), price_match.group(2)
+            elif price_match.group(3) and price_match.group(4):
+                currency, price = price_match.group(3), _amount_to_float(price_match.group(4))
+
+    # Нормализуем валюту
     if currency:
-        cu = currency.strip().upper()
+        cu = str(currency).strip().upper()
         if cu in {"$", "US$", "USD$"}:
             currency = "USD"
         elif cu in {"€", "EUR€"}:
@@ -176,7 +206,7 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         else:
             currency = cu
     else:
-        low = text.lower()
+        low = cleaned.lower()
         if "сум" in low or "uzs" in low:
             currency = "UZS"
         elif "eur" in low or "€" in low:
@@ -184,29 +214,31 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         elif "usd" in low or "$" in low:
             currency = "USD"
 
-    # город/отель/даты
-    city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", text, re.I)
-    city = city_match.group(1) if city_match else None
-    if not city:
-        m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", text)
-        city = m.group(1) if m else None
-
-    hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", text)
-    dates_match = parse_dates(text)
+    # 5) Стабильный ключ — чтобы не ловить дубли и не падать на редактированиях
+    stable_key = build_tour_key(
+        source_chat=chat,
+        message_id=msg_id,
+        city=city or draft.city or "",
+        hotel=hotel or draft.hotel or "",
+        price=(price, currency) if price else None
+    )
 
     return {
         "country": guess_country(city) if city else None,
         "city": city,
-        "hotel": strip_trailing_price_from_hotel(hotel_match.group(0)) if hotel_match else None,
-        "price": _amount_to_float(price),
+        "hotel": hotel or draft.hotel,
+        "price": price,
         "currency": currency,
-        "dates": dates_match,
-        "description": text[:500],
+        "dates": dates,
+        "description": cleaned[:500],
         "source_url": link,
         "posted_at": posted_at.replace(tzinfo=None),
         "message_id": msg_id,
-        "source_chat": chat
+        "source_chat": chat,
+        "stable_key": stable_key,
     }
+# <<< SAN: единый парсинг
+
 
 # ============ КОЛЛЕКТОР ============
 async def collect_once(client: TelegramClient):
@@ -215,17 +247,23 @@ async def collect_once(client: TelegramClient):
         if not channel:
             continue
         logging.info(f"📥 Читаю канал: {channel}")
+        # >>> SAN: устойчивый прогон по сообщениям
         async for msg in client.iter_messages(channel, limit=50):
             if not msg.text:
                 continue
-            data = parse_post(
-                msg.text,
-                f"https://t.me/{channel.strip('@')}/{msg.id}",
-                msg.id,
-                channel,
-                msg.date
-            )
-            save_tour(data)
+            async def _store_one():
+                data = parse_post(
+                    msg.text,
+                    f"https://t.me/{channel.strip('@')}/{msg.id}",
+                    msg.id,
+                    channel,
+                    msg.date
+                )
+                save_tour(data)
+
+            # ретраи с backoff: если внезапно БД дернулась — проглотим и пойдём дальше
+            await safe_run(_store_one, RetryPolicy(attempts=5, base_delay=0.25, max_delay=3.0))
+        # <<< SAN: устойчивый прогон
 
 async def run_collector():
     client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
@@ -236,7 +274,9 @@ async def run_collector():
             await collect_once(client)
         except Exception as e:
             logging.error(f"❌ Ошибка в коллекторе: {e}")
-        await asyncio.sleep(900)  # каждые 15 минут
+        # >>> SAN: джиттер чтобы не биться с rate-limit и кроноподобными задачами
+        await asyncio.sleep(900 + int(10 * (os.getpid() % 3)))
+        # <<< SAN: джиттер
 
 if __name__ == "__main__":
     asyncio.run(run_collector())
