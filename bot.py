@@ -854,6 +854,7 @@ async def on_startup():
         init_db()
     except Exception as e:
         logging.error(f"Ошибка init_db(): {e}")
+        refresh_schema_flags()
 
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
