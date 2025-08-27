@@ -8,6 +8,7 @@ from typing import Optional, Tuple, List
 from html import escape
 from collections import defaultdict
 import secrets
+from zoneinfo import ZoneInfo  # ⬅️ локальная таймзона
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -21,7 +22,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-    # aiogram 3.x
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
@@ -49,6 +49,11 @@ if not OPENAI_API_KEY:
     raise ValueError("❌ OPENAI_API_KEY не найден в переменных окружения!")
 if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
+
+# ================= КОНСТАНТЫ =================
+TZ = ZoneInfo("Asia/Tashkent")  # локальная зона для отображения времени
+PAGER_STATE: dict[str, dict] = {}  # память пагинации
+PAGER_TTL_SEC = 3600  # 1 час живёт подборка
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -86,6 +91,7 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="💸 ≤ $800", callback_data="budget:USD:800"),
                 InlineKeyboardButton(text="💸 ≤ $1000", callback_data="budget:USD:1000"),
             ],
+            [InlineKeyboardButton(text="↕️ Сортировка по цене", callback_data="sort:price_asc")],
             [InlineKeyboardButton(text="➕ Ещё фильтры скоро", callback_data="noop")],
         ]
     )
@@ -111,12 +117,25 @@ def sources_kb(
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ================= ПАГИНАЦИЯ =================
-PAGER_STATE: dict[str, dict] = {}
-
+# ================= УТИЛИТЫ ПАГИНАЦИИ =================
 def _new_token() -> str:
     # короткий токен для callback_data
     return secrets.token_urlsafe(6).rstrip("=-_")
+
+def _cleanup_pager_state():
+    now = time.monotonic()
+    to_del = []
+    for k, v in PAGER_STATE.items():
+        ts = v.get("ts", now)
+        if now - ts > PAGER_TTL_SEC:
+            to_del.append(k)
+    for k in to_del:
+        PAGER_STATE.pop(k, None)
+
+def _touch_state(token: str):
+    st = PAGER_STATE.get(token)
+    if st:
+        st["ts"] = time.monotonic()
 
 # ================= ПОМОЩНИКИ ВЫВОДА =================
 async def show_typing(message: Message, text: str = "🤔 Думаю... Ищу варианты для тебя"):
@@ -137,12 +156,14 @@ def fmt_price(price, currency) -> str:
     cur = (currency or "").strip()
     cur_up = cur.upper()
     # нормализация символов
-    if cur_up in {"$", "US$", "USD$"}:
+    if cur_up in {"$", "US$", "USD$", "USD"}:
         cur_up = "USD"
-    elif cur_up in {"€", "EUR€"}:
+    elif cur_up in {"€", "EUR€", "EUR"}:
         cur_up = "EUR"
-    elif cur_up == "СУМ":
-        cur_up = "сум"  # так и оставляем строчными по-русски
+    elif cur_up in {"UZS", "СУМ", "СУМ.", "СУМЫ", "СУМОВ", "СОМ", "СУМ", "СУММ", "СУММ." , "СУМ." , "СУМЫ.", "СУМ." , "СУММЫ"}:
+        cur_up = "UZS"
+    elif cur_up in {"СУМ", "сум"}:
+        cur_up = "UZS"
     return escape(f"{p:,} {cur_up}".replace(",", " "))
 
 def safe(s: Optional[str]) -> str:
@@ -200,7 +221,16 @@ def compile_tours_text(rows: List[dict], header: str, start_index: int = 1) -> s
     lines = []
     for idx, t in enumerate(rows, start=start_index):
         posted = t.get("posted_at")
-        posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}\n" if isinstance(posted, datetime) else ""
+        # локализуем время в Tashkent
+        posted_str = ""
+        if isinstance(posted, datetime):
+            try:
+                posted_local = posted if posted.tzinfo else posted.replace(tzinfo=ZoneInfo("UTC"))
+                posted_local = posted_local.astimezone(TZ)
+                posted_str = f"🕒 {posted_local.strftime('%d.%m.%Y %H:%M')} (TST)\n"
+            except Exception:
+                posted_str = f"🕒 {posted.strftime('%d.%m.%Y %H:%M')}\n"
+
         price_str = fmt_price(t.get("price"), t.get("currency"))
         src = (t.get("source_url") or "").strip()
 
@@ -225,13 +255,15 @@ def compile_tours_text(rows: List[dict], header: str, start_index: int = 1) -> s
 
 def split_telegram(text: str, limit: int = 3500) -> List[str]:
     parts: List[str] = []
-    while len(text) > limit:
-        cut = text.rfind("\n\n", 0, limit)
-        if cut == -1:
+    t = text
+    while len(t) > limit:
+        cut = t.rfind("\n\n", 0, limit)
+        if cut == -1 or cut < int(limit * 0.6):
             cut = limit
-        parts.append(text[:cut])
-        text = text[cut:]
-    parts.append(text)
+        parts.append(t[:cut].rstrip())
+        t = t[cut:].lstrip()
+    if t:
+        parts.append(t)
     return parts
 
 # ================= ПОИСК ТУРОВ =================
@@ -255,7 +287,7 @@ async def fetch_tours(
             params += [f"%{query}%", f"%{query}%", f"%{query}%"]
         if country:
             where_clauses.append("country ILIKE %s")
-            params.append(country)
+            params.append(f"%{country}%")  # ⬅️ «человечный» поиск
         if currency_eq:
             where_clauses.append("currency = %s")
             params.append(currency_eq)
@@ -318,7 +350,7 @@ async def fetch_tours_page(
             params += [f"%{query}%", f"%{query}%", f"%{query}%"]
         if country:
             where_clauses.append("country ILIKE %s")
-            params.append(country)
+            params.append(f"%{country}%")  # ⬅️ «человечный» поиск
         if currency_eq:
             where_clauses.append("currency = %s")
             params.append(currency_eq)
@@ -422,6 +454,86 @@ async def cmd_start(message: Message):
     )
     await message.answer(text, reply_markup=main_kb)
 
+@dp.message(F.text == "🎒 Найти туры")
+async def entry_find_tours(message: Message):
+    await message.answer("Выбери быстрый фильтр:", reply_markup=filters_inline_kb())
+
+@dp.message(F.text == "🤖 Спросить GPT")
+async def entry_gpt(message: Message):
+    await message.answer("Спроси что угодно про путешествия (отели, сезоны, визы, бюджеты).")
+
+@dp.message(F.text == "🔔 Подписка")
+async def entry_sub(message: Message):
+    await message.answer("Скоро: подписка по странам/бюджету/датам. Пока в разработке 💡")
+
+@dp.message(F.text == "⚙️ Настройки")
+async def entry_settings(message: Message):
+    await message.answer("Скоро: язык/валюта/бюджет по умолчанию. Пока в разработке ⚙️")
+
+@dp.callback_query(F.data == "tours_recent")
+async def cb_recent(call: CallbackQuery):
+    await bot.send_chat_action(call.message.chat.id, "typing")
+    rows, is_recent = await fetch_tours(None, hours=72, limit_recent=10, limit_fallback=10)
+    header = "🔥 Актуальные за 72 часа" if is_recent else "ℹ️ Свежих 72ч мало — показываю последние"
+    text = compile_tours_text(rows, header, start_index=1)
+
+    token = _new_token()
+    PAGER_STATE[token] = {
+        "chat_id": call.message.chat.id,
+        "query": None,
+        "country": None,
+        "currency_eq": None,
+        "max_price": None,
+        "hours": 72 if is_recent else None,
+        "order_by_price": False,
+        "ts": time.monotonic(),
+    }
+
+    try:
+        for chunk in split_telegram(text):
+            await call.message.answer(
+                chunk,
+                disable_web_page_preview=True,
+                reply_markup=sources_kb(rows, start_index=1, token=token, next_offset=len(rows)),
+            )
+    except Exception as e:
+        logging.error("Send HTML failed (recent): %s", e)
+        await call.message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.", reply_markup=filters_inline_kb())
+
+@dp.callback_query(F.data.startswith("country:"))
+async def cb_country(call: CallbackQuery):
+    await bot.send_chat_action(call.message.chat.id, "typing")
+    country = call.data.split(":", 1)[1]
+    rows, is_recent = await fetch_tours(None, country=country, hours=120, limit_recent=10, limit_fallback=10)
+    header = f"🇺🇳 Страна: {country} — актуальные" if is_recent else f"🇺🇳 Страна: {country} — последние найденные"
+    text = compile_tours_text(rows, header, start_index=1)
+
+    token = _new_token()
+    PAGER_STATE[token] = {
+        "chat_id": call.message.chat.id,
+        "query": None,
+        "country": country,
+        "currency_eq": None,
+        "max_price": None,
+        "hours": 120 if is_recent else None,
+        "order_by_price": False,
+        "ts": time.monotonic(),
+    }
+
+    try:
+        for chunk in split_telegram(text):
+            await call.message.answer(
+                chunk,
+                disable_web_page_preview=True,
+                reply_markup=sources_kb(rows, start_index=1, token=token, next_offset=len(rows)),
+            )
+    except Exception as e:
+        logging.error("Send HTML failed (country): %s", e)
+        await call.message.answer(
+            f"Не удалось показать подборку по стране {escape(country)}. Попробуй ещё раз.",
+            reply_markup=filters_inline_kb(),
+        )
+
 @dp.callback_query(F.data.startswith("budget:"))
 async def cb_budget(call: CallbackQuery):
     # формат: budget:<CUR>:<LIMIT>
@@ -453,6 +565,7 @@ async def cb_budget(call: CallbackQuery):
         "max_price": limit_val,
         "hours": 120 if is_recent else None,
         "order_by_price": True,
+        "ts": time.monotonic(),
     }
 
     try:
@@ -466,6 +579,42 @@ async def cb_budget(call: CallbackQuery):
         logging.error("Send HTML failed (budget): %s", e)
         await call.message.answer("Не удалось отрендерить карточки по бюджету. Попробуй ещё раз.", reply_markup=filters_inline_kb())
 
+@dp.callback_query(F.data == "sort:price_asc")
+async def cb_sort_price_asc(call: CallbackQuery):
+    await bot.send_chat_action(call.message.chat.id, "typing")
+    # Берём только свежие 72ч и сортируем по цене
+    rows = await fetch_tours_page(
+        hours=72,
+        order_by_price=True,
+        limit=10,
+        offset=0,
+    )
+    header = "↕️ Актуальные за 72ч — дешевле → дороже"
+    text = compile_tours_text(rows, header, start_index=1)
+
+    token = _new_token()
+    PAGER_STATE[token] = {
+        "chat_id": call.message.chat.id,
+        "query": None,
+        "country": None,
+        "currency_eq": None,
+        "max_price": None,
+        "hours": 72,
+        "order_by_price": True,
+        "ts": time.monotonic(),
+    }
+
+    try:
+        for chunk in split_telegram(text):
+            await call.message.answer(
+                chunk,
+                disable_web_page_preview=True,
+                reply_markup=sources_kb(rows, start_index=1, token=token, next_offset=len(rows)),
+            )
+    except Exception as e:
+        logging.error("Send HTML failed (sort price): %s", e)
+        await call.message.answer("Не удалось показать отсортированные туры.", reply_markup=filters_inline_kb())
+
 @dp.callback_query(F.data.startswith("more:"))
 async def cb_more(call: CallbackQuery):
     try:
@@ -474,6 +623,8 @@ async def cb_more(call: CallbackQuery):
     except Exception:
         await call.answer("Что-то пошло не так с пагинацией 🥲", show_alert=False)
         return
+
+    _cleanup_pager_state()
 
     state = PAGER_STATE.get(token)
     if not state or state.get("chat_id") != call.message.chat.id:
@@ -500,90 +651,13 @@ async def cb_more(call: CallbackQuery):
     text = compile_tours_text(rows, header, start_index=start_index)
     next_offset = offset + len(rows)
 
+    _touch_state(token)
+
     for chunk in split_telegram(text):
         await call.message.answer(
             chunk,
             disable_web_page_preview=True,
             reply_markup=sources_kb(rows, start_index=start_index, token=token, next_offset=next_offset),
-        )
-
-@dp.message(F.text == "🎒 Найти туры")
-async def entry_find_tours(message: Message):
-    await message.answer("Выбери быстрый фильтр:", reply_markup=filters_inline_kb())
-
-@dp.message(F.text == "🤖 Спросить GPT")
-async def entry_gpt(message: Message):
-    await message.answer("Спроси что угодно про путешествия (отели, сезоны, визы, бюджеты).")
-
-@dp.message(F.text == "🔔 Подписка")
-async def entry_sub(message: Message):
-    await message.answer("Скоро: подписка по странам/бюджету/датам. Пока в разработке 💡")
-
-@dp.message(F.text == "⚙️ Настройки")
-async def entry_settings(message: Message):
-    await message.answer("Скоро: язык/валюта/бюджет по умолчанию. Пока в разработке ⚙️")
-
-@dp.callback_query(F.data == "tours_recent")
-async def cb_recent(call: CallbackQuery):
-    await bot.send_chat_action(call.message.chat.id, "typing")
-    rows, is_recent = await fetch_tours(None, hours=72, limit_recent=10, limit_fallback=10)
-    header = "🔥 Актуальные за 72 часа" if is_recent else "ℹ️ Свежих 72ч мало — показываю последние"
-    text = compile_tours_text(rows, header, start_index=1)
-
-    # регистрируем пагинацию
-    token = _new_token()
-    PAGER_STATE[token] = {
-        "chat_id": call.message.chat.id,
-        "query": None,
-        "country": None,
-        "currency_eq": None,
-        "max_price": None,
-        "hours": 72 if is_recent else None,
-        "order_by_price": False,
-    }
-
-    try:
-        for chunk in split_telegram(text):
-            await call.message.answer(
-                chunk,
-                disable_web_page_preview=True,
-                reply_markup=sources_kb(rows, start_index=1, token=token, next_offset=len(rows)),
-            )
-    except Exception as e:
-        logging.error("Send HTML failed (recent): %s", e)
-        await call.message.answer("Не удалось отрендерить карточки. Попробуй ещё раз.", reply_markup=filters_inline_kb())
-
-@dp.callback_query(F.data.startswith("country:"))
-async def cb_country(call: CallbackQuery):
-    await bot.send_chat_action(call.message.chat.id, "typing")
-    country = call.data.split(":", 1)[1]
-    rows, is_recent = await fetch_tours(None, country=country, hours=120, limit_recent=10, limit_fallback=10)
-    header = f"🇺🇳 Страна: {country} — актуальные" if is_recent else f"🇺🇳 Страна: {country} — последние найденные"
-    text = compile_tours_text(rows, header, start_index=1)
-
-    token = _new_token()
-    PAGER_STATE[token] = {
-        "chat_id": call.message.chat.id,
-        "query": None,
-        "country": country,
-        "currency_eq": None,
-        "max_price": None,
-        "hours": 120 if is_recent else None,
-        "order_by_price": False,
-    }
-
-    try:
-        for chunk in split_telegram(text):
-            await call.message.answer(
-                chunk,
-                disable_web_page_preview=True,
-                reply_markup=sources_kb(rows, start_index=1, token=token, next_offset=len(rows)),
-            )
-    except Exception as e:
-        logging.error("Send HTML failed (country): %s", e)
-        await call.message.answer(
-            f"Не удалось показать подборку по стране {escape(country)}. Попробуй ещё раз.",
-            reply_markup=filters_inline_kb(),
         )
 
 @dp.callback_query(F.data == "noop")
