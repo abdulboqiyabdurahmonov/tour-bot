@@ -126,22 +126,6 @@ def want_contact_kb() -> ReplyKeyboardMarkup:
         selective=True,
     )
 
-HAS_PHOTO_URL = False
-
-def refresh_schema_flags():
-    global HAS_PHOTO_URL
-    try:
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT 1 
-                FROM information_schema.columns
-                WHERE table_name='tours' AND column_name='photo_url'
-            """)
-            HAS_PHOTO_URL = cur.fetchone() is not None
-            logging.info(f"🧭 HAS_PHOTO_URL={HAS_PHOTO_URL}")
-    except Exception as e:
-        logging.warning(f"refresh_schema_flags failed: {e}")
-
 # ================= УТИЛИТЫ ПАГИНАЦИИ =================
 def _new_token() -> str:
     return secrets.token_urlsafe(6).rstrip("=-_")
@@ -245,7 +229,6 @@ def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
             break
         # Отсеиваем явные строки про цену/даты
         if re.search(r"\b(\d{3,5}\s?(usd|eur|uzs)|\d+д|\d+н|all ?inclusive|ai|hb|bb|fb)\b", low, re.I):
-            # это ок, но лучше не как title — перескочим к следующей
             pass
         # уберём лидирующие эмодзи/иконки
         line = re.sub(r"^[\W_]{0,3}", "", line).strip()
@@ -288,7 +271,7 @@ def create_lead(user_id: int, tour_id: int, phone: Optional[str], note: Optional
         row = cur.fetchone()
         return row["id"] if row else None
 
-# ================= ПОИСК ТУРОВ (с id и photo_url) =================
+# ================= ПОИСК ТУРОВ (без photo_url) =================
 async def fetch_tours(
     query: Optional[str] = None,
     *,
@@ -299,7 +282,7 @@ async def fetch_tours(
     limit_recent: int = 10,
     limit_fallback: int = 5,
 ) -> Tuple[List[dict], bool]:
-    """Возвращает (rows, is_recent). Колонки включают id, photo_url."""
+    """Возвращает (rows, is_recent)."""
     try:
         where_clauses = []
         params = []
@@ -323,7 +306,7 @@ async def fetch_tours(
 
         with get_conn() as conn, conn.cursor() as cur:
             sql_recent = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description
                 FROM tours
                 {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
                 {order_clause}
@@ -335,7 +318,7 @@ async def fetch_tours(
                 return rows, True
 
             sql_fb = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description
                 FROM tours
                 {where_sql}
                 {order_clause}
@@ -384,7 +367,7 @@ async def fetch_tours_page(
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
 
         sql = f"""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description
             FROM tours
             {where_sql}
             {order_clause}
@@ -510,16 +493,6 @@ async def send_tour_card(chat_id: int, user_id: int, t: dict):
     fav = is_favorite(user_id, t["id"])
     kb = tour_inline_kb(t, fav)
     caption = build_card_text(t)
-
-    photo = (t.get("photo_url") or "").strip()
-    if photo:
-        short_caption = caption if len(caption) <= 1000 else caption[:990].rstrip() + "…"
-        try:
-            await bot.send_photo(chat_id, photo=photo, caption=short_caption, reply_markup=kb)
-            return
-        except Exception as e:
-            logging.warning(f"send_photo failed, fallback to text: {e}")
-
     await bot.send_message(chat_id, caption, reply_markup=kb, disable_web_page_preview=True)
 
 async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
@@ -529,7 +502,7 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
 async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
-    """Отправляет карточку лида в группу заявок (поддерживает темы)."""
+    """Отправляет карточку лида в группу заявок (только текст, без фото)."""
     chat_id = resolve_leads_chat_id()
     if not chat_id:
         logging.warning("notify_leads_group: LEADS_CHAT_ID не задан")
@@ -560,12 +533,7 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         if LEADS_TOPIC_ID:
             kwargs["message_thread_id"] = LEADS_TOPIC_ID
 
-        photo = (t.get("photo_url") or "").strip()
-        if photo:
-            short = text if len(text) <= 1000 else (text[:990].rstrip() + "…")
-            msg = await bot.send_photo(chat_id, photo=photo, caption=short, parse_mode="HTML", **kwargs)
-        else:
-            msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
+        msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
 
         if pin:
             try:
@@ -613,7 +581,7 @@ async def cmd_leadstest(message: Message):
         await message.reply("Недостаточно прав.")
         return
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours ORDER BY posted_at DESC LIMIT 1;")
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours ORDER BY posted_at DESC LIMIT 1;")
         t = cur.fetchone()
     if not t:
         await message.reply("В базе нет туров для теста.")
@@ -779,7 +747,7 @@ async def cb_fav_add(call: CallbackQuery):
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True))
@@ -794,7 +762,7 @@ async def cb_fav_rm(call: CallbackQuery):
     await call.answer("Убрано из избранного 🤍", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False))
@@ -824,7 +792,7 @@ async def on_contact(message: Message):
 
     # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, description FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
@@ -900,7 +868,6 @@ async def on_startup():
         init_db()
     except Exception as e:
         logging.error(f"Ошибка init_db(): {e}")
-    refresh_schema_flags()
 
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
