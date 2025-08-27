@@ -50,6 +50,9 @@ LEADS_CHAT_ID_ENV = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 
+SHEETS_CREDENTIALS_B64 = os.getenv("SHEETS_CREDENTIALS_B64", "").strip()
+SHEETS_SPREADSHEET_ID = os.getenv("SHEETS_SPREADSHEET_ID", "").strip()
+
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
 if not OPENAI_API_KEY:
