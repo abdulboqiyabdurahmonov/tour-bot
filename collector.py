@@ -2,7 +2,7 @@ import os
 import re
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telethon.sessions import StringSession
 from telethon import TelegramClient
@@ -22,8 +22,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 API_ID = int(os.getenv("TG_API_ID"))
 API_HASH = os.getenv("TG_API_HASH")
 SESSION_B64 = os.getenv("TG_SESSION_B64")
-CHANNELS = os.getenv("CHANNELS", "").split(",")  # пример: @tour1,@tour2
+CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]  # пример: @tour1,@tour2
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# >>> SAN: настройки актуальности / нагрузки
+FETCH_LIMIT = int(os.getenv("FETCH_LIMIT", "80"))                 # сколько сообщений на канал за проход
+MAX_POST_AGE_DAYS = int(os.getenv("MAX_POST_AGE_DAYS", "45"))     # игнорировать посты старше N дней
+REQUIRE_PRICE = os.getenv("REQUIRE_PRICE", "1") == "1"            # если True — без цены не сохраняем
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "30"))                   # размер батча для upsert
+SLEEP_BASE = int(os.getenv("SLEEP_BASE_SEC", "900"))              # базовый интервал между проходами
+# <<< SAN: настройки
 
 if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
     raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64 и CHANNELS в .env")
@@ -32,7 +40,7 @@ if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
 def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
-# >>> SAN: UPSERT с устойчивостью + stable_key
+# >>> SAN: UPSERT (named params) + bulk
 SQL_UPSERT_TOUR = """
 INSERT INTO tours(
     country, city, hotel, price, currency, dates, description,
@@ -53,25 +61,43 @@ ON CONFLICT (message_id, source_chat) DO UPDATE SET
     stable_key  = EXCLUDED.stable_key;
 """
 
-def save_tour(data: dict):
-    """Сохраняем тур в PostgreSQL (без фото), устойчиво и идемпотентно."""
+def save_tours_bulk(rows: list[dict]):
+    """Батч-апсерты: быстрее и устойчивее под нагрузкой."""
+    if not rows:
+        return
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(SQL_UPSERT_TOUR, data)
-            logging.info(
-                f"💾 Сохранил/обновил тур: {data.get('city')} | {data.get('price')} {data.get('currency')} "
-                f"(msg={data.get('message_id')}, key={data.get('stable_key')})"
-            )
+            cur.executemany(SQL_UPSERT_TOUR, rows)
+        logging.info(f"💾 Сохранил/обновил батч: {len(rows)} шт.")
     except Exception as e:
-        logging.error(f"❌ Ошибка при сохранении тура: {e}")
+        # На всякий случай fallback по одному — чтобы не потерять всё из-за одного кривого поста
+        logging.warning(f"⚠️ Bulk upsert failed, fallback to single. Reason: {e}")
+        for r in rows:
+            try:
+                with get_conn() as conn, conn.cursor() as cur:
+                    cur.execute(SQL_UPSERT_TOUR, r)
+            except Exception as ee:
+                logging.error(f"❌ Ошибка при сохранении тура (msg={r.get('message_id')}): {ee}")
 # <<< SAN: UPSERT
 
 
-# ============ ПАРСЕР (твои хелперы оставил; встроил San/TourDraft) ============
-MONTHS = {
+# ============ ПАРСЕР (улучшенные даты RU/UZ) ============
+# RU: сентябрь/сент., UZ (кирилл): сентябр/сент, UZ (лат): sentabr/sent.
+MONTHS_MAP = {
+    # RU краткие
     "янв": "01", "фев": "02", "мар": "03", "апр": "04", "май": "05", "мая": "05",
-    "июн": "06", "июл": "07", "авг": "08", "сен": "09", "сент": "09",
-    "окт": "10", "ноя": "11", "дек": "12"
+    "июн": "06", "июл": "07", "авг": "08", "сен": "09", "сент": "09", "окт": "10", "ноя": "11", "дек": "12",
+    # RU полные/падежи
+    "январ": "01", "феврал": "02", "март": "03", "апрел": "04", "июнь": "06", "июль": "07",
+    "август": "08", "сентябр": "09", "октябр": "10", "ноябр": "11", "декабр": "12",
+    "сентября": "09", "октября": "10", "ноября": "11", "декабря": "12",
+    # UZ кириллица (основы)
+    "январ": "01", "феврал": "02", "март": "03", "апрел": "04", "май": "05", "июн": "06", "июл": "07",
+    "август": "08", "сентябр": "09", "октябр": "10", "ноябр": "11", "декабр": "12",
+    # UZ латиница
+    "yanv": "01", "fevral": "02", "mart": "03", "aprel": "04", "may": "05",
+    "iyun": "06", "iyul": "07", "avgust": "08", "sentabr": "09", "sent": "09",
+    "oktabr": "10", "noyabr": "11", "dekabr": "12",
 }
 
 def _norm_year(y: str | None) -> int:
@@ -85,40 +111,59 @@ def _norm_year(y: str | None) -> int:
 def _mk_date(d, m, y) -> str:
     return f"{int(d):02d}.{int(m):02d}.{_norm_year(y):04d}"
 
-def parse_dates(text: str) -> str | None:
-    text = text.strip()
+def _month_to_mm(token: str | None) -> str | None:
+    if not token:
+        return None
+    t = token.strip().lower()
+    # режем до первых 5 символов чтобы матчить «сентябр/сентября/sentabr»
+    for k, mm in MONTHS_MAP.items():
+        if t.startswith(k):
+            return mm
+    return None
 
-    # dd.mm(.yy|yyyy)?–dd.mm(.yy|yyyy)?
-    m = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", text)
+def parse_dates_strict(text: str) -> str | None:
+    """Более строгий разбор: поддержка RU/UZ (кирил/лат), интервалов и смешанных форматов."""
+    t = text.strip()
+
+    # 1) dd.mm(.yy|yyyy)?–dd.mm(.yy|yyyy)?
+    m = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", t)
     if m:
         d1, m1, y1, d2, m2, y2 = m.groups()
         return f"{_mk_date(d1, m1, y1)}–{_mk_date(d2, m2, y2 or y1)}"
 
-    # dd–dd mon
-    m = re.search(r"(\d{1,2})\s?[–\-]\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
+    # 2) dd–dd mon (ru/uz)
+    m = re.search(r"(\d{1,2})\s?[–\-]\s?(\d{1,2})\s+([A-Za-zА-Яа-яЁёўғқҳ]+)\w*", t, re.I)
     if m:
         d1, d2, mon = m.groups()
-        mm = MONTHS[mon[:3].lower()]
-        y = datetime.now().year
-        return f"{_mk_date(d1, mm, y)}–{_mk_date(d2, mm, y)}"
+        mm = _month_to_mm(mon)
+        if mm:
+            y = datetime.now().year
+            return f"{_mk_date(d1, mm, y)}–{_mk_date(d2, mm, y)}"
 
-    # с d по d mon
-    m = re.search(r"с\s?(\d{1,2})\s?по\s?(\d{1,2})\s?(янв|фев|мар|апр|мая|май|июн|июл|авг|сен|сент|окт|ноя|дек)\w*", text, re.I)
+    # 3) с d по d mon (ru/uz)
+    m = re.search(r"(?:с|бу)\s?(\d{1,2})\s?(?:по|то)\s?(\d{1,2})\s+([A-Za-zА-Яа-яЁёўғқҳ]+)\w*", t, re.I)
     if m:
         d1, d2, mon = m.groups()
-        mm = MONTHS[mon[:3].lower()]
-        y = datetime.now().year
-        return f"{_mk_date(d1, mm, y)}–{_mk_date(d2, mm, y)}"
+        mm = _month_to_mm(mon)
+        if mm:
+            y = datetime.now().year
+            return f"{_mk_date(d1, mm, y)}–{_mk_date(d2, mm, y)}"
+
+    # 4) одиночная дата dd.mm(.yy|yyyy)? или dd mon
+    m = re.search(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b", t)
+    if m:
+        d, mth, y = m.groups()
+        return _mk_date(d, mth, y)
+    m = re.search(r"\b(\d{1,2})\s+([A-Za-zА-Яа-яЁёўғқҳ]+)\w*", t)
+    if m:
+        d, mon = m.groups()
+        mm = _month_to_mm(mon)
+        if mm:
+            y = datetime.now().year
+            return _mk_date(d, mm, y)
 
     return None
 
-def clean_text_basic(s: str | None) -> str | None:
-    if not s:
-        return s
-    s = re.sub(r'[*_`]+', '', s)
-    s = s.replace('|', ' ')
-    s = re.sub(r'\s{2,}', ' ', s)
-    return s.strip()
 
 def strip_trailing_price_from_hotel(s: str | None) -> str | None:
     if not s:
@@ -145,7 +190,6 @@ def _amount_to_float(s: str | None) -> float | None:
     if not s:
         return None
     s = s.replace(' ', '').replace('\xa0', '')
-    # запятая как десятичный
     if s.count(',') == 1 and s.count('.') == 0:
         s = s.replace(',', '.')
     else:
@@ -156,17 +200,15 @@ def _amount_to_float(s: str | None) -> float | None:
         return None
 
 
-# >>> SAN: единый парсинг через San/TourDraft + твои эвристики
+# >>> SAN: единый парсинг через San/TourDraft + строгие даты + фильтры актуальности
 def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
     """Разбор поста (без картинок), устойчивый к мусору и форматам."""
     raw = text or ""
-    # 1) Жёсткая чистка, чтобы regex-ы не сыпались
     cleaned = San.clean_text(raw)
 
-    # 2) Базовые поля через наш универсальный парсер
     draft = TourDraft.from_raw(cleaned)
 
-    # 3) Город/отель/даты: дополняем твоими правилами
+    # Город/отель — твои эвристики
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Тбилиси)", cleaned, re.I)
     city = city_match.group(1) if city_match else None
     if not city:
@@ -176,10 +218,10 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
     hotel_match = re.search(r"(Hotel|Отель|Resort|Inn|Palace|Hilton|Marriott)\s?[^\n]*", cleaned)
     hotel = strip_trailing_price_from_hotel(hotel_match.group(0)) if hotel_match else None
 
-    # Если наш простой словарь дат дал пусто — попробуем твою функцию
-    dates = draft.dates or parse_dates(cleaned)
+    # Даты: строгий разбор RU/UZ
+    dates = parse_dates_strict(cleaned) or draft.dates
 
-    # 4) Цена/валюта — оставляем из draft, при необходимости fallback на старый паттерн
+    # Цена/валюта: первое — из draft, иначе fallback
     price, currency = draft.price, draft.currency
     if price is None or currency is None:
         price_match = re.search(
@@ -192,7 +234,7 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
             elif price_match.group(3) and price_match.group(4):
                 currency, price = price_match.group(3), _amount_to_float(price_match.group(4))
 
-    # Нормализуем валюту
+    # Валюта — нормализуем
     if currency:
         cu = str(currency).strip().upper()
         if cu in {"$", "US$", "USD$"}:
@@ -214,7 +256,6 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         elif "usd" in low or "$" in low:
             currency = "USD"
 
-    # 5) Стабильный ключ — чтобы не ловить дубли и не падать на редактированиях
     stable_key = build_tour_key(
         source_chat=chat,
         message_id=msg_id,
@@ -223,7 +264,7 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         price=(price, currency) if price else None
     )
 
-    return {
+    payload = {
         "country": guess_country(city) if city else None,
         "city": city,
         "hotel": hotel or draft.hotel,
@@ -237,21 +278,29 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         "source_chat": chat,
         "stable_key": stable_key,
     }
+    return payload
 # <<< SAN: единый парсинг
 
 
 # ============ КОЛЛЕКТОР ============
 async def collect_once(client: TelegramClient):
+    """Один проход по всем каналам с батч-сохранением и фильтрами актуальности."""
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=MAX_POST_AGE_DAYS)
+
     for channel in CHANNELS:
-        channel = channel.strip()
-        if not channel:
-            continue
         logging.info(f"📥 Читаю канал: {channel}")
-        # >>> SAN: устойчивый прогон по сообщениям
-        async for msg in client.iter_messages(channel, limit=50):
+        batch: list[dict] = []
+
+        async for msg in client.iter_messages(channel, limit=FETCH_LIMIT):
             if not msg.text:
                 continue
-            async def _store_one():
+
+            # игнорируем слишком старые посты
+            if msg.date and msg.date.replace(tzinfo=None) < cutoff:
+                continue
+
+            def _make():
                 data = parse_post(
                     msg.text,
                     f"https://t.me/{channel.strip('@')}/{msg.id}",
@@ -259,11 +308,27 @@ async def collect_once(client: TelegramClient):
                     channel,
                     msg.date
                 )
-                save_tour(data)
+                # если требуется цена — отбрасываем без цены
+                if REQUIRE_PRICE and (data.get("price") is None or data.get("currency") is None):
+                    return None
+                return data
 
-            # ретраи с backoff: если внезапно БД дернулась — проглотим и пойдём дальше
-            await safe_run(_store_one, RetryPolicy(attempts=5, base_delay=0.25, max_delay=3.0))
-        # <<< SAN: устойчивый прогон
+            # парсинг и отбракованные посты не останавливают поток
+            data = _make()
+            if data:
+                batch.append(data)
+
+            # батч-сброс
+            if len(batch) >= BATCH_SIZE:
+                await safe_run(lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
+                               RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0))
+                batch.clear()
+
+        # остатки батча после канала
+        if batch:
+            await safe_run(lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
+                           RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0))
+            batch.clear()
 
 async def run_collector():
     client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
@@ -274,9 +339,8 @@ async def run_collector():
             await collect_once(client)
         except Exception as e:
             logging.error(f"❌ Ошибка в коллекторе: {e}")
-        # >>> SAN: джиттер чтобы не биться с rate-limit и кроноподобными задачами
-        await asyncio.sleep(900 + int(10 * (os.getpid() % 3)))
-        # <<< SAN: джиттер
+        # лёгкий джиттер, чтобы не попадать в ровные минуты и разойтись с другими процессами
+        await asyncio.sleep(SLEEP_BASE + int(10 * (os.getpid() % 3)))
 
 if __name__ == "__main__":
     asyncio.run(run_collector())
