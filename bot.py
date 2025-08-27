@@ -62,6 +62,12 @@ bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 app = FastAPI()
 
+from aiogram.filters import Command
+
+@dp.message(Command("chatid"))
+async def get_chat_id(message: Message):
+    await message.reply(f"chat_id этой группы: {message.chat.id}")
+
 # ================= БД =================
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
