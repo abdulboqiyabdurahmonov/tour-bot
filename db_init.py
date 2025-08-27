@@ -50,6 +50,9 @@ def init_db():
             );
         """)
 
+        # --- МИГРАЦИИ СХЕМЫ (после CREATE TABLE) ---
+cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
+
         # Избранное
         cur.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
