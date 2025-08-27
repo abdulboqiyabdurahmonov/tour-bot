@@ -40,5 +40,6 @@ services:
 
     envVars:
   - key: LEADS_CHAT_ID
-    value: "-1001234567890"  # твой ID группы заявок
+    value: "-4806023117"
+
 
