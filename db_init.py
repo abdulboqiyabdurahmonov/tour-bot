@@ -11,7 +11,7 @@ def get_conn():
 def init_db():
     """Создание таблиц/индексов, если их нет"""
     with get_conn() as conn, conn.cursor() as cur:
-        # Таблица пользователей
+        # Пользователи
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -19,7 +19,7 @@ def init_db():
             );
         """)
 
-        # Таблица запросов к GPT
+        # Логи запросов к GPT
         cur.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -30,7 +30,7 @@ def init_db():
             );
         """)
 
-        # Таблица туров
+        # Туры (+ photo_url для карточек)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tours (
                 id SERIAL PRIMARY KEY,
@@ -44,8 +44,31 @@ def init_db():
                 source_chat TEXT,
                 message_id BIGINT,
                 source_url TEXT,
+                photo_url TEXT,
                 posted_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(message_id, source_chat)
+            );
+        """)
+
+        # Избранное
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id BIGINT,
+                tour_id INT REFERENCES tours(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY(user_id, tour_id)
+            );
+        """)
+
+        # Лиды (заявки)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS leads (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                tour_id INT REFERENCES tours(id) ON DELETE SET NULL,
+                phone TEXT,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
             );
         """)
 
