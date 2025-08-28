@@ -1282,6 +1282,14 @@ async def cb_want(call: CallbackQuery):
     )
     await call.answer()
 
+@dp.message(Command("weather"))
+async def cmd_weather(message: Message):
+    ask = (message.text or "").partition(" ")[2].strip()
+    place = ask or "Ташкент"
+    await message.answer("Секунду, уточняю погоду…")
+    txt = await get_weather_text(place)
+    await message.answer(txt, disable_web_page_preview=True)
+
 @dp.message(F.contact)
 async def on_contact(message: Message):
     st = WANT_STATE.pop(message.from_user.id, None)
