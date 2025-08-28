@@ -137,3 +137,11 @@ def set_config(key: str, val: str):
             INSERT INTO app_config(key, val) VALUES (%s, %s)
             ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
         """, (key, val))
+
+# db_init.py — добавь в init_db(), рядом с остальными ALTER-ами:
+cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS board TEXT;")
+cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS includes TEXT;")
+
+# (по желанию индексы)
+# cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_board ON tours ((LOWER(board)));")
+
