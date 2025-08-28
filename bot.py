@@ -708,27 +708,27 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
 
     # Подмешиваем актуальные факты
     kb_text = await load_kb_context(max_rows=80)
+    recent_text = await load_recent_context(6)
     recent_text = await load_recent_tours_context(max_rows=12, hours=120)
 
     # Жёсткие правила для модели
-    system_text = (
-        "Ты — AI-консультант по путешествиям из экосистемы TripleA.\n"
-        "Всегда опирайся на свежие данные из контекста (KB и список последних туров). "
-        "Если факта нет в контексте — не выдумывай, попроси уточнение или предложи посмотреть подборку туров.\n"
-        "Строго запрещено упоминать дату обучения модели, ограничения дат или фразы вроде "
-        "«данные до 2023 года». Говори просто: «по текущим данным», «сейчас», «актуально на сегодня».\n"
-        "Отвечай кратко и предметно, без «воды». Все даты считай относительно текущей зоны Asia/Tashkent.\n"
-        f"Текущее локальное время: {datetime.now(TZ).strftime('%d.%m.%Y %H:%M %Z')}."
+        system_text = (
+        "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
+        "Отвечай дружелюбно, коротко и по делу. Держись тематики: туры, отели, сезоны, визы, цены, лайфхаки. "
+        f"Считай текущую дату/время: {datetime.now(TZ).strftime('%d.%m.%Y %H:%M %Z')}. "
+        "Если есть блоки «АКТУАЛЬНЫЕ ФАКТЫ» и/или «СВЕЖИЕ ТУРЫ», в первую очередь опирайся на них. "
+        "Не упоминай дату среза обучения модели; отвечай по текущему контексту."
     )
 
-    # Собираем пользовательский контент с подложкой фактов
     blocks = []
     if kb_text:
-        blocks.append("АКТУАЛЬНЫЕ ФАКТЫ (KB):\n" + kb_text)
+        blocks.append(f"АКТУАЛЬНЫЕ ФАКТЫ:\n{kb_text}")
     if recent_text:
-        blocks.append("СВЕЖИЕ ТУРЫ (последние объявления):\n" + recent_text)
-    blocks.append("ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n" + prompt)
-    user_content = "\n\n".join(blocks)
+        blocks.append(f"СВЕЖИЕ ТУРЫ (последние):\n{recent_text}")
+    if blocks:
+        user_content = "\n\n".join(blocks) + f"\n\nВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{prompt}"
+    else:
+        user_content = prompt
 
     payload = {
         "model": "gpt-4o-mini",
@@ -741,8 +741,8 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
     }
 
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            for attempt in range(3):
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for attempt in range(5):
                 r = await client.post(
                     "https://api.openai.com/v1/chat/completions",
                     headers={
@@ -751,12 +751,19 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                     },
                     json=payload,
                 )
-                if r.status_code == 200:
-                    data = r.json()
-                    msg = (data.get("choices") or [{}])[0].get("message", {}).get("content")
-                    if not msg:
-                        logging.error(f"OpenAI no choices/message: {data}")
-                        break
+                    if r.status_code == 200:
+                    ...
+                    return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
+
+                     # backoff на 429/5xx
+                    if r.status_code in (429, 500, 502, 503, 504):
+                    delay = min(20.0, (2 ** attempt) + random.random())
+                    await asyncio.sleep(delay)
+                    continue
+
+                    logging.error(f"OpenAI error {r.status_code}: {r.text[:400]}")
+                    break
+
                     answer = msg.strip()
                     if premium:
                         answer += "\n\n🔗 Источник туров: наш канал и база последних объявлений."
