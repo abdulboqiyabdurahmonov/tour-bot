@@ -1,31 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-collector.py — улучшенная версия с точным извлечением:
-- отели (мультивыбор из одного длинного текста);
-- даты (RU/UZ, «12–19 сент», «12.09–19.09», «с 12 по 19 сент», одиночные);
-- цена + нормализация валют (USD/EUR/UZS/RUB);
-- ПИТАНИЕ (AI/UAI/BB/HB/FB/RO и т.д.);
-- ЧТО ВКЛЮЧЕНО (перелёт/проживание/питание/трансфер/страховка/виза/багаж/ручная кладь/экскурсии).
+collector.py — улучшенная версия с точным извлечением отелей/цен/дат из «свалочного» текста.
 
-Сохранение:
-- Каждому найденному отелю создаём отдельную строку в БД с уникальным stable_key
-  (завязан на message_id + конкретный отель + цену).
-- Требование цены управляется флагом REQUIRE_PRICE (по умолчанию включён).
+Главное:
+- Жёсткий анти-шум по гео: не путаем остров/город/регион с отелем.
+- N‑gram по заглавным словам + суффиксы-«маркеры отелей» + бренд‑хинты.
+- Поддержка списков: "Rixos Premium, Titanic Deluxe, Concorde ..." → несколько отелей.
+- Строгий парсинг дат для RU/UZ (кириллица/латиница) и форматов ("12–19 сент", "12.09–19.09", "с 12 по 19 сент").
+- Аккуратное извлечение цены/валюты, нормализация валют.
+- Батч‑апсерты и фильтры актуальности сохранены.
 
-Важно по БД:
-- Нужны поля board TEXT и includes TEXT в таблице tours (см. патч к db_init.py).
+Интеграция в существующий бот не требует изменений БД (схема из db_init.py подходит).
 """
 
+from __future__ import annotations
 import os
 import re
 import logging
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
-from datetime import timezone
 
 # >>> SAN: imports
 from utils.sanitazer import (
@@ -59,18 +57,14 @@ if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
 def get_conn():
     return connect(DATABASE_URL, autocommit=True)
 
-# >>> SAN: UPSERT (named params) + bulk (+board, +includes)
+# >>> SAN: UPSERT (named params) + bulk
 SQL_UPSERT_TOUR = """
 INSERT INTO tours(
     country, city, hotel, price, currency, dates, description,
-    source_url, posted_at, message_id, source_chat, stable_key,
-    board, includes
+    source_url, posted_at, message_id, source_chat, stable_key
 )
-VALUES (
-    %(country)s, %(city)s, %(hotel)s, %(price)s, %(currency)s, %(dates)s, %(description)s,
-    %(source_url)s, %(posted_at)s, %(message_id)s, %(source_chat)s, %(stable_key)s,
-    %(board)s, %(includes)s
-)
+VALUES (%(country)s, %(city)s, %(hotel)s, %(price)s, %(currency)s, %(dates)s, %(description)s,
+        %(source_url)s, %(posted_at)s, %(message_id)s, %(source_chat)s, %(stable_key)s)
 ON CONFLICT (message_id, source_chat) DO UPDATE SET
     country     = EXCLUDED.country,
     city        = EXCLUDED.city,
@@ -81,9 +75,7 @@ ON CONFLICT (message_id, source_chat) DO UPDATE SET
     description = EXCLUDED.description,
     source_url  = EXCLUDED.source_url,
     posted_at   = EXCLUDED.posted_at,
-    stable_key  = EXCLUDED.stable_key,
-    board       = EXCLUDED.board,
-    includes    = EXCLUDED.includes;
+    stable_key  = EXCLUDED.stable_key;
 """
 
 def save_tours_bulk(rows: list[dict]):
@@ -95,6 +87,7 @@ def save_tours_bulk(rows: list[dict]):
             cur.executemany(SQL_UPSERT_TOUR, rows)
         logging.info(f"💾 Сохранил/обновил батч: {len(rows)} шт.")
     except Exception as e:
+        # На всякий случай fallback по одному — чтобы не потерять всё из-за одного кривого поста
         logging.warning(f"⚠️ Bulk upsert failed, fallback to single. Reason: {e}")
         for r in rows:
             try:
@@ -196,6 +189,7 @@ def _month_to_mm(token: Optional[str]) -> Optional[str]:
 
 
 def parse_dates_strict(text: str) -> Optional[str]:
+    """Поддержка: "12–19 сент", "12.09–19.09", "с 12 по 19 сент", одиночные даты."""
     t = text.strip()
     m = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", t)
     if m:
@@ -255,6 +249,7 @@ def _is_blacklisted(token: str) -> bool:
 
 
 def _score_hotel_candidate(text: str) -> float:
+    """Скоринг: маркер-суффикс, бренд-хинты, заглавные буквы, штраф за blacklist."""
     t = text.lower()
     score = 0.0
     for suf in WHITELIST_SUFFIXES:
@@ -274,6 +269,7 @@ def _score_hotel_candidate(text: str) -> float:
 
 
 def _enum_ngrams(line: str, max_len: int = 5) -> List[str]:
+    """N‑gram по заглавным словам: 'Rixos Premium Belek', 'Gloria Serenity Resort' и т.п."""
     tokens = re.findall(r"[\w'&.-]+", line)
     caps = [(tok, i) for i, tok in enumerate(tokens) if tok[:1].isupper() or tok.isupper()]
     spans = []
@@ -283,45 +279,44 @@ def _enum_ngrams(line: str, max_len: int = 5) -> List[str]:
     return spans
 
 
+def _split_candidates(raw: str) -> List[str]:
+    parts = SPLIT_RE.split(raw)
+    clean = [re.sub(r"\(.*?\)|\[.*?\]", "", p).strip() for p in parts]
+    return [c for c in clean if c]
+
+
 def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
     if not s:
         return s
-    return re.sub(r'[\s–-]*(?:от\s*)?\d[\d\s.,]*\s*(?:USD|EUR|UZS|RUB|\$|€)\b.*$', '', s, flags=re.I).strip()
+    return re.sub(
+        r'[\s–-]*(?:от\s*)?\d[\d\s.,]*\s*(?:USD|EUR|UZS|RUB|\$|€)\b.*$',
+        '', s, flags=re.I
+    ).strip()
 
 
-# ======== ПИТАНИЕ И «ЧТО ВКЛЮЧЕНО» ========
-BOARD_RE = re.compile(r"\b(ai|uai|all\s*inclusive|bb|hb|fb|ro|ob|ultra\s*all)\b", re.I)
+def _extract_prices(text: str) -> Tuple[Optional[float], Optional[str]]:
+    for m in PRICE_RE.finditer(text):
+        g = m.groupdict()
+        cur = g.get("cur") or g.get("cur2")
+        amt = g.get("amt") or g.get("amt2")
+        val = _amount_to_float(amt)
+        if val:
+            cu = (cur or '').upper()
+            if cu in {"$", "US$", "USD$"}:
+                cu = "USD"
+            elif cu in {"€", "EUR€"}:
+                cu = "EUR"
+            elif cu in {"UZS", "СУМ", "СУМЫ", "СУМ."}:
+                cu = "UZS"
+            elif cu in {"РУБ", "РУБ."}:
+                cu = "RUB"
+            return val, (cu or None)
+    return None, None
+
 
 def _extract_board(text: str) -> Optional[str]:
     m = BOARD_RE.search(text)
     return m.group(0).upper().replace(" ", "") if m else None
-
-INCLUDE_KEYWORDS = {
-    r"авиаперел[её]т|перел[её]т|авиабилет|билеты|flight|air ?ticket": "перелёт",
-    r"проживани[ея]|размещение|accommodation|stay": "проживание",
-    r"трансфер|transfer": "трансфер",
-    r"страховк[аи]|insurance": "страховка",
-    r"виза|visa": "виза",
-    r"багаж|luggage|checked ?bag": "багаж",
-    r"ручн[аяе] кладь|hand ?luggage|cabin ?bag": "ручная кладь",
-    r"гид|экскурс(ия|ии)|guide|excursion": "экскурсии/гид",
-    r"питание|full board|half board|breakfast": "питание",
-}
-INCLUDE_RE = re.compile("|".join(f"(?:{k})" for k in INCLUDE_KEYWORDS.keys()), re.I)
-
-def _extract_includes(text: str) -> Optional[str]:
-    found = set()
-    for m in INCLUDE_RE.finditer(text):
-        span = m.group(0).lower()
-        for pat, norm in INCLUDE_KEYWORDS.items():
-            if re.search(pat, span, re.I):
-                found.add(norm)
-                break
-    if not found:
-        return None
-    order = ["перелёт", "проживание", "питание", "трансфер", "страховка", "виза", "багаж", "ручная кладь", "экскурсии/гид"]
-    result = [x for x in order if x in found] + [x for x in sorted(found) if x not in order]
-    return ", ".join(result) if result else None
 
 
 # ============ ГЕО/СТРАНА ============
@@ -332,6 +327,7 @@ CITY2COUNTRY = {
     "Тбилиси": "Грузия", "Шарм": "Египет", "Хургада": "Египет",
 }
 
+
 def guess_country(city: Optional[str]) -> Optional[str]:
     if not city:
         return None
@@ -341,6 +337,9 @@ def guess_country(city: Optional[str]) -> Optional[str]:
 # ============ ПАРСИНГ ПОСТА ============
 
 def _extract_hotels(cleaned: str) -> List[str]:
+    """Достаём список вероятных отелей из неструктурированного текста.
+    Алгоритм: режем по списковым разделителям → n‑gram по заглавным → скорим → фильтруем.
+    """
     hotels: List[str] = []
     for block in SPLIT_RE.split(cleaned):
         block = block.strip()
@@ -370,26 +369,9 @@ def _extract_hotels(cleaned: str) -> List[str]:
             uniq.append(h)
     return uniq[:5]
 
-def _extract_prices(text: str) -> tuple[Optional[float], Optional[str]]:
-    for m in PRICE_RE.finditer(text):
-        g = m.groupdict()
-        cur = g.get("cur") or g.get("cur2")
-        amt = g.get("amt") or g.get("amt2")
-        val = _amount_to_float(amt)
-        if val:
-            cu = (cur or '').upper()
-            if cu in {"$", "US$", "USD$"}:
-                cu = "USD"
-            elif cu in {"€", "EUR€"}:
-                cu = "EUR"
-            elif cu in {"UZS", "СУМ", "СУМЫ", "СУМ."}:
-                cu = "UZS"
-            elif cu in {"RUB", "РУБ", "РУБ."}:
-                cu = "RUB"
-            return val, (cu or None)
-    return None, None
 
-def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
+def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: "datetime"):
+    """Разбор поста (без картинок), устойчивый к мусору и форматам."""
     raw = text or ""
     cleaned = San.clean_text(raw)
     draft = TourDraft.from_raw(cleaned)
@@ -401,18 +383,19 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", cleaned)
         city = m.group(1) if m else None
 
-    # Отели (мульти)
+    # Отели (мульти-извлечение)
     hotels = _extract_hotels(cleaned)
     hotel = hotels[0] if hotels else (strip_trailing_price_from_hotel(draft.hotel) if draft.hotel else None)
 
-    # Даты
+    # Даты: строгий разбор RU/UZ
     dates = parse_dates_strict(cleaned) or draft.dates
 
-    # Цена/валюта
+    # Цена/валюта: сначала из draft, иначе fallback
     price, currency = draft.price, draft.currency
     if price is None or currency is None:
         price, currency = _extract_prices(cleaned)
 
+    # Валюта — нормализация, если пустая, пробуем по контексту
     if currency:
         cu = str(currency).strip().upper()
         if cu in {"$", "US$", "USD$"}:
@@ -434,10 +417,7 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         elif "usd" in low or "$" in low:
             currency = "USD"
 
-    # Питание/включено
-    board = _extract_board(cleaned)
-    includes = _extract_includes(cleaned)
-
+    # Стабильный ключ (уточним позже для каждого отеля)
     payload_base = {
         "country": guess_country(city) if city else None,
         "city": city,
@@ -449,14 +429,14 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
         "posted_at": posted_at.replace(tzinfo=None),
         "message_id": msg_id,
         "source_chat": chat,
-        "board": board,
-        "includes": includes,
     }
 
     return payload_base, (hotels if hotels else [hotel] if hotel else [])
 
+
 # ============ КОЛЛЕКТОР ============
 async def collect_once(client: TelegramClient):
+    """Один проход по всем каналам с батч-сохранением и фильтрами актуальности."""
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=MAX_POST_AGE_DAYS)
 
@@ -468,7 +448,8 @@ async def collect_once(client: TelegramClient):
             if not msg.text:
                 continue
 
-            if msg.date and msg.date.replace(tzinfo=None) < cutoff:
+            # игнорируем слишком старые посты
+            if msg.date and msg.date.replace(tzinfo=None) < cutoff.replace(tzinfo=None):
                 continue
 
             def _make_rows() -> List[dict]:
@@ -506,11 +487,13 @@ async def collect_once(client: TelegramClient):
             if rows:
                 batch.extend(rows)
 
+            # батч-сброс
             if len(batch) >= BATCH_SIZE:
                 await safe_run(lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
                                RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0))
                 batch.clear()
 
+        # остатки батча после канала
         if batch:
             await safe_run(lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
                            RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0))
@@ -525,6 +508,7 @@ async def run_collector():
             await collect_once(client)
         except Exception as e:
             logging.error(f"❌ Ошибка в коллекторе: {e}")
+        # лёгкий джиттер, чтобы не попадать в ровные минуты и разойтись с другими процессами
         await asyncio.sleep(SLEEP_BASE + int(10 * (os.getpid() % 3)))
 
 if __name__ == "__main__":
