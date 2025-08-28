@@ -851,6 +851,16 @@ async def cmd_start(message: Message):
     )
     await message.answer(text, reply_markup=main_kb)
 
+@dp.message(F.text.regexp(r"насколько.*актуал", flags=re.I))
+async def faq_actual(message: Message):
+    txt = (
+        "Актуальность:\n"
+        "• В подборках показываем свежие туры за последние 72 часа (в карточке есть время публикации).\n"
+        "• ИИ использует базу последних объявлений и лист KB — поэтому отвечает «на сегодня», без старых справок.\n"
+        "Если нужно — напиши страну и бюджет, соберу варианты ✈️"
+    )
+    await message.answer(txt)
+
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: Message):
     await message.reply(f"chat_id: {message.chat.id}\nthread_id: {getattr(message, 'message_thread_id', None)}")
