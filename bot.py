@@ -230,6 +230,39 @@ async def load_kb_context(max_rows: int = 60) -> str:
         logging.warning(f"KB load failed: {e}")
         return ""
 
+async def load_recent_tours_context(max_rows: int = 12, hours: int = 120) -> str:
+    """
+    Короткий контекст для ИИ: последние туры из БД (чтобы ответы были "про сегодня").
+    """
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT country, city, hotel, COALESCE(board, '') AS board, COALESCE(includes, '') AS includes,
+                       price, currency, dates, posted_at
+                FROM tours
+                WHERE posted_at >= %s
+                ORDER BY posted_at DESC
+                LIMIT %s
+            """, (cutoff, max_rows))
+            rows = cur.fetchall()
+        lines = []
+        for r in rows:
+            when = localize_dt(r.get("posted_at"))  # уже «🕒 DD.MM.YYYY HH:MM (TST)»
+            price = fmt_price(r.get("price"), r.get("currency"))
+            hotel = clean_text_basic(strip_trailing_price_from_hotel(r.get("hotel") or "Пакетный тур"))
+            board = (r.get("board") or "").strip()
+            inc = (r.get("includes") or "").strip()
+            extra = []
+            if board: extra.append(f"питание: {board}")
+            if inc:   extra.append(f"включено: {inc}")
+            extra_txt = f" ({'; '.join(extra)})" if extra else ""
+            lines.append(f"- {r.get('country')} — {r.get('city')}, {hotel}, {price}, даты: {r.get('dates') or '—'}{extra_txt}. {when}")
+        return "\n".join(lines)
+    except Exception as e:
+        logging.warning(f"Recent context load failed: {e}")
+        return ""
+
 def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
     """Добавляет заявку в лист (WORKSHEET_NAME, по умолчанию «Заявки»)."""
     try:
