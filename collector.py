@@ -20,12 +20,12 @@ import os
 import re
 import logging
 import asyncio
-from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
 from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
+from datetime import timezone
 
 # >>> SAN: imports
 from utils.sanitazer import (
@@ -370,6 +370,24 @@ def _extract_hotels(cleaned: str) -> List[str]:
             uniq.append(h)
     return uniq[:5]
 
+def _extract_prices(text: str) -> tuple[Optional[float], Optional[str]]:
+    for m in PRICE_RE.finditer(text):
+        g = m.groupdict()
+        cur = g.get("cur") or g.get("cur2")
+        amt = g.get("amt") or g.get("amt2")
+        val = _amount_to_float(amt)
+        if val:
+            cu = (cur or '').upper()
+            if cu in {"$", "US$", "USD$"}:
+                cu = "USD"
+            elif cu in {"€", "EUR€"}:
+                cu = "EUR"
+            elif cu in {"UZS", "СУМ", "СУМЫ", "СУМ."}:
+                cu = "UZS"
+            elif cu in {"RUB", "РУБ", "РУБ."}:
+                cu = "RUB"
+            return val, (cu or None)
+    return None, None
 
 def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
     raw = text or ""
@@ -437,10 +455,9 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
 
     return payload_base, (hotels if hotels else [hotel] if hotel else [])
 
-
 # ============ КОЛЛЕКТОР ============
 async def collect_once(client: TelegramClient):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=MAX_POST_AGE_DAYS)
 
     for channel in CHANNELS:
