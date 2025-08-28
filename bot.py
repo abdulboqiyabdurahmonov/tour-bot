@@ -13,7 +13,6 @@ import secrets
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -69,6 +68,23 @@ TZ = ZoneInfo("Asia/Tashkent")
 PAGER_STATE: Dict[str, Dict] = {}
 PAGER_TTL_SEC = 3600
 WANT_STATE: Dict[int, Dict] = {}
+
+# --- Динамическая проверка колонок схемы
+SCHEMA_COLS: set[str] = set()
+
+def _has_cols(*names: str) -> bool:
+    return all(n in SCHEMA_COLS for n in names)
+
+def _select_tours_clause() -> str:
+    """
+    Возвращает список полей для SELECT по tours с безопасными фоллбэками,
+    если колонок board/includes нет в текущей схеме.
+    """
+    base = "id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description"
+    extras = []
+    extras.append("board" if _has_cols("board") else "NULL AS board")
+    extras.append("includes" if _has_cols("includes") else "NULL AS includes")
+    return f"{base}, {', '.join(extras)}"
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -160,7 +176,6 @@ def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
     try:
         ws = spreadsheet.add_worksheet(title=title, rows=500, cols=max(12, len(header) + 2))
         if header:
-            # используем USER_ENTERED, чтобы даты/числа выглядели красиво
             ws.append_row(header, value_input_option="USER_ENTERED")
         logging.info(f"GS: created worksheet '{title}'")
         return ws
@@ -381,7 +396,7 @@ def normalize_dates_for_display(s: Optional[str]) -> str:
         d = int(d); mo = int(mo); y = int(y)
         if y < 100: y += 2000 if y < 70 else 1900
         if mo > 12 and d <= 12: d, mo = mo, d
-        return f"{d:02d}.{mo:02d}.{y:04d}"""
+        return f"{d:02d}.{mo:02d}.{y:04d}"
     return f"{_norm(d1, m1, y1)}–{_norm(d2, m2, y2)}"
 
 def localize_dt(dt: Optional[datetime]) -> str:
@@ -505,9 +520,11 @@ async def fetch_tours(
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if max_price is not None else "ORDER BY posted_at DESC"
 
+        select_list = _select_tours_clause()
+
         with get_conn() as conn, conn.cursor() as cur:
             sql_recent = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
+                SELECT {select_list}
                 FROM tours
                 {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
                 {order_clause}
@@ -519,7 +536,7 @@ async def fetch_tours(
                 return rows, True
 
             sql_fb = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
+                SELECT {select_list}
                 FROM tours
                 {where_sql}
                 {order_clause}
@@ -560,15 +577,16 @@ async def fetch_tours_page(
             where_clauses.append("price IS NOT NULL AND price <= %s")
             params.append(max_price)
         if hours is not None:
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             where_clauses.append("posted_at >= %s")
             params.append(cutoff)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
 
+        select_list = _select_tours_clause()
         sql = f"""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
+            SELECT {select_list}
             FROM tours
             {where_sql}
             {order_clause}
@@ -711,7 +729,6 @@ async def send_tour_card(chat_id: int, user_id: int, t: dict):
     fav = is_favorite(user_id, t["id"])
     kb = tour_inline_kb(t, fav)
     caption = build_card_text(t)
-    # Только текст (без фото) для пользователя:
     await bot.send_message(chat_id, caption, reply_markup=kb, disable_web_page_preview=True)
 
 async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
@@ -748,10 +765,10 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
 
         board_line = f"\n🍽 Питание: {escape(board)}" if board else ""
         incl_line = f"\n✅ Включено: {escape(includes)}" if includes else ""
-    
+
         text = (
             f"🆕 <b>Заявка №{lead_id}</b>\n"
-            f"👤 {escape(user_label)}\n"              # ← без user.id
+            f"👤 {escape(user_label)}\n"
             f"📞 {escape(phone)}\n"
             f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}\n"
             f"🏨 {safe(hotel_clean)}\n"
@@ -819,7 +836,7 @@ async def cmd_leadstest(message: Message):
         await message.reply("Недостаточно прав.")
         return
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes FROM tours ORDER BY posted_at DESC LIMIT 1;")
+        cur.execute(f"SELECT {_select_tours_clause()} FROM tours ORDER BY posted_at DESC LIMIT 1;")
         t = cur.fetchone()
     if not t:
         await message.reply("В базе нет туров для теста.")
@@ -985,7 +1002,7 @@ async def cb_fav_add(call: CallbackQuery):
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True))
@@ -1000,7 +1017,7 @@ async def cb_fav_rm(call: CallbackQuery):
     await call.answer("Убрано из избранного 🤍", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False))
@@ -1046,8 +1063,8 @@ async def on_contact(message: Message):
 
     # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
+        cur.execute(f"""
+            SELECT {_select_tours_clause()}
             FROM tours WHERE id=%s;
         """, (tour_id,))
         t = cur.fetchone()
@@ -1132,8 +1149,7 @@ async def on_startup():
     except Exception as e:
         logging.error(f"Schema ensure failed: {e}")
 
-        # --- GS warmup (подготовим таблицу и лист "Заявки")
-        # --- GS warmup (подготовим таблицу и лист "Заявки")
+    # --- GS warmup (подготовим таблицу и лист "Заявки")
     try:
         gc = _get_gs_client()
         if not gc:
@@ -1144,6 +1160,7 @@ async def on_startup():
             sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
             logging.info(f"GS warmup: opened spreadsheet title='{sh.title}'")
 
+            # логируем существующие листы — удобно для диагностики
             try:
                 titles = [ws.title for ws in sh.worksheets()]
                 logging.info(f"GS warmup: worksheets={titles}")
@@ -1165,14 +1182,11 @@ async def on_startup():
     except Exception as e:
         logging.error(f"GS warmup failed (generic): {e}")
 
-    if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL)
-        logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
-    else:
-        logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
-
+    # --- Снимем фактическую схему tours и DSN
     try:
         with get_conn() as conn, conn.cursor() as cur:
+            info = conn.info
+            logging.info(f"🗄 DB DSN: host={info.host} db={info.dbname} user={info.user} port={info.port}")
             cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
@@ -1180,9 +1194,17 @@ async def on_startup():
                 ORDER BY ordinal_position
             """)
             cols = [r["column_name"] for r in cur.fetchall()]
+            global SCHEMA_COLS
+            SCHEMA_COLS = set(cols)
             logging.info(f"🎯 Колонки в таблице tours: {cols}")
     except Exception as e:
         logging.error(f"❌ Ошибка при проверке колонок: {e}")
+
+    if WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL)
+        logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
+    else:
+        logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
 
 @app.on_event("shutdown")
 async def on_shutdown():
