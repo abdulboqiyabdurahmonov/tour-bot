@@ -1,3 +1,5 @@
+# db_init.py
+
 import os
 import logging
 from psycopg import connect
@@ -46,58 +48,27 @@ def init_db():
                 source_url TEXT,
                 photo_url TEXT,
                 posted_at TIMESTAMP DEFAULT NOW(),
-                -- старый уникальный составной ключ
                 UNIQUE(message_id, source_chat)
             );
         """)
 
-        # --- ЛЁГКИЕ МИГРАЦИИ (на случай старой схемы) ---
+        # --- миграции внутри функции, а не на модульном уровне! ---
         cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
-        # >>> SAN: stable_key для идемпотентности и дедупликации
         cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS stable_key TEXT;")
-        # <<< SAN: stable_key
-
-        # Избранное
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS favorites (
-                user_id BIGINT,
-                tour_id INT REFERENCES tours(id) ON DELETE CASCADE,
-                created_at TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY(user_id, tour_id)
-            );
-        """)
-
-        # Лиды
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS leads (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                tour_id INT REFERENCES tours(id) ON DELETE SET NULL,
-                phone TEXT,
-                note TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-        """)
-
-        # KV-конфиг
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS app_config (
-                key TEXT PRIMARY KEY,
-                val TEXT
-            );
-        """)
+        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS board TEXT;")
+        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS includes TEXT;")
 
         # Индексы
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours (posted_at DESC);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_country ON tours (LOWER(country));")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_city ON tours (LOWER(city));")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_hotel ON tours (LOWER(hotel));")
-        # >>> SAN: уникальные индексы
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tours_stable_key ON tours (stable_key);")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tours_source_msg ON tours (source_chat, message_id);")
-        # <<< SAN: уникальные индексы
 
     logging.info("📦 База данных инициализирована")
+
+# Остальные функции (save_user, save_request, search_tours, get_config, set_config) — без изменений
 
 def save_user(user):
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
