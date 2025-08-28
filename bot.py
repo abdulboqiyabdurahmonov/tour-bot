@@ -169,11 +169,9 @@ def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
         raise
 
 def _ensure_header(ws, header: list[str]) -> None:
-    """Гарантируем, что в первой строке есть все колонки из header.
-    Ничего не удаляем, недостающие — ДОПИСЫВАЕМ справа.
-    """
+    """Обновляет первую строку: добавляет недостающие колонки справа."""
     try:
-        current = ws.row_values(1)  # список заголовков в 1-й строке
+        current = ws.row_values(1)
     except Exception:
         current = []
     new = list(current)
@@ -184,11 +182,9 @@ def _ensure_header(ws, header: list[str]) -> None:
             changed = True
     if not changed:
         return
-    # если колонок физически меньше — расширим лист
     need = len(new) - ws.col_count
     if need > 0:
         ws.add_cols(need)
-    # перезаписываем первую строку
     ws.update('1:1', [new])
     logging.info(f"GS: header updated -> {new}")
 
@@ -225,6 +221,7 @@ def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
         gc = _get_gs_client()
         if not gc:
             return
+
         sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
         header = [
             "created_utc", "lead_id", "username", "full_name", "phone",
@@ -233,13 +230,14 @@ def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
         ]
         ws = _ensure_ws(sh, WORKSHEET_NAME, header)
         _ensure_header(ws, header)
+
         full_name = f"{(getattr(user, 'first_name', '') or '').strip()} {(getattr(user, 'last_name', '') or '').strip()}".strip()
         username = f"@{user.username}" if getattr(user, "username", None) else ""
         posted_local = localize_dt(t.get("posted_at"))
         hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description")) or "Пакетный тур"
         hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text))
 
-       ws.append_row([
+        ws.append_row([
             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             int(lead_id),
             username,
@@ -253,8 +251,8 @@ def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
             t.get("dates") or "",
             t.get("source_url") or "",
             posted_local,
-            (t.get("board") or ""),       # 👈 новое поле
-            (t.get("includes") or ""),    # 👈 новое поле
+            (t.get("board") or ""),
+            (t.get("includes") or ""),
         ], value_input_option="USER_ENTERED")
     except Exception as e:
         logging.error(f"append_lead_to_sheet failed: {e}")
@@ -1135,6 +1133,7 @@ async def on_startup():
         logging.error(f"Schema ensure failed: {e}")
 
         # --- GS warmup (подготовим таблицу и лист "Заявки")
+        # --- GS warmup (подготовим таблицу и лист "Заявки")
     try:
         gc = _get_gs_client()
         if not gc:
@@ -1145,24 +1144,19 @@ async def on_startup():
             sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
             logging.info(f"GS warmup: opened spreadsheet title='{sh.title}'")
 
-            # логируем существующие листы — удобно для диагностики
             try:
                 titles = [ws.title for ws in sh.worksheets()]
                 logging.info(f"GS warmup: worksheets={titles}")
             except Exception as e_list:
                 logging.warning(f"GS: cannot list worksheets: {e_list}")
 
-            ws = _ensure_ws(
-                sh,
-                os.getenv("WORKSHEET_NAME", "Заявки"),
-                header=[
-                    "created_utc", "lead_id", "username", "full_name", "phone",
-                    "country", "city", "hotel", "price", "currency", "dates",
-                    "source_url", "posted_local", "board", "includes",
-                ]
-                ws = _ensure_ws(sh, os.getenv("WORKSHEET_NAME", "Заявки"), header)
-                _ensure_header(ws, header)
-            )
+            header = [
+                "created_utc", "lead_id", "username", "full_name", "phone",
+                "country", "city", "hotel", "price", "currency", "dates",
+                "source_url", "posted_local", "board", "includes",
+            ]
+            ws = _ensure_ws(sh, os.getenv("WORKSHEET_NAME", "Заявки"), header)
+            _ensure_header(ws, header)
             logging.info(f"✅ GS warmup: лист '{ws.title}' готов (rows={ws.row_count}, cols={ws.col_count})")
     except gspread.SpreadsheetNotFound as e:
         logging.error(f"GS warmup failed: spreadsheet not found by id='{SHEETS_SPREADSHEET_ID}': {e}")
