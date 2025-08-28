@@ -6,12 +6,13 @@ import time
 import json, base64
 from google.oauth2 import service_account
 import gspread
-from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict
 from html import escape
 from collections import defaultdict
 import secrets
 from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -475,7 +476,7 @@ async def fetch_tours(
             params.append(max_price)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if max_price is not None else "ORDER BY posted_at DESC"
 
         with get_conn() as conn, conn.cursor() as cur:
