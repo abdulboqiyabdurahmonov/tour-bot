@@ -504,6 +504,58 @@ def create_lead(tour_id: int, phone: Optional[str], full_name: str, note: Option
         logging.error(f"create_lead failed: {e}")
         return None
 
+def _tours_has_cols(*cols: str) -> Dict[str, bool]:
+    """Проверяем, существуют ли колонки в таблице tours (на любом инстансе БД)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'tours'
+        """)
+        have = {r["column_name"] for r in cur.fetchall()}
+    return {c: (c in have) for c in cols}
+
+async def load_recent_context(limit: int = 6) -> str:
+    """
+    Собирает короткий текст по последним турам для подмешивания в GPT.
+    Работает даже если нет колонок board/includes.
+    """
+    try:
+        flags = _tours_has_cols("board", "includes", "price", "currency", "dates", "hotel", "city", "country")
+        select_parts = ["country", "city", "COALESCE(hotel,'') AS hotel"]
+        select_parts.append("price" if flags["price"] else "NULL::numeric AS price")
+        select_parts.append("currency" if flags["currency"] else "NULL::text AS currency")
+        select_parts.append("COALESCE(dates,'') AS dates" if flags["dates"] else "'' AS dates")
+        select_parts.append("COALESCE(board,'') AS board" if flags["board"] else "'' AS board")
+        select_parts.append("COALESCE(includes,'') AS includes" if flags["includes"] else "'' AS includes")
+
+        sql = f"""
+            SELECT {", ".join(select_parts)}
+            FROM tours
+            ORDER BY posted_at DESC NULLS LAST
+            LIMIT %s
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (limit,))
+            rows = cur.fetchall()
+
+        lines = []
+        for r in rows:
+            price = fmt_price(r.get("price"), r.get("currency")) if r.get("price") is not None else "цена уточняется"
+            hotel = clean_text_basic(strip_trailing_price_from_hotel(r.get("hotel"))) if r.get("hotel") else "пакетный тур"
+            parts = [
+                f"{r.get('country') or '—'} — {r.get('city') or '—'}",
+                f"{hotel}",
+                f"{price}",
+            ]
+            if r.get("dates"):     parts.append(f"даты: {normalize_dates_for_display(r.get('dates'))}")
+            if r.get("board"):     parts.append(f"питание: {r.get('board')}")
+            if r.get("includes"):  parts.append(f"включено: {r.get('includes')}")
+            lines.append(" • ".join(parts))
+        return "\n".join(lines)
+    except Exception as e:
+        logging.warning(f"Recent context load failed: {e}")
+        return ""
+
 def set_pending_want(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
