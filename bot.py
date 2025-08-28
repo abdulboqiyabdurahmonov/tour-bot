@@ -1297,6 +1297,14 @@ async def on_startup():
     except Exception as e:
         logging.error(f"GS warmup failed (generic): {e}")
 
+        # гарантируем новые колонки (безопасно, IF NOT EXISTS)
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("ALTER TABLE IF NOT EXISTS tours ADD COLUMN IF NOT EXISTS board TEXT;")
+            cur.execute("ALTER TABLE IF NOT EXISTS tours ADD COLUMN IF NOT EXISTS includes TEXT;")
+    except Exception as e:
+        logging.warning(f"Ensure tours columns failed: {e}")
+
     # --- Снимем фактическую схему tours и DSN
     try:
         with get_conn() as conn, conn.cursor() as cur:
