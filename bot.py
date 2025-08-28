@@ -1335,6 +1335,14 @@ async def smart_router(message: Message):
     user_text = message.text.strip()
     await bot.send_chat_action(message.chat.id, "typing")
 
+        # --- Быстрый маршрут: погода
+    if re.search(r"\bпогод", user_text, flags=re.I):
+        place = _extract_place_from_weather_query(user_text)
+        await message.answer("Секунду, уточняю погоду…")
+        reply = await get_weather_text(place or "")
+        await message.answer(reply, disable_web_page_preview=True)
+        return
+
     if len(user_text) <= 40:
         rows, is_recent = await fetch_tours(user_text, hours=72)
         if rows:
