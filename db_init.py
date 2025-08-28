@@ -1,4 +1,4 @@
-# db_init.py
+# db_init.py — безопасный для импорта
 
 import os
 import logging
@@ -11,7 +11,7 @@ def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
 def init_db():
-    """Создание таблиц/индексов и лёгкие миграции."""
+    """Создание таблиц/индексов и лёгкие миграции (всё внутри курсора)."""
     with get_conn() as conn, conn.cursor() as cur:
         # Пользователи
         cur.execute("""
@@ -21,7 +21,7 @@ def init_db():
             );
         """)
 
-        # Логи запросов к GPT
+        # Логи GPT-запросов
         cur.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -32,7 +32,7 @@ def init_db():
             );
         """)
 
-        # Туры (включая photo_url)
+        # Туры
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tours (
                 id SERIAL PRIMARY KEY,
@@ -48,15 +48,42 @@ def init_db():
                 source_url TEXT,
                 photo_url TEXT,
                 posted_at TIMESTAMP DEFAULT NOW(),
+                stable_key TEXT,
+                board TEXT,
+                includes TEXT,
                 UNIQUE(message_id, source_chat)
             );
         """)
 
-        # --- миграции внутри функции, а не на модульном уровне! ---
-        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS photo_url TEXT;")
-        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS stable_key TEXT;")
-        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS board TEXT;")
-        cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS includes TEXT;")
+        # Избранное
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id BIGINT,
+                tour_id INT REFERENCES tours(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY(user_id, tour_id)
+            );
+        """)
+
+        # Лиды (минимум; дальше бот догоним недостающие поля через ensure_leads_schema)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS leads (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                tour_id INT REFERENCES tours(id) ON DELETE SET NULL,
+                phone TEXT,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+
+        # KV-конфиг
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_config (
+                key TEXT PRIMARY KEY,
+                val TEXT
+            );
+        """)
 
         # Индексы
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours (posted_at DESC);")
@@ -67,8 +94,6 @@ def init_db():
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tours_source_msg ON tours (source_chat, message_id);")
 
     logging.info("📦 База данных инициализирована")
-
-# Остальные функции (save_user, save_request, search_tours, get_config, set_config) — без изменений
 
 def save_user(user):
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
@@ -109,10 +134,6 @@ def set_config(key: str, val: str):
             ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
         """, (key, val))
 
-# db_init.py — добавь в init_db(), рядом с остальными ALTER-ами:
-cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS board TEXT;")
-cur.execute("ALTER TABLE tours ADD COLUMN IF NOT EXISTS includes TEXT;")
-
-# (по желанию индексы)
-# cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_board ON tours ((LOWER(board)));")
-
+# Для ручного запуска миграций:
+if __name__ == "__main__":
+    init_db()
