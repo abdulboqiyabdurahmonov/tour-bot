@@ -480,7 +480,7 @@ async def fetch_tours(
 
         with get_conn() as conn, conn.cursor() as cur:
             sql_recent = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
                 FROM tours
                 {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
                 {order_clause}
@@ -492,7 +492,7 @@ async def fetch_tours(
                 return rows, True
 
             sql_fb = f"""
-                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+                SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
                 FROM tours
                 {where_sql}
                 {order_clause}
@@ -541,7 +541,7 @@ async def fetch_tours_page(
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
 
         sql = f"""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
             FROM tours
             {where_sql}
             {order_clause}
@@ -769,7 +769,7 @@ async def cmd_leadstest(message: Message):
         await message.reply("Недостаточно прав.")
         return
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours ORDER BY posted_at DESC LIMIT 1;")
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes FROM tours ORDER BY posted_at DESC LIMIT 1;")
         t = cur.fetchone()
     if not t:
         await message.reply("В базе нет туров для теста.")
@@ -935,7 +935,7 @@ async def cb_fav_add(call: CallbackQuery):
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True))
@@ -950,7 +950,7 @@ async def cb_fav_rm(call: CallbackQuery):
     await call.answer("Убрано из избранного 🤍", show_alert=False)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description FROM tours WHERE id=%s;", (tour_id,))
+        cur.execute("SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False))
@@ -997,7 +997,7 @@ async def on_contact(message: Message):
     # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description
+            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description, board, includes
             FROM tours WHERE id=%s;
         """, (tour_id,))
         t = cur.fetchone()
