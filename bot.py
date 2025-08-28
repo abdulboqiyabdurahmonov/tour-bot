@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import asyncio
+import random
 import time
 import json, base64
 from google.oauth2 import service_account
@@ -679,9 +680,9 @@ async def fetch_tours_page(
             else "ORDER BY posted_at DESC"
         )
 
+        select_list = _select_tours_clause()
         sql = f"""
-            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at,
-                   photo_url, description, board, includes
+            SELECT {select_list}
             FROM tours
             {where_sql}
             {order_clause}
@@ -706,13 +707,10 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
 
     last_gpt_call[user_id] = now
 
-    # Подмешиваем актуальные факты
     kb_text = await load_kb_context(max_rows=80)
-    recent_text = await load_recent_context(6)
     recent_text = await load_recent_tours_context(max_rows=12, hours=120)
 
-    # Жёсткие правила для модели
-        system_text = (
+    system_text = (
         "Ты — AI-консультант по путешествиям из экосистемы TripleA. "
         "Отвечай дружелюбно, коротко и по делу. Держись тематики: туры, отели, сезоны, визы, цены, лайфхаки. "
         f"Считай текущую дату/время: {datetime.now(TZ).strftime('%d.%m.%Y %H:%M %Z')}. "
@@ -725,10 +723,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
         blocks.append(f"АКТУАЛЬНЫЕ ФАКТЫ:\n{kb_text}")
     if recent_text:
         blocks.append(f"СВЕЖИЕ ТУРЫ (последние):\n{recent_text}")
-    if blocks:
-        user_content = "\n\n".join(blocks) + f"\n\nВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{prompt}"
-    else:
-        user_content = prompt
+    user_content = "\n\n".join(blocks) + f"\n\nВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{prompt}" if blocks else prompt
 
     payload = {
         "model": "gpt-4o-mini",
@@ -751,32 +746,30 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                     },
                     json=payload,
                 )
-                    if r.status_code == 200:
-                    ...
-                    return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
 
-                     # backoff на 429/5xx
-                    if r.status_code in (429, 500, 502, 503, 504):
-                    delay = min(20.0, (2 ** attempt) + random.random())
-                    await asyncio.sleep(delay)
-                    continue
-
-                    logging.error(f"OpenAI error {r.status_code}: {r.text[:400]}")
-                    break
+                if r.status_code == 200:
+                    data = r.json()
+                    msg = (data.get("choices") or [{}])[0].get("message", {}).get("content")
+                    if not msg:
+                        logging.error(f"OpenAI no choices/message: {data}")
+                        break
 
                     answer = msg.strip()
                     if premium:
                         answer += "\n\n🔗 Источник туров: наш канал и база последних объявлений."
                     else:
                         answer += "\n\n✨ Хочешь прямые ссылки на источники туров? Подключи Premium доступ TripleA."
+
                     MAX_LEN = 3800
                     return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
-                elif r.status_code == 429:
-                    await asyncio.sleep(1.5 ** attempt)
+
+                if r.status_code in (429, 500, 502, 503, 504):
+                    delay = min(20.0, (2 ** attempt) + random.random())
+                    await asyncio.sleep(delay)
                     continue
-                else:
-                    logging.error(f"OpenAI error {r.status_code}: {r.text[:400]}")
-                    break
+
+                logging.error(f"OpenAI error {r.status_code}: {r.text[:400]}")
+                break
     except Exception as e:
         logging.exception(f"GPT call failed: {e}")
 
@@ -1307,8 +1300,8 @@ async def on_startup():
         # гарантируем новые колонки (безопасно, IF NOT EXISTS)
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("ALTER TABLE IF NOT EXISTS tours ADD COLUMN IF NOT EXISTS board TEXT;")
-            cur.execute("ALTER TABLE IF NOT EXISTS tours ADD COLUMN IF NOT EXISTS includes TEXT;")
+            cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS board TEXT;")
+            cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS includes TEXT;")
     except Exception as e:
         logging.warning(f"Ensure tours columns failed: {e}")
 
