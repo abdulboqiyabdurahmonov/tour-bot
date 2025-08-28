@@ -214,7 +214,7 @@ def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
         hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description")) or "Пакетный тур"
         hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text))
         ws.append_row([
-            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             int(lead_id),
             username,
             full_name,
@@ -650,20 +650,35 @@ def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
 
 def build_card_text(t: dict) -> str:
     price_str = fmt_price(t.get("price"), t.get("currency"))
+
+    # hotel: из БД, если нет — из описания, иначе fallback
     hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
     hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
-    meal = extract_meal(t.get("hotel"), t.get("description"))
-    meal_line = f"\n🍽 {meal}" if meal else ""
+
+    # питание: сначала из БД (collector), если нет — старый эвристический парсер
+    board = (t.get("board") or "").strip()
+    if not board:
+        board = extract_meal(t.get("hotel"), t.get("description")) or ""
+
+    # что включено: из БД (collector)
+    includes = (t.get("includes") or "").strip()
+
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
+
     parts = [
         f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}",
-        f"🏨 {safe(hotel_clean)}{meal_line}",
+        f"🏨 {safe(hotel_clean)}",
         f"💵 {price_str}",
         f"📅 {dates_norm}",
     ]
+    if board:
+        parts.append(f"🍽 Питание: <b>{escape(board)}</b>")
+    if includes:
+        parts.append(f"✅ Включено: {escape(includes)}")
     if time_str:
         parts.append(time_str)
+
     return "\n".join(parts)
 
 async def send_tour_card(chat_id: int, user_id: int, t: dict):
@@ -702,6 +717,12 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         src = (t.get("source_url") or "").strip()
         src_line = f'\n🔗 <a href="{escape(src)}">Источник</a>' if src else ""
 
+        board = (t.get("board") or "").strip()
+        includes = (t.get("includes") or "").strip()
+
+        board_line = f"\n🍽 Питание: {escape(board)}" if board else ""
+        incl_line = f"\n✅ Включено: {escape(includes)}" if includes else ""
+    
         text = (
             f"🆕 <b>Заявка №{lead_id}</b>\n"
             f"👤 {escape(user_label)}\n"              # ← без user.id
