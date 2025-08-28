@@ -400,6 +400,132 @@ def fmt_price(price, currency) -> str:
 def safe(s: Optional[str]) -> str:
     return escape(s or "—")
 
+# ================= ПОГОДА (Open-Meteo) =================
+WEATHER_CACHE: Dict[str, Tuple[float, Dict]] = {}
+WEATHER_TTL = 900  # 15 минут
+
+WMO_RU = {
+    0: "Ясно ☀️", 1: "Преимущественно ясно 🌤", 2: "Переменная облачность ⛅️", 3: "Облачно ☁️",
+    45: "Туман 🌫", 48: "Гололёдный туман 🌫❄️",
+    51: "Морось слабая 🌦", 53: "Морось умеренная 🌦", 55: "Морось сильная 🌧",
+    61: "Дождь слабый 🌦", 63: "Дождь умеренный 🌧", 65: "Дождь сильный 🌧",
+    66: "Ледяной дождь слабый 🌧❄️", 67: "Ледяной дождь сильный 🌧❄️",
+    71: "Снег слабый ❄️", 73: "Снег умеренный ❄️", 75: "Снег сильный ❄️",
+    77: "Снежная крупа 🌨",
+    80: "Ливни слабые 🌦", 81: "Ливни умеренные 🌧", 82: "Ливни сильные 🌧",
+    85: "Снегопад слабый 🌨", 86: "Снегопад сильный 🌨",
+    95: "Гроза ⛈", 96: "Гроза с градом ⛈🧊", 99: "Сильная гроза с градом ⛈🧊",
+}
+
+def _cleanup_weather_cache():
+    now = time.time()
+    for k, (ts, _) in list(WEATHER_CACHE.items()):
+        if now - ts > WEATHER_TTL:
+            WEATHER_CACHE.pop(k, None)
+
+def _extract_place_from_weather_query(q: str) -> Optional[str]:
+    """
+    Берём локацию после предлогов: 'на', 'в', 'во', 'по'.
+    Примеры: 'Какая погода на Бали сегодня?' -> 'Бали'
+             'погода в Стамбуле' -> 'Стамбул'
+    """
+    txt = q.strip()
+    # убираем служебные слова
+    txt = re.sub(r"(сегодня|сейчас|завтра|пожалуйста|pls|please)", "", txt, flags=re.I)
+    m = re.search(r"(?:на|в|во|по)\s+([A-Za-zА-Яа-яЁё\-\s]+)", txt, flags=re.I)
+    if not m:
+        # fallback: после слова "погода"
+        m = re.search(r"погод[ауые]\s+([A-Za-zА-Яа-яЁё\-\s]+)", txt, flags=re.I)
+    if not m:
+        return None
+    place = m.group(1)
+    place = re.sub(r"[?!.,:;]+$", "", place).strip()
+    # уберём хвост типа "сегодня", если остался
+    place = re.sub(r"\b(сегодня|завтра|сейчас)\b", "", place, flags=re.I).strip()
+    # короткие слова-приставки
+    place = re.sub(r"^остров[аеуы]?\s+", "", place, flags=re.I)
+    return place or None
+
+async def get_weather_text(place: str) -> str:
+    """
+    Ищем координаты через geocoding.open-meteo.com, затем текущую погоду через api.open-meteo.com
+    Возвращаем готовый текст для отправки в чат.
+    """
+    if not place:
+        return "Напиши город/место: например, «погода в Стамбуле» или «погода на Бали»."
+
+    key = place.lower().strip()
+    _cleanup_weather_cache()
+    if key in WEATHER_CACHE:
+        _, cached = WEATHER_CACHE[key]
+        return cached["text"]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # 1) Геокод
+            geo_r = await client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": place, "count": 1, "language": "ru"}
+            )
+            if geo_r.status_code != 200 or not geo_r.json().get("results"):
+                return f"Не нашёл локацию «{escape(place)}». Попробуй иначе (город/остров/страна)."
+
+            g = geo_r.json()["results"][0]
+            lat, lon = g["latitude"], g["longitude"]
+            label_parts = [g.get("name")]
+            if g.get("admin1"): label_parts.append(g["admin1"])
+            if g.get("country"): label_parts.append(g["country"])
+            label = ", ".join([p for p in label_parts if p])
+
+            # 2) Погода
+            params = {
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m",
+                "hourly": "precipitation_probability",
+                "timezone": "auto",
+            }
+            w_r = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+            if w_r.status_code != 200:
+                return f"Не удалось получить погоду для «{escape(label)}». Попробуй позже."
+
+            data = w_r.json()
+            cur = data.get("current", {})
+            code = int(cur.get("weather_code", 0))
+            desc = WMO_RU.get(code, "Погода")
+            t = cur.get("temperature_2m")
+            feels = cur.get("apparent_temperature")
+            rh = cur.get("relative_humidity_2m")
+            wind = cur.get("wind_speed_10m")
+            # вероятность осадков за сегодня (по локальному времени локации)
+            prob = None
+            hourly = data.get("hourly", {})
+            times = hourly.get("time", [])
+            probs = hourly.get("precipitation_probability", [])
+            if times and probs:
+                today = (datetime.now(timezone.utc).astimezone()).strftime("%Y-%m-%d")
+                prob = max((p for t, p in zip(times, probs) if t.startswith(today)), default=None)
+
+            parts = [f"Погода: <b>{escape(label)}</b>", desc]
+            if t is not None:
+                tmp = f"{t:.0f}°C"
+                if feels is not None and abs(feels - t) >= 1:
+                    tmp += f" (ощущается как {feels:.0f}°C)"
+                parts.append(f"Сейчас: {tmp}")
+            if rh is not None:
+                parts.append(f"Влажность: {int(rh)}%")
+            if wind is not None:
+                parts.append(f"Ветер: {wind:.1f} м/с")
+            if prob is not None:
+                parts.append(f"Вероятность осадков сегодня: {int(prob)}%")
+
+            txt = " | ".join(parts)
+            WEATHER_CACHE[key] = (time.time(), {"text": txt})
+            return txt
+    except Exception as e:
+        logging.warning(f"get_weather_text failed: {e}")
+        return "Не удалось получить данные о погоде. Попробуй ещё раз чуть позже."
+
 def clean_text_basic(s: Optional[str]) -> str:
     if not s:
         return "—"
