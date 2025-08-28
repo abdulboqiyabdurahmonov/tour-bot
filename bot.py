@@ -731,7 +731,9 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
             f"🏨 {safe(hotel_clean)}\n"
             f"💵 {price_str}\n"
             f"📅 {dates_norm}\n"
-            f"{time_str}{src_line}"
+            f"{time_str}"
+            f"{board_line}{incl_line}"
+            f"{src_line}"
         ).strip()
 
         kwargs = {}
