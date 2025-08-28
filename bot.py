@@ -594,32 +594,42 @@ async def fetch_tours_page(
     offset: int = 0,
 ) -> List[dict]:
     try:
-        where_clauses = []
+        where_clauses: List[str] = []
         params: List = []
 
         if query:
-            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
+            where_clauses.append(
+                "(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)"
+            )
             params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
+
         if country:
             where_clauses.append("country ILIKE %s")
             params.append(f"%{country}%")
+
         if currency_eq:
             where_clauses.append("currency = %s")
             params.append(currency_eq)
+
         if max_price is not None:
             where_clauses.append("price IS NOT NULL AND price <= %s")
             params.append(max_price)
-         if hours is not None:
+
+        if hours is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             where_clauses.append("posted_at >= %s")
             params.append(cutoff)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
+        order_clause = (
+            "ORDER BY price ASC NULLS LAST, posted_at DESC"
+            if order_by_price
+            else "ORDER BY posted_at DESC"
+        )
 
-        select_list = _select_tours_clause()
         sql = f"""
-            SELECT {select_list}
+            SELECT id, country, city, hotel, price, currency, dates, source_url, posted_at,
+                   photo_url, description, board, includes
             FROM tours
             {where_sql}
             {order_clause}
