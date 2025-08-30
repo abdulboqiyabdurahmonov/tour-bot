@@ -35,6 +35,33 @@ from psycopg.rows import dict_row
 import httpx
 from db_init import init_db, get_config, set_config  # конфиг из БД
 
+# ===== ПАМЯТЬ ДИАЛОГА =====
+LAST_RESULTS: dict[int, list[dict]] = {}   # user_id -> последние показанные туры
+LAST_QUERY_AT: dict[int, float] = {}       # user_id -> ts последнего показа
+LAST_PREMIUM_HINT_AT: dict[int, float] = {}  # user_id -> ts последней плашки "премиум"
+
+# Синонимы/алиасы гео (минимальный словарик)
+ALIASES = {
+    "фукуок": ["фукуок", "phu quoc", "phuquoc", "phú quốc"],
+    "шарм": ["шарм", "sharm", "sharm el sheikh", "sharm-el-sheikh", "шарм-эль-шейх"],
+    "дубай": ["дубай", "dubai", "dxб"],
+    "нячанг": ["нячанг", "nha trang", "nhatrang"],
+}
+def _expand_query(q: str) -> list[str]:
+    low = q.lower().strip()
+    for k, arr in ALIASES.items():
+        if low in arr:
+            return arr
+    return [q]
+
+def _should_hint_premium(user_id: int, cooldown_sec: int = 6*3600) -> bool:
+    now = time.monotonic()
+    ts = LAST_PREMIUM_HINT_AT.get(user_id, 0.0)
+    if now - ts >= cooldown_sec:
+        LAST_PREMIUM_HINT_AT[user_id] = now
+        return True
+    return False
+
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
 
@@ -823,6 +850,38 @@ async def fetch_tours_page(
         logging.error(f"Ошибка fetch_tours_page: {e}")
         return []
 
+# --- "дай ссылку", "источник", "ссылку на источник"
+if re.search(r"\b(дай\s+)?ссылк|источник|link\b", user_text, flags=re.I):
+    # если есть контекст последней выдачи
+    last = LAST_RESULTS.get(message.from_user.id) or []
+    if not last:
+        await message.answer("Сначала выбери тур (кнопка «🎒 Найти туры»), а потом напиши «Дай ссылку».")
+        return
+
+    # Покажем по 1-2 тура из последней выборки с разным поведением для премиума
+    premium_users = {123456789}
+    is_premium = message.from_user.id in premium_users
+
+    shown = 0
+    for t in last[:3]:
+        src = (t.get("source_url") or "").strip()
+        if is_premium and src:
+            text = f"🔗 Источник: <a href=\"{escape(src)}\">перейти к посту</a>"
+            await message.answer(text, disable_web_page_preview=True)
+        else:
+            # короткая подпись-замена ссылки: канал + дата
+            ch = (t.get("source_chat") or "").lstrip("@")
+            when = localize_dt(t.get("posted_at"))
+            label = f"Источник: {escape(ch) or 'тур-канал'}, {when or 'дата неизвестна'}"
+            hint = " • В Premium покажу прямую ссылку."
+            # не спамим плашкой, просто добавим коротко
+            await message.answer(f"{label}{hint}")
+        shown += 1
+
+    if shown == 0:
+        await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
+    return
+
 # ================= GPT =================
 last_gpt_call = defaultdict(float)
 
@@ -881,10 +940,13 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                         break
 
                     answer = msg.strip()
+                    hint = ""
                     if premium:
-                        answer += "\n\n🔗 Источник туров: наш канал и база последних объявлений."
+                        hint = "\n\n🔗 Источники доступны: канал(ы) партнёров и база свежих объявлений."
                     else:
-                        answer += "\n\n✨ Хочешь прямые ссылки на источники туров? Подключи Premium доступ TripleA."
+                        if _should_hint_premium(user_id):
+                            hint = "\n\n✨ Нужны прямые ссылки на посты-источники? Подключи Premium доступ TripleA."
+                    answer += hint
 
                     MAX_LEN = 3800
                     return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
@@ -937,6 +999,8 @@ def build_card_text(t: dict) -> str:
 
     # что включено: из БД (collector)
     includes = (t.get("includes") or "").strip()
+    if not (t.get("source_url") or "").strip():
+    parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
 
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
@@ -966,6 +1030,10 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     for t in rows:
         await send_tour_card(chat_id, user_id, t)
         await asyncio.sleep(0)
+        # запоминаем результаты для "дай ссылку"
+    LAST_RESULTS[user_id] = rows
+    LAST_QUERY_AT[user_id] = time.monotonic()
+
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
 async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
@@ -1375,6 +1443,35 @@ async def smart_router(message: Message):
     replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
     for part in replies:
         await message.answer(part, parse_mode=None)
+
+# --- быстрый маршрут: "Хургада интересует", "Фукуок", "Дубай дешево" и т.д.
+m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
+if m_interest or (len(user_text) <= 30):
+    q = m_interest.group(1) if m_interest else user_text
+    queries = _expand_query(q)
+    rows_all = []
+    for qx in queries:
+        rows, is_recent = await fetch_tours(qx, hours=72, limit_recent=6, limit_fallback=0)
+        rows_all.extend(rows)
+    if not rows_all:
+        rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
+
+    if rows_all:
+        header = "Нашёл варианты по запросу: " + escape(q)
+        await message.answer(f"<b>{header}</b>")
+        token = _new_token()
+        PAGER_STATE[token] = {
+            "chat_id": message.chat.id,
+            "query": q,
+            "country": None,
+            "currency_eq": None,
+            "max_price": None,
+            "hours": 72,
+            "order_by_price": False,
+            "ts": time.monotonic(),
+        }
+        await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
+        return
 
 # ================= WEBHOOK =================
 @app.get("/")
