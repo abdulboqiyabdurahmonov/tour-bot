@@ -992,20 +992,18 @@ def build_card_text(t: dict) -> str:
     hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
     hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
 
-    # питание: сначала из БД (collector), если нет — старый эвристический парсер
+    # питание: сначала из БД (collector), если нет — эвристический парсер
     board = (t.get("board") or "").strip()
     if not board:
         board = extract_meal(t.get("hotel"), t.get("description")) or ""
 
     # что включено: из БД (collector)
     includes = (t.get("includes") or "").strip()
-    if not url:
-        parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
-
 
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
 
+    # начинаем собирать карточку
     parts = [
         f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}",
         f"🏨 {safe(hotel_clean)}",
@@ -1018,6 +1016,13 @@ def build_card_text(t: dict) -> str:
         parts.append(f"✅ Включено: {escape(includes)}")
     if time_str:
         parts.append(time_str)
+
+    # про источник
+    url = (t.get("source_url") or "").strip()
+    if url:
+        parts.append(f"🔗 <a href=\"{escape(url)}\">Источник</a>")
+    else:
+        parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
 
     return "\n".join(parts)
 
@@ -1409,10 +1414,38 @@ async def cb_back_main(call: CallbackQuery):
 # --- Смарт-роутер текста
 @dp.message(F.text & ~F.text.in_({"🎒 Найти туры", "🤖 Спросить GPT", "🔔 Подписка", "⚙️ Настройки"}))
 async def smart_router(message: Message):
-    user_text = message.text.strip()
+    user_text = (message.text or "").strip()
     await bot.send_chat_action(message.chat.id, "typing")
 
-        # --- Быстрый маршрут: погода
+    # --- 1) "дай ссылку", "источник", "ссылку на источник"
+    if re.search(r"\b((дай\s+)?ссылк\w*|источник|link)\b", user_text, flags=re.I):
+        last = LAST_RESULTS.get(message.from_user.id) or []
+        if not last:
+            await message.answer("Сначала выбери тур (кнопка «🎒 Найти туры»), а потом напиши «Дай ссылку».")
+            return
+
+        premium_users = {123456789}
+        is_premium = message.from_user.id in premium_users
+
+        shown = 0
+        for t in last[:3]:
+            src = (t.get("source_url") or "").strip()
+            if is_premium and src:
+                text = f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>'
+                await message.answer(text, disable_web_page_preview=True)
+            else:
+                ch = (t.get("source_chat") or "").lstrip("@")
+                when = localize_dt(t.get("posted_at"))
+                label = f"Источник: {escape(ch) or 'тур-канал'}, {when or 'дата неизвестна'}"
+                hint = " • В Premium покажу прямую ссылку."
+                await message.answer(f"{label}{hint}")
+            shown += 1
+
+        if shown == 0:
+            await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
+        return
+
+    # --- 2) Быстрый маршрут: погода
     if re.search(r"\bпогод", user_text, flags=re.I):
         place = _extract_place_from_weather_query(user_text)
         await message.answer("Секунду, уточняю погоду…")
@@ -1420,6 +1453,38 @@ async def smart_router(message: Message):
         await message.answer(reply, disable_web_page_preview=True)
         return
 
+    # --- 3) Быстрый маршрут: "<что-то> интересует"
+    m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
+    if m_interest or (len(user_text) <= 30):
+        q = m_interest.group(1) if m_interest else user_text
+        queries = _expand_query(q)
+        rows_all: List[dict] = []
+
+        for qx in queries:
+            rows, _is_recent = await fetch_tours(qx, hours=72, limit_recent=6, limit_fallback=0)
+            rows_all.extend(rows)
+
+        if not rows_all:
+            rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
+
+        if rows_all:
+            header = "Нашёл варианты по запросу: " + escape(q)
+            await message.answer(f"<b>{header}</b>")
+            token = _new_token()
+            PAGER_STATE[token] = {
+                "chat_id": message.chat.id,
+                "query": q,
+                "country": None,
+                "currency_eq": None,
+                "max_price": None,
+                "hours": 72,
+                "order_by_price": False,
+                "ts": time.monotonic(),
+            }
+            await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
+            return
+
+    # --- 4) Короткие запросы: быстрый поиск по базе за 72 часа
     if len(user_text) <= 40:
         rows, is_recent = await fetch_tours(user_text, hours=72)
         if rows:
@@ -1439,40 +1504,12 @@ async def smart_router(message: Message):
             await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
             return
 
+    # --- 5) Фолбэк: GPT
     premium_users = {123456789}
     is_premium = message.from_user.id in premium_users
     replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
     for part in replies:
         await message.answer(part, parse_mode=None)
-
-# --- быстрый маршрут: "Хургада интересует", "Фукуок", "Дубай дешево" и т.д.
-m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
-if m_interest or (len(user_text) <= 30):
-    q = m_interest.group(1) if m_interest else user_text
-    queries = _expand_query(q)
-    rows_all = []
-    for qx in queries:
-        rows, is_recent = await fetch_tours(qx, hours=72, limit_recent=6, limit_fallback=0)
-        rows_all.extend(rows)
-    if not rows_all:
-        rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
-
-    if rows_all:
-        header = "Нашёл варианты по запросу: " + escape(q)
-        await message.answer(f"<b>{header}</b>")
-        token = _new_token()
-        PAGER_STATE[token] = {
-            "chat_id": message.chat.id,
-            "query": q,
-            "country": None,
-            "currency_eq": None,
-            "max_price": None,
-            "hours": 72,
-            "order_by_price": False,
-            "ts": time.monotonic(),
-        }
-        await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
-        return
 
 # ================= WEBHOOK =================
 @app.get("/")
