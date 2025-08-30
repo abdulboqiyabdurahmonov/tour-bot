@@ -27,6 +27,7 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 from aiogram.filters import Command
+    # aiogram v3.x
 from aiogram.client.default import DefaultBotProperties
 
 from psycopg import connect
@@ -850,38 +851,6 @@ async def fetch_tours_page(
         logging.error(f"Ошибка fetch_tours_page: {e}")
         return []
 
-# --- "дай ссылку", "источник", "ссылку на источник"
-if re.search(r"\b(дай\s+)?ссылк|источник|link\b", user_text, flags=re.I):
-    # если есть контекст последней выдачи
-    last = LAST_RESULTS.get(message.from_user.id) or []
-    if not last:
-        await message.answer("Сначала выбери тур (кнопка «🎒 Найти туры»), а потом напиши «Дай ссылку».")
-        return
-
-    # Покажем по 1-2 тура из последней выборки с разным поведением для премиума
-    premium_users = {123456789}
-    is_premium = message.from_user.id in premium_users
-
-    shown = 0
-    for t in last[:3]:
-        src = (t.get("source_url") or "").strip()
-        if is_premium and src:
-            text = f"🔗 Источник: <a href=\"{escape(src)}\">перейти к посту</a>"
-            await message.answer(text, disable_web_page_preview=True)
-        else:
-            # короткая подпись-замена ссылки: канал + дата
-            ch = (t.get("source_chat") or "").lstrip("@")
-            when = localize_dt(t.get("posted_at"))
-            label = f"Источник: {escape(ch) or 'тур-канал'}, {when or 'дата неизвестна'}"
-            hint = " • В Premium покажу прямую ссылку."
-            # не спамим плашкой, просто добавим коротко
-            await message.answer(f"{label}{hint}")
-        shown += 1
-
-    if shown == 0:
-        await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
-    return
-
 # ================= GPT =================
 last_gpt_call = defaultdict(float)
 
@@ -1031,7 +1000,7 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     for t in rows:
         await send_tour_card(chat_id, user_id, t)
         await asyncio.sleep(0)
-        # запоминаем результаты для "дай ссылку"
+    # запоминаем результаты для "дай ссылку"
     LAST_RESULTS[user_id] = rows
     LAST_QUERY_AT[user_id] = time.monotonic()
 
@@ -1569,7 +1538,7 @@ async def on_startup():
     except Exception as e:
         logging.error(f"GS warmup failed (generic): {e}")
 
-        # гарантируем новые колонки (безопасно, IF NOT EXISTS)
+    # гарантируем новые колонки (безопасно, IF NOT EXISTS)
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS board TEXT;")
