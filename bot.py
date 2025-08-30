@@ -992,7 +992,7 @@ def build_card_text(t: dict) -> str:
     hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
     hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
 
-    # питание: сначала из БД (collector), если нет — эвристический парсер
+    # питание: сначала из БД (collector), если нет — эвристика
     board = (t.get("board") or "").strip()
     if not board:
         board = extract_meal(t.get("hotel"), t.get("description")) or ""
@@ -1002,8 +1002,8 @@ def build_card_text(t: dict) -> str:
 
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
+    url = (t.get("source_url") or "").strip()
 
-    # начинаем собирать карточку
     parts = [
         f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}",
         f"🏨 {safe(hotel_clean)}",
@@ -1014,15 +1014,10 @@ def build_card_text(t: dict) -> str:
         parts.append(f"🍽 Питание: <b>{escape(board)}</b>")
     if includes:
         parts.append(f"✅ Включено: {escape(includes)}")
+    if not url:
+        parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
     if time_str:
         parts.append(time_str)
-
-    # про источник
-    url = (t.get("source_url") or "").strip()
-    if url:
-        parts.append(f"🔗 <a href=\"{escape(url)}\">Источник</a>")
-    else:
-        parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
 
     return "\n".join(parts)
 
