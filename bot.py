@@ -999,8 +999,9 @@ def build_card_text(t: dict) -> str:
 
     # что включено: из БД (collector)
     includes = (t.get("includes") or "").strip()
-    if not (t.get("source_url") or "").strip():
-    parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
+    if not url:
+        parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
+
 
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
