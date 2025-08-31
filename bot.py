@@ -26,8 +26,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from aiogram.filters import Command
-    # aiogram v3.x
+from aiogram.filters import Command  # aiogram v3.x
 from aiogram.client.default import DefaultBotProperties
 
 from psycopg import connect
@@ -40,6 +39,7 @@ from db_init import init_db, get_config, set_config  # конфиг из БД
 LAST_RESULTS: dict[int, list[dict]] = {}   # user_id -> последние показанные туры
 LAST_QUERY_AT: dict[int, float] = {}       # user_id -> ts последнего показа
 LAST_PREMIUM_HINT_AT: dict[int, float] = {}  # user_id -> ts последней плашки "премиум"
+LAST_QUERY_TEXT: dict[int, str] = {}       # user_id -> последний смысловой запрос
 
 # Синонимы/алиасы гео (минимальный словарик)
 ALIASES = {
@@ -62,6 +62,30 @@ def _should_hint_premium(user_id: int, cooldown_sec: int = 6*3600) -> bool:
         LAST_PREMIUM_HINT_AT[user_id] = now
         return True
     return False
+
+def _remember_query(user_id: int, q: str):
+    q = (q or "").strip()
+    if q:
+        LAST_QUERY_TEXT[user_id] = q
+
+def _guess_query_from_link_phrase(text: str) -> Optional[str]:
+    """
+    Выдёргиваем смысл из фраз типа:
+    'пришли ссылки на туры в Шарм Эль Шейх', 'ссылку на источник по Египту' и т.п.
+    """
+    if not text:
+        return None
+    # возьмём фрагмент после на/в/во, иначе весь текст
+    m = re.search(r"(?:на|в|во)\s+([A-Za-zА-Яа-яЁё\- \t]{3,})", text, flags=re.I)
+    frag = m.group(1) if m else text
+    frag = re.sub(
+        r"\b(ссылк\w*|источник\w*|пришл\w*|отправ\w*|мне|эти|на|в|во|по|про|отыщи|найди|покажи|туры?|тур)\b",
+        "",
+        frag,
+        flags=re.I
+    )
+    frag = re.sub(r"[.,;:!?]+$", "", frag).strip()
+    return frag or None
 
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
@@ -1159,6 +1183,7 @@ async def cb_recent(call: CallbackQuery):
         "ts": time.monotonic(),
     }
 
+    _remember_query(call.from_user.id, "актуальные за 72ч")
     next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, next_offset)
 
@@ -1182,6 +1207,7 @@ async def cb_country(call: CallbackQuery):
         "ts": time.monotonic(),
     }
 
+    _remember_query(call.from_user.id, country)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
 
 @dp.callback_query(F.data.startswith("budget:"))
@@ -1217,6 +1243,7 @@ async def cb_budget(call: CallbackQuery):
         "ts": time.monotonic(),
     }
 
+    _remember_query(call.from_user.id, f"≤ {int(limit_val) if limit_val is not None else ''} {cur}".strip())
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
 
 @dp.callback_query(F.data == "sort:price_asc")
@@ -1237,6 +1264,7 @@ async def cb_sort_price_asc(call: CallbackQuery):
         "ts": time.monotonic(),
     }
 
+    _remember_query(call.from_user.id, "актуальные за 72ч (сорт. по цене)")
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
 
 @dp.callback_query(F.data.startswith("more:"))
@@ -1382,14 +1410,28 @@ async def smart_router(message: Message):
     await bot.send_chat_action(message.chat.id, "typing")
 
     # --- 1) "дай ссылку", "источник", "ссылку на источник"
-    if re.search(r"\b((дай\s+)?ссылк\w*|источник|link)\b", user_text, flags=re.I):
+    if re.search(r"\b((дай\s+)?ссылк\w*|источник\w*|link)\b", user_text, flags=re.I):
         last = LAST_RESULTS.get(message.from_user.id) or []
-        if not last:
-            await message.answer("Сначала выбери тур (кнопка «🎒 Найти туры»), а потом напиши «Дай ссылку».")
-            return
-
         premium_users = {123456789}
         is_premium = message.from_user.id in premium_users
+
+        # если карточек нет — пробуем реконструировать запрос и найти их сейчас
+        if not last:
+            guess = _guess_query_from_link_phrase(user_text) or LAST_QUERY_TEXT.get(message.from_user.id)
+            if guess:
+                rows, _is_recent = await fetch_tours(guess, hours=168, limit_recent=6, limit_fallback=6)
+                if rows:
+                    LAST_RESULTS[message.from_user.id] = rows
+                    last = rows
+
+        if not last:
+            q_hint = LAST_QUERY_TEXT.get(message.from_user.id)
+            hint_txt = f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл." if q_hint else "Не вижу последних карточек."
+            await message.answer(
+                f"{hint_txt} Нажми «🎒 Найти туры» и выбери вариант — тогда пришлю источник.",
+                reply_markup=filters_inline_kb()
+            )
+            return
 
         shown = 0
         for t in last[:3]:
@@ -1432,6 +1474,7 @@ async def smart_router(message: Message):
             rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
 
         if rows_all:
+            _remember_query(message.from_user.id, q)
             header = "Нашёл варианты по запросу: " + escape(q)
             await message.answer(f"<b>{header}</b>")
             token = _new_token()
@@ -1452,6 +1495,7 @@ async def smart_router(message: Message):
     if len(user_text) <= 40:
         rows, is_recent = await fetch_tours(user_text, hours=72)
         if rows:
+            _remember_query(message.from_user.id, user_text)
             header = "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
             await message.answer(f"<b>{header}</b>")
             token = _new_token()
@@ -1469,6 +1513,7 @@ async def smart_router(message: Message):
             return
 
     # --- 5) Фолбэк: GPT
+    _remember_query(message.from_user.id, user_text)
     premium_users = {123456789}
     is_premium = message.from_user.id in premium_users
     replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
