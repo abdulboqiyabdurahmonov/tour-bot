@@ -1217,16 +1217,15 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     uid = message.from_user.id
-    # если язык ещё не выбран — спрашиваем
-    lang = get_user_lang(uid)
     if get_config(f"lang_{uid}", None) is None:
         await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
         return
 
-    # язык уже есть — показываем приветствие и меню
-    text = t(uid, "hello") + "\n\n" + \
-           f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n" + \
-           f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
+    text = (
+        t(uid, "hello") + "\n\n"
+        f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n"
+        f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
+    )
     await message.answer(text, reply_markup=main_kb_for(uid))
 
 @dp.message(F.text.regexp(r"насколько.*актуал", flags=re.I))
@@ -1511,15 +1510,28 @@ async def cb_fav_rm(call: CallbackQuery):
 async def cb_lang(call: CallbackQuery):
     uid = call.from_user.id
     _, lang = call.data.split(":", 1)
-    set_user_lang(uid, lang)
-    await call.answer("OK")
-    await call.message.answer(t(uid, "lang_saved"))
 
-    # Приветствие и меню на выбранном языке
-    text = t(uid, "hello") + "\n\n" + \
-           f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n" + \
-           f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
-    await call.message.answer(text, reply_markup=main_kb_for(message.from_user.id))
+    # если уже выбран этот же язык — просто тихо подтвердим и покажем меню
+    current = get_user_lang(uid)
+    if current != lang:
+        set_user_lang(uid, lang)
+
+    # уберём инлайн-клавиатуру у сообщения с выбором языка, чтобы не кликали ещё раз
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await call.answer("OK")  # всплывашка
+
+    # одно сообщение «Язык сохранён» + меню на выбранном языке
+    await call.message.answer(t(uid, "lang_saved"))
+    text = (
+        t(uid, "hello") + "\n\n"
+        f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n"
+        f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
+    )
+    await call.message.answer(text, reply_markup=main_kb_for(uid))
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
