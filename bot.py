@@ -5,6 +5,11 @@ import asyncio
 import random
 import time
 import json, base64
+# ДОБАВЬ рядом с остальными импортами
+from payments import (
+    create_order, build_checkout_link, activate_after_payment,
+    click_handle_callback, payme_handle_callback
+)
 from google.oauth2 import service_account
 import gspread
 from typing import Optional, Tuple, List, Dict
@@ -1158,7 +1163,23 @@ async def entry_gpt(message: Message):
 
 @dp.message(F.text == "🔔 Подписка")
 async def entry_sub(message: Message):
-    await message.answer("Скоро: подписка по странам/бюджету/датам. Пока в разработке 💡")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💳 Click (автопродление)", callback_data="sub:click:recurring"),
+            InlineKeyboardButton(text="💳 Payme (автопродление)", callback_data="sub:payme:recurring"),
+        ],
+        [
+            InlineKeyboardButton(text="Разовая оплата через Click", callback_data="sub:click:oneoff"),
+            InlineKeyboardButton(text="Разовая оплата через Payme", callback_data="sub:payme:oneoff"),
+        ],
+        [
+            InlineKeyboardButton(text="ℹ️ Подробнее о тарифах", callback_data="sub:info")
+        ]
+    ])
+    await message.answer(
+        "Выбери способ оплаты и тариф (по умолчанию — <b>Basic 49 000 UZS / 30 дней</b>):",
+        reply_markup=kb
+    )
 
 @dp.message(F.text == "⚙️ Настройки")
 async def entry_settings(message: Message):
@@ -1209,6 +1230,36 @@ async def cb_country(call: CallbackQuery):
 
     _remember_query(call.from_user.id, country)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
+
+@dp.callback_query(F.data.startswith("sub:"))
+async def cb_sub(call: CallbackQuery):
+    _, provider, kind = call.data.split(":", 2)   # provider: click|payme; kind: recurring|oneoff
+    plan_code = "basic_m"                         # можно дать выбор планов по кнопкам
+    order_id = create_order(call.from_user.id, provider=provider, plan_code=plan_code, kind=kind)
+    url = build_checkout_link(provider, order_id, plan_code)
+
+    txt = (
+        f"🔐 Заказ №{order_id}\n"
+        f"Провайдер: <b>{'Click' if provider=='click' else 'Payme'}</b>\n"
+        f"Тариф: <b>Basic</b> (30 дней)\n\n"
+        "Нажми, чтобы оплатить. Окно откроется прямо в Telegram."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Открыть оплату", url=url)],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")]
+    ])
+    await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@dp.callback_query(F.data == "sub:info")
+async def cb_sub_info(call: CallbackQuery):
+    await call.message.answer(
+        "Тарифы:\n"
+        "• Basic — 49 000 UZS/мес: доступ к свежим турам и умным ответам\n"
+        "• Pro — 99 000 UZS/мес: приоритет и расширенные источники\n\n"
+        "Оплата через Click/Payme. Автопродление можно отключить в любой момент."
+    )
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("budget:"))
 async def cb_budget(call: CallbackQuery):
@@ -1618,3 +1669,36 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
+
+from fastapi import Form
+
+@app.post("/click/callback")
+async def click_cb(request: Request):
+    form = dict(await request.form())
+    ok, msg, order_id, trx = click_handle_callback(form)
+    if ok and order_id:
+        try:
+            activate_after_payment(order_id)
+            # уведомим пользователя
+            o = get_order_safe(order_id)
+            if o:
+                await bot.send_message(o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}")
+        except Exception as e:
+            pass
+    return JSONResponse({"status": "ok" if ok else "error", "message": msg})
+
+@app.post("/payme/callback")
+async def payme_cb(request: Request):
+    # Payme Hosted обычно шлёт form-data; если JSON — поменяй на await request.json()
+    form = dict(await request.form())
+    ok, msg, order_id, trx = payme_handle_callback(form, dict(request.headers))
+    if ok and order_id:
+        try:
+            activate_after_payment(order_id)
+            o = get_order_safe(order_id)
+            if o:
+                await bot.send_message(o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}")
+        except Exception as e:
+            pass
+    return JSONResponse({"status": "ok" if ok else "error", "message": msg})
+
