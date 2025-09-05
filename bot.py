@@ -1223,6 +1223,17 @@ def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
         return True
     return False
 
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+def is_menu_label(text: str, key: str) -> bool:
+    """
+    key: 'menu_find' | 'menu_gpt' | 'menu_sub' | 'menu_settings'
+    Сравниваем текст с переводами всех поддерживаемых языков.
+    """
+    variants = {_norm(TRANSLATIONS[lang][key]) for lang in SUPPORTED_LANGS}
+    return _norm(text) in variants
+
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -1643,10 +1654,31 @@ async def cb_back_filters(call: CallbackQuery):
 async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
 
+@dp.message(F.text)
+async def on_menu_buttons(message: Message):
+    txt = message.text or ""
+    if is_menu_label(txt, "menu_find"):
+        await entry_find_tours(message)
+        return
+    if is_menu_label(txt, "menu_gpt"):
+        await entry_gpt(message)
+        return
+    if is_menu_label(txt, "menu_sub"):
+        await entry_sub(message)
+        return
+    if is_menu_label(txt, "menu_settings"):
+        await entry_settings(message)
+        return
+
 # --- Смарт-роутер текста
-@dp.message(F.text & ~F.text.in_({"🎒 Найти туры", "🤖 Спросить GPT", "🔔 Подписка", "⚙️ Настройки"}))
+@dp.message(F.text)
 async def smart_router(message: Message):
     user_text = (message.text or "").strip()
+
+    # если это одна из кнопок меню — ничего не делаем (их ловит on_menu_buttons)
+    if any(is_menu_label(user_text, k) for k in ("menu_find", "menu_gpt", "menu_sub", "menu_settings")):
+        return
+
     await bot.send_chat_action(message.chat.id, "typing")
 
     # --- 1) "дай ссылку", "источник", "ссылку на источник"
