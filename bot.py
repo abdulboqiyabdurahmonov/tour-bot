@@ -984,21 +984,27 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
     return ["⚠️ ИИ сейчас перегружен. Попробуй ещё раз — а пока загляни в «🎒 Найти туры»: там только свежие предложения за последние 72 часа."]
 
 # ================= КАРТОЧКИ/УВЕДОМЛЕНИЯ =================
-def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
+from typing import Optional
+
+def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     open_btn = []
-    url = (t.get("source_url") or "").strip()
+    url = (tour.get("source_url") or "").strip()
     if url:
         open_btn = [InlineKeyboardButton(text="🔗 Открыть", url=url)]
+
     fav_btn = InlineKeyboardButton(
         text=("❤️ В избранном" if is_fav else "🤍 В избранное"),
-        callback_data=f"fav:{'rm' if is_fav else 'add'}:{t['id']}"
+        callback_data=f"fav:{'rm' if is_fav else 'add'}:{tour['id']}"
     )
-    want_btn = InlineKeyboardButton(text="📝 Хочу этот тур", callback_data=f"want:{t['id']}")
+    want_btn = InlineKeyboardButton(text="📝 Хочу этот тур", callback_data=f"want:{tour['id']}")
+
+    back_text = t(user_id, "back") if user_id is not None else TRANSLATIONS["ru"]["back"]
+
     rows = []
     if open_btn:
         rows.append(open_btn)
     rows.append([fav_btn, want_btn])
-    rows.append([InlineKeyboardButton(text=t(0, "back"), callback_data="back_filters")])
+    rows.append([InlineKeyboardButton(text=back_text, callback_data="back_filters")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_card_text(t: dict) -> str:
@@ -1029,10 +1035,10 @@ def build_card_text(t: dict) -> str:
         parts.append(time_str)
     return "\n".join(parts)
 
-async def send_tour_card(chat_id: int, user_id: int, t: dict):
-    fav = is_favorite(user_id, t["id"])
-    kb = tour_inline_kb(t, fav)
-    caption = build_card_text(t)
+async def send_tour_card(chat_id: int, user_id: int, tour: dict):
+    fav = is_favorite(user_id, tour["id"])
+    kb = tour_inline_kb(tour, fav, user_id)
+    caption = build_card_text(tour)
     await bot.send_message(chat_id, caption, reply_markup=kb, disable_web_page_preview=True)
 
 async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
@@ -1378,7 +1384,7 @@ async def cb_fav_add(call: CallbackQuery):
         cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
-        await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True))
+        await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True, call.from_user.id))
 
 @dp.callback_query(F.data.startswith("fav:rm:"))
 async def cb_fav_rm(call: CallbackQuery):
@@ -1392,7 +1398,7 @@ async def cb_fav_rm(call: CallbackQuery):
         cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
-        await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False))
+        await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True, call.from_user.id))
 
 @dp.callback_query(F.data.startswith("lang:"))
 async def cb_lang(call: CallbackQuery):
