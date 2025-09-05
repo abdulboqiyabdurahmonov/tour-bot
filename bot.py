@@ -159,6 +159,76 @@ def _select_tours_clause() -> str:
     extras.append("includes" if _has_cols("includes") else "NULL AS includes")
     return f"{base}, {', '.join(extras)}"
 
+# ====== ЯЗЫКИ / ЛОКАЛИЗАЦИЯ ======
+SUPPORTED_LANGS = ("ru", "uz", "kk")
+
+TRANSLATIONS = {
+    "ru": {
+        "choose_lang": "Выберите язык обслуживания:",
+        "lang_saved": "Готово! Язык сохранён.",
+        "hello": "🌍 Привет! Я — <b>TripleA Travel Bot</b> ✈️",
+        "menu_find": "🎒 Найти туры",
+        "menu_gpt": "🤖 Спросить GPT",
+        "menu_sub": "🔔 Подписка",
+        "menu_settings": "⚙️ Настройки",
+        "back": "⬅️ Назад",
+    },
+    "uz": {
+        "choose_lang": "Xizmat tilini tanlang:",
+        "lang_saved": "Tayyor! Til saqlandi.",
+        "hello": "🌍 Salom! Men — <b>TripleA Travel Bot</b> ✈️",
+        "menu_find": "🎒 Turlarni topish",
+        "menu_gpt": "🤖 GPTdan so'rash",
+        "menu_sub": "🔔 Obuna",
+        "menu_settings": "⚙️ Sozlamalar",
+        "back": "⬅️ Orqaga",
+    },
+    "kk": {
+        "choose_lang": "Қызмет көрсету тілін таңдаңыз:",
+        "lang_saved": "Дайын! Тіл сақталды.",
+        "hello": "🌍 Сәлем! Мен — <b>TripleA Travel Bot</b> ✈️",
+        "menu_find": "🎒 Тур табу",
+        "menu_gpt": "🤖 GPT-ке сұрақ",
+        "menu_sub": "🔔 Жазылым",
+        "menu_settings": "⚙️ Баптаулар",
+        "back": "⬅️ Артқа",
+    },
+}
+
+def get_user_lang(user_id: int) -> str:
+    """Берём язык пользователя из app_config; по умолчанию ru."""
+    try:
+        val = get_config(f"lang_{user_id}", None)
+        return val if val in SUPPORTED_LANGS else "ru"
+    except Exception:
+        return "ru"
+
+def set_user_lang(user_id: int, lang: str):
+    if lang not in SUPPORTED_LANGS:
+        lang = "ru"
+    set_config(f"lang_{user_id}", lang)
+
+def t(user_id: int, key: str) -> str:
+    lang = get_user_lang(user_id)
+    return TRANSLATIONS.get(lang, TRANSLATIONS["ru"]).get(key, TRANSLATIONS["ru"].get(key, key))
+
+def lang_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Русский", callback_data="lang:ru")],
+        [InlineKeyboardButton(text="O‘zbekcha", callback_data="lang:uz")],
+        [InlineKeyboardButton(text="Qaraqalpaqsha", callback_data="lang:kk")],
+    ])
+
+def main_kb_for(user_id: int) -> ReplyKeyboardMarkup:
+    """Главная клавиатура на языке пользователя."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=t(user_id, "menu_find")), KeyboardButton(text=t(user_id, "menu_gpt"))],
+            [KeyboardButton(text=t(user_id, "menu_sub")), KeyboardButton(text=t(user_id, "menu_settings"))],
+        ],
+        resize_keyboard=True,
+    )
+
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -1146,12 +1216,18 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    text = (
-        "🌍 Привет! Я — <b>TripleA Travel Bot</b> ✈️\n\n"
-        "Нажимай «🎒 Найти туры» — покажу карточки с кнопками.\n"
-        "«🤖 Спросить GPT» — умные ответы про сезоны, бюджеты и лайфхаки.\n"
-    )
-    await message.answer(text, reply_markup=main_kb)
+    uid = message.from_user.id
+    # если язык ещё не выбран — спрашиваем
+    lang = get_user_lang(uid)
+    if get_config(f"lang_{uid}", None) is None:
+        await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
+        return
+
+    # язык уже есть — показываем приветствие и меню
+    text = t(uid, "hello") + "\n\n" + \
+           f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n" + \
+           f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
+    await message.answer(text, reply_markup=main_kb_for(uid))
 
 @dp.message(F.text.regexp(r"насколько.*актуал", flags=re.I))
 async def faq_actual(message: Message):
@@ -1426,6 +1502,20 @@ async def cb_fav_rm(call: CallbackQuery):
         t = cur.fetchone()
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False))
+
+@dp.callback_query(F.data.startswith("lang:"))
+async def cb_lang(call: CallbackQuery):
+    uid = call.from_user.id
+    _, lang = call.data.split(":", 1)
+    set_user_lang(uid, lang)
+    await call.answer("OK")
+    await call.message.answer(t(uid, "lang_saved"))
+
+    # Приветствие и меню на выбранном языке
+    text = t(uid, "hello") + "\n\n" + \
+           f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n" + \
+           f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
+    await call.message.answer(text, reply_markup=main_kb_for(uid))
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
