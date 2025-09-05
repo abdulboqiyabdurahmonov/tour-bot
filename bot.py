@@ -1213,12 +1213,28 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
     except Exception as e:
         logging.error(f"notify_leads_group failed: {e}")
 
+# ----- анти-дубль приветствия -----
+_RECENT_GREETING = defaultdict(float)  # user_id -> mono_ts
+def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
+    now = time.monotonic()
+    last = _RECENT_GREETING.get(user_id, 0.0)
+    if now - last >= cooldown:
+        _RECENT_GREETING[user_id] = now
+        return True
+    return False
+
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     uid = message.from_user.id
+
+    # если язык ещё не выбран — предлагаем выбор и выходим
     if get_config(f"lang_{uid}", None) is None:
         await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
+        return
+
+    # анти-дубль, если пользователь жмёт /start несколько раз подряд
+    if not _should_greet_once(uid):
         return
 
     text = (
@@ -1511,20 +1527,26 @@ async def cb_lang(call: CallbackQuery):
     uid = call.from_user.id
     _, lang = call.data.split(":", 1)
 
-    # если уже выбран этот же язык — просто тихо подтвердим и покажем меню
-    current = get_user_lang(uid)
-    if current != lang:
+    # применяем язык, если поменялся
+    if get_user_lang(uid) != lang:
         set_user_lang(uid, lang)
 
-    # уберём инлайн-клавиатуру у сообщения с выбором языка, чтобы не кликали ещё раз
+    # убрать клавиатуру выбора, чтобы не кликали повторно
     try:
         await call.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    await call.answer("OK")  # всплывашка
+    # короткая всплывашка; кэшируем, чтобы при повторном тапе не спамить
+    try:
+        await call.answer("OK", cache_time=60)
+    except Exception:
+        pass
 
-    # одно сообщение «Язык сохранён» + меню на выбранном языке
+    # анти-дубль приветствия
+    if not _should_greet_once(uid):
+        return
+
     await call.message.answer(t(uid, "lang_saved"))
     text = (
         t(uid, "hello") + "\n\n"
@@ -1615,7 +1637,7 @@ async def cb_noop(call: CallbackQuery):
 
 @dp.callback_query(F.data == "back_filters")
 async def cb_back_filters(call: CallbackQuery):
-    await call.message.answer("Вернулся к фильтрам:", reply_markup=main_kb_for(message.from_user.id))
+    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb())
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
