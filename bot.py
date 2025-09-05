@@ -204,6 +204,38 @@ def ensure_leads_schema():
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS user_id BIGINT;")
         cur.execute("CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads(created_at);")
 
+# ================== ПРОВЕРКА ЛИДОВ / ПОДПИСКИ ==================
+def user_has_leads(user_id: int) -> bool:
+    """Проверяем, есть ли у пользователя хотя бы одна заявка."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM leads WHERE user_id=%s LIMIT 1;", (user_id,))
+        return cur.fetchone() is not None
+
+
+def user_has_subscription(user_id: int) -> bool:
+    """Проверка подписки (пока упрощённо: смотри app_config или отдельную таблицу subs)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT val FROM app_config WHERE key=%s;", (f"sub_{user_id}",))
+        row = cur.fetchone()
+        return row and row["val"] == "active"
+
+
+def set_subscription(user_id: int, status: str):
+    """Устанавливаем статус подписки (active/expired)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO app_config(key, val) VALUES (%s, %s)
+            ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
+        """, (f"sub_{user_id}", status))
+
+
+def get_pay_kb() -> InlineKeyboardMarkup:
+    """Клавиатура с кнопками оплаты через Click/Payme."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить через Payme", url="https://payme.uz/example-link")],
+        [InlineKeyboardButton(text="💳 Оплатить через Click", url="https://my.click.uz/services/example-link")]
+    ])
+
 # ============== GOOGLE SHEETS (robust init + KB + Leads) ==============
 _gs_client = None
 
@@ -1400,16 +1432,30 @@ async def cb_want(call: CallbackQuery):
     try:
         tour_id = int(call.data.split(":")[1])
     except Exception:
-        await call.answer("Ошибка заявки.", show_alert=False); return
+        await call.answer("Ошибка заявки.", show_alert=False)
+        return
 
-    WANT_STATE[call.from_user.id] = {"tour_id": tour_id}
+    uid = call.from_user.id
+
+    # --- Проверка подписки / первой заявки ---
+    if user_has_leads(uid) and not user_has_subscription(uid):
+        await call.message.answer(
+            "⚠️ У тебя уже была бесплатная заявка.\n"
+            "Для следующих нужно подключить подписку 🔔",
+            reply_markup=get_pay_kb()
+        )
+        await call.answer()
+        return
+
+    # --- Если первая заявка или есть подписка ---
+    WANT_STATE[uid] = {"tour_id": tour_id}
     try:
-        set_pending_want(call.from_user.id, tour_id)
+        set_pending_want(uid, tour_id)
     except Exception as e:
         logging.warning(f"set_pending_want failed: {e}")
 
     await call.message.answer(
-        "Окей! Отправь контакт, чтобы менеджер связался. Нажми кнопку ниже 👇",
+        "Окей! Отправь контакт, чтобы менеджер связался 👇",
         reply_markup=want_contact_kb()
     )
     await call.answer()
