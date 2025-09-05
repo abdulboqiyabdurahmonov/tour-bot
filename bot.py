@@ -21,6 +21,21 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+# ... импортов много
+from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
+
+def get_order_safe(order_id: int) -> dict | None:
+    with _pay_db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM orders WHERE id=%s;", (order_id,))
+        return cur.fetchone()
+
+def fmt_sub_until(user_id: int) -> str:
+    with _pay_db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT current_period_end FROM subscriptions WHERE user_id=%s;", (user_id,))
+        row = cur.fetchone()
+        if not row or not row["current_period_end"]:
+            return "—"
+        return row["current_period_end"].astimezone(TZ).strftime("%d.%m.%Y")
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -1701,4 +1716,13 @@ async def payme_cb(request: Request):
         except Exception as e:
             pass
     return JSONResponse({"status": "ok" if ok else "error", "message": msg})
+
+@app.get("/pay/success")
+async def pay_success():
+    return JSONResponse({"status": "ok", "html": "<h3>Оплата принята. Можно закрыть окно и вернуться в бота ✨</h3>"})
+
+@app.get("/pay/cancel")
+async def pay_cancel():
+    return JSONResponse({"status": "canceled", "html": "<h3>Платёж отменён. Попробуйте снова из бота.</h3>"})
+
 
