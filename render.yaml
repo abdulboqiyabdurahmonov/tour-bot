@@ -18,6 +18,32 @@ services:
         value: https://tour-bot-rxi8.onrender.com
       - key: WEBHOOK_PATH
         value: /webhook
+        
+        # ===== PAYMENTS (Click) =====
+      - key: CLICK_MERCHANT_ID
+        sync: false
+      - key: CLICK_SERVICE_ID
+        sync: false
+      - key: CLICK_SECRET_KEY
+        sync: false
+      - key: CLICK_BASE_CHECKOUT
+        value: https://my.click.uz/services/pay
+      - key: CLICK_RETURN_URL
+        value: https://tour-bot-rxi8.onrender.com/pay/success
+      - key: CLICK_CANCEL_URL
+        value: https://tour-bot-rxi8.onrender.com/pay/cancel
+
+      # ===== PAYMENTS (Payme/Paycom) =====
+      - key: PAYME_MERCHANT_ID
+        sync: false
+      - key: PAYME_SECRET_KEY
+        sync: false
+      - key: PAYME_BASE_CHECKOUT
+        value: https://checkout.paycom.uz
+      - key: PAYME_RETURN_URL
+        value: https://tour-bot-rxi8.onrender.com/pay/success
+      - key: PAYME_CANCEL_URL
+        value: https://tour-bot-rxi8.onrender.com/pay/cancel
 
   - type: worker
     name: Collector
