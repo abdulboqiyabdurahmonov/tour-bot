@@ -1,3 +1,4 @@
+# bot.py
 import os
 import re
 import logging
@@ -5,7 +6,6 @@ import asyncio
 import random
 import time
 import json, base64
-# ДОБАВЬ рядом с остальными импортами
 from payments import (
     create_order, build_checkout_link, activate_after_payment,
     click_handle_callback, payme_handle_callback
@@ -21,7 +21,6 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-# ... импортов много
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
 
 def get_order_safe(order_id: int) -> dict | None:
@@ -54,6 +53,9 @@ from psycopg.rows import dict_row
 
 import httpx
 from db_init import init_db, get_config, set_config  # конфиг из БД
+
+# ================= ЛОГИ =================
+logging.basicConfig(level=logging.INFO)
 
 # ===== ПАМЯТЬ ДИАЛОГА =====
 LAST_RESULTS: dict[int, list[dict]] = {}   # user_id -> последние показанные туры
@@ -89,13 +91,8 @@ def _remember_query(user_id: int, q: str):
         LAST_QUERY_TEXT[user_id] = q
 
 def _guess_query_from_link_phrase(text: str) -> Optional[str]:
-    """
-    Выдёргиваем смысл из фраз типа:
-    'пришли ссылки на туры в Шарм Эль Шейх', 'ссылку на источник по Египту' и т.п.
-    """
     if not text:
         return None
-    # возьмём фрагмент после на/в/во, иначе весь текст
     m = re.search(r"(?:на|в|во)\s+([A-Za-zА-Яа-яЁё\- \t]{3,})", text, flags=re.I)
     frag = m.group(1) if m else text
     frag = re.sub(
@@ -106,9 +103,6 @@ def _guess_query_from_link_phrase(text: str) -> Optional[str]:
     )
     frag = re.sub(r"[.,;:!?]+$", "", frag).strip()
     return frag or None
-
-# ================= ЛОГИ =================
-logging.basicConfig(level=logging.INFO)
 
 # ================= ENV =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -126,8 +120,8 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 # Google Sheets ENV
 SHEETS_CREDENTIALS_B64 = (os.getenv("SHEETS_CREDENTIALS_B64") or "").strip()
 SHEETS_SPREADSHEET_ID = (os.getenv("SHEETS_SPREADSHEET_ID") or "").strip()
-WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Заявки")  # имя вкладки для лидов
-KB_SHEET_NAME = os.getenv("KB_SHEET_NAME", "KB")        # лист для актуальных фактов
+WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Заявки")
+KB_SHEET_NAME = os.getenv("KB_SHEET_NAME", "KB")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
@@ -144,15 +138,9 @@ WANT_STATE: Dict[int, Dict] = {}
 
 # --- Динамическая проверка колонок схемы
 SCHEMA_COLS: set[str] = set()
-
 def _has_cols(*names: str) -> bool:
     return all(n in SCHEMA_COLS for n in names)
-
 def _select_tours_clause() -> str:
-    """
-    Возвращает список полей для SELECT по tours с безопасными фоллбэками,
-    если колонок board/includes нет в текущей схеме.
-    """
     base = "id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description"
     extras = []
     extras.append("board" if _has_cols("board") else "NULL AS board")
@@ -171,6 +159,8 @@ TRANSLATIONS = {
         "menu_gpt": "🤖 Спросить GPT",
         "menu_sub": "🔔 Подписка",
         "menu_settings": "⚙️ Настройки",
+        "desc_find": "— покажу карточки с кнопками.",
+        "desc_gpt": "— умные ответы про сезоны, визы и бюджеты.",
         "back": "⬅️ Назад",
     },
     "uz": {
@@ -181,6 +171,8 @@ TRANSLATIONS = {
         "menu_gpt": "🤖 GPTdan so'rash",
         "menu_sub": "🔔 Obuna",
         "menu_settings": "⚙️ Sozlamalar",
+        "desc_find": "— tugmalar bilan kartochkalarni ko‘rsataman.",
+        "desc_gpt": "— mavsumlar, vizalar va byudjetlar bo‘yicha aqlli javoblar.",
         "back": "⬅️ Orqaga",
     },
     "kk": {
@@ -191,36 +183,31 @@ TRANSLATIONS = {
         "menu_gpt": "🤖 GPT-ке сұрақ",
         "menu_sub": "🔔 Жазылым",
         "menu_settings": "⚙️ Баптаулар",
+        "desc_find": "— батырмалармен карточкаларды көрсетемін.",
+        "desc_gpt": "— маусымдар, визалар және бюджеттер туралы ақылды жауаптар.",
         "back": "⬅️ Артқа",
     },
 }
-
 def get_user_lang(user_id: int) -> str:
-    """Берём язык пользователя из app_config; по умолчанию ru."""
     try:
         val = get_config(f"lang_{user_id}", None)
         return val if val in SUPPORTED_LANGS else "ru"
     except Exception:
         return "ru"
-
 def set_user_lang(user_id: int, lang: str):
     if lang not in SUPPORTED_LANGS:
         lang = "ru"
     set_config(f"lang_{user_id}", lang)
-
 def t(user_id: int, key: str) -> str:
     lang = get_user_lang(user_id)
     return TRANSLATIONS.get(lang, TRANSLATIONS["ru"]).get(key, TRANSLATIONS["ru"].get(key, key))
-
 def lang_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Русский", callback_data="lang:ru")],
         [InlineKeyboardButton(text="O‘zbekcha", callback_data="lang:uz")],
         [InlineKeyboardButton(text="Qaraqalpaqsha", callback_data="lang:kk")],
     ])
-
 def main_kb_for(user_id: int) -> ReplyKeyboardMarkup:
-    """Главная клавиатура на языке пользователя."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=t(user_id, "menu_find")), KeyboardButton(text=t(user_id, "menu_gpt"))],
@@ -249,10 +236,6 @@ def ensure_pending_wants_table():
         """)
 
 def ensure_leads_schema():
-    """
-    Создаёт таблицу leads (если её нет) и добавляет недостающие колонки.
-    Схема согласована с create_lead(full_name, phone, tour_id, note).
-    """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS leads (
@@ -265,7 +248,6 @@ def ensure_leads_schema():
                 user_id BIGINT
             );
         """)
-        # догоним недостающие колонки (на случай старой схемы)
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT '';")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone TEXT;")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tour_id INTEGER;")
@@ -276,41 +258,30 @@ def ensure_leads_schema():
 
 # ================== ПРОВЕРКА ЛИДОВ / ПОДПИСКИ ==================
 def user_has_leads(user_id: int) -> bool:
-    """Проверяем, есть ли у пользователя хотя бы одна заявка."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM leads WHERE user_id=%s LIMIT 1;", (user_id,))
         return cur.fetchone() is not None
-
-
 def user_has_subscription(user_id: int) -> bool:
-    """Проверка подписки (пока упрощённо: смотри app_config или отдельную таблицу subs)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT val FROM app_config WHERE key=%s;", (f"sub_{user_id}",))
         row = cur.fetchone()
         return row and row["val"] == "active"
-
-
 def set_subscription(user_id: int, status: str):
-    """Устанавливаем статус подписки (active/expired)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO app_config(key, val) VALUES (%s, %s)
             ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
         """, (f"sub_{user_id}", status))
 
-
 def get_pay_kb() -> InlineKeyboardMarkup:
-    """Клавиатура с кнопками оплаты через Click/Payme."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Оплатить через Payme", url="https://payme.uz/example-link")],
         [InlineKeyboardButton(text="💳 Оплатить через Click", url="https://my.click.uz/services/example-link")]
     ])
 
-# ============== GOOGLE SHEETS (robust init + KB + Leads) ==============
+# ============== GOOGLE SHEETS ==============
 _gs_client = None
-
 def _get_gs_client():
-    """Ленивая инициализация gspread-клиента. Поддержка base64 JSON или прямого JSON."""
     global _gs_client
     if _gs_client is not None:
         return _gs_client
@@ -319,13 +290,11 @@ def _get_gs_client():
         _gs_client = None
         return None
     try:
-        # Пытаемся как base64 (валидируем). Если не base64 — пробуем как обычный JSON.
         try:
             decoded = base64.b64decode(SHEETS_CREDENTIALS_B64, validate=True)
             info = json.loads(decoded.decode("utf-8"))
         except Exception:
             info = json.loads(SHEETS_CREDENTIALS_B64)
-
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
@@ -340,26 +309,18 @@ def _get_gs_client():
         return None
 
 def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
-    """Гарантируем наличие листа с именем title. Если нет — создаём и ставим шапку."""
     try:
         ws = spreadsheet.worksheet(title)
         return ws
     except gspread.exceptions.WorksheetNotFound:
         pass
-
-    # листа нет — создаём
-    try:
-        ws = spreadsheet.add_worksheet(title=title, rows=500, cols=max(12, len(header) + 2))
-        if header:
-            ws.append_row(header, value_input_option="USER_ENTERED")
-        logging.info(f"GS: created worksheet '{title}'")
-        return ws
-    except Exception as e:
-        logging.error(f"GS: failed to create worksheet '{title}': {e}")
-        raise
+    ws = spreadsheet.add_worksheet(title=title, rows=500, cols=max(12, len(header) + 2))
+    if header:
+        ws.append_row(header, value_input_option="USER_ENTERED")
+    logging.info(f"GS: created worksheet '{title}'")
+    return ws
 
 def _ensure_header(ws, header: list[str]) -> None:
-    """Обновляет первую строку: добавляет недостающие колонки справа."""
     try:
         current = ws.row_values(1)
     except Exception:
@@ -379,7 +340,6 @@ def _ensure_header(ws, header: list[str]) -> None:
     logging.info(f"GS: header updated -> {new}")
 
 async def load_kb_context(max_rows: int = 60) -> str:
-    """Читает KB-лист и собирает факты в короткий текст для подмешивания в GPT."""
     try:
         gc = _get_gs_client()
         if not gc:
@@ -389,7 +349,7 @@ async def load_kb_context(max_rows: int = 60) -> str:
             ws = sh.worksheet(KB_SHEET_NAME)
         except gspread.exceptions.WorksheetNotFound:
             return ""
-        rows = ws.get_all_records()  # list[dict]
+        rows = ws.get_all_records()
         lines = []
         for r in rows[:max_rows]:
             topic = (r.get("topic") or r.get("Тема") or r.get("topic/country") or "").strip()
@@ -406,9 +366,6 @@ async def load_kb_context(max_rows: int = 60) -> str:
         return ""
 
 async def load_recent_tours_context(max_rows: int = 12, hours: int = 120) -> str:
-    """
-    Короткий контекст для ИИ: последние туры из БД (чтобы ответы были "про сегодня").
-    """
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         with get_conn() as conn, conn.cursor() as cur:
@@ -423,7 +380,7 @@ async def load_recent_tours_context(max_rows: int = 12, hours: int = 120) -> str
             rows = cur.fetchall()
         lines = []
         for r in rows:
-            when = localize_dt(r.get("posted_at"))  # уже «🕒 DD.MM.YYYY HH:MM (TST)»
+            when = localize_dt(r.get("posted_at"))
             price = fmt_price(r.get("price"), r.get("currency"))
             hotel = clean_text_basic(strip_trailing_price_from_hotel(r.get("hotel") or "Пакетный тур"))
             board = (r.get("board") or "").strip()
@@ -439,12 +396,10 @@ async def load_recent_tours_context(max_rows: int = 12, hours: int = 120) -> str
         return ""
 
 def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
-    """Добавляет заявку в лист (WORKSHEET_NAME, по умолчанию «Заявки»)."""
     try:
         gc = _get_gs_client()
         if not gc:
             return
-
         sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
         header = [
             "created_utc", "lead_id", "username", "full_name", "phone",
@@ -496,7 +451,6 @@ main_kb = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
-
 def filters_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -518,15 +472,13 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="➕ Ещё фильтры скоро", callback_data="noop")],
         ]
     )
-
 def more_kb(token: str, next_offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="➡️ Показать ещё", callback_data=f"more:{token}:{next_offset}")],
-            [InlineKeyboardButton(text="⬅️ Назад к фильтрам", callback_data="back_filters")],
+            [InlineKeyboardButton(text=t(0, "back"), callback_data="back_filters")],
         ]
     )
-
 def want_contact_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📲 Поделиться номером", request_contact=True)]],
@@ -538,7 +490,6 @@ def want_contact_kb() -> ReplyKeyboardMarkup:
 # ================= ПАГИНАЦИЯ =================
 def _new_token() -> str:
     return secrets.token_urlsafe(6).rstrip("=-_")
-
 def _cleanup_pager_state():
     now = time.monotonic()
     to_del = []
@@ -548,7 +499,6 @@ def _cleanup_pager_state():
             to_del.append(k)
     for k in to_del:
         PAGER_STATE.pop(k, None)
-
 def _touch_state(token: str):
     st = PAGER_STATE.get(token)
     if st:
@@ -570,14 +520,12 @@ def fmt_price(price, currency) -> str:
     elif cur in {"UZS", "СУМ", "СУМ.", "СУМЫ", "СУМОВ", "СУММ", "СУММЫ", "СОМ", "СУМ"}:
         cur = "UZS"
     return escape(f"{p:,} {cur}".replace(",", " "))
-
 def safe(s: Optional[str]) -> str:
     return escape(s or "—")
 
-# ================= ПОГОДА (Open-Meteo) =================
+# ================= ПОГОДА =================
 WEATHER_CACHE: Dict[str, Tuple[float, Dict]] = {}
-WEATHER_TTL = 900  # 15 минут
-
+WEATHER_TTL = 900
 WMO_RU = {
     0: "Ясно ☀️", 1: "Преимущественно ясно 🌤", 2: "Переменная облачность ⛅️", 3: "Облачно ☁️",
     45: "Туман 🌫", 48: "Гололёдный туман 🌫❄️",
@@ -590,60 +538,40 @@ WMO_RU = {
     85: "Снегопад слабый 🌨", 86: "Снегопад сильный 🌨",
     95: "Гроза ⛈", 96: "Гроза с градом ⛈🧊", 99: "Сильная гроза с градом ⛈🧊",
 }
-
 def _cleanup_weather_cache():
     now = time.time()
     for k, (ts, _) in list(WEATHER_CACHE.items()):
         if now - ts > WEATHER_TTL:
             WEATHER_CACHE.pop(k, None)
-
 def _extract_place_from_weather_query(q: str) -> Optional[str]:
-    """
-    Берём локацию после предлогов: 'на', 'в', 'во', 'по'.
-    Примеры: 'Какая погода на Бали сегодня?' -> 'Бали'
-             'погода в Стамбуле' -> 'Стамбул'
-    """
     txt = q.strip()
-    # убираем служебные слова
     txt = re.sub(r"(сегодня|сейчас|завтра|пожалуйста|pls|please)", "", txt, flags=re.I)
     m = re.search(r"(?:на|в|во|по)\s+([A-Za-zА-Яа-яЁё\-\s]+)", txt, flags=re.I)
     if not m:
-        # fallback: после слова "погода"
         m = re.search(r"погод[ауые]\s+([A-Za-zА-Яа-яЁё\-\s]+)", txt, flags=re.I)
     if not m:
         return None
     place = m.group(1)
     place = re.sub(r"[?!.,:;]+$", "", place).strip()
-    # уберём хвост типа "сегодня", если остался
     place = re.sub(r"\b(сегодня|завтра|сейчас)\b", "", place, flags=re.I).strip()
-    # короткие слова-приставки
     place = re.sub(r"^остров[аеуы]?\s+", "", place, flags=re.I)
     return place or None
-
 async def get_weather_text(place: str) -> str:
-    """
-    Ищем координаты через geocoding.open-meteo.com, затем текущую погоду через api.open-meteo.com
-    Возвращаем готовый текст для отправки в чат.
-    """
     if not place:
         return "Напиши город/место: например, «погода в Стамбуле» или «погода на Бали»."
-
     key = place.lower().strip()
     _cleanup_weather_cache()
     if key in WEATHER_CACHE:
         _, cached = WEATHER_CACHE[key]
         return cached["text"]
-
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # 1) Геокод
             geo_r = await client.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
                 params={"name": place, "count": 1, "language": "ru"}
             )
             if geo_r.status_code != 200 or not geo_r.json().get("results"):
                 return f"Не нашёл локацию «{escape(place)}». Попробуй иначе (город/остров/страна)."
-
             g = geo_r.json()["results"][0]
             lat, lon = g["latitude"], g["longitude"]
             label_parts = [g.get("name")]
@@ -651,7 +579,6 @@ async def get_weather_text(place: str) -> str:
             if g.get("country"): label_parts.append(g["country"])
             label = ", ".join([p for p in label_parts if p])
 
-            # 2) Погода
             params = {
                 "latitude": lat,
                 "longitude": lon,
@@ -671,7 +598,7 @@ async def get_weather_text(place: str) -> str:
             feels = cur.get("apparent_temperature")
             rh = cur.get("relative_humidity_2m")
             wind = cur.get("wind_speed_10m")
-            # вероятность осадков за сегодня (по локальному времени локации)
+
             prob = None
             hourly = data.get("hourly", {})
             times = hourly.get("time", [])
@@ -712,7 +639,7 @@ def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
     if not s:
         return s
     return re.sub(
-        r'[\s\u00A0–—-]*(?:от\s*)?\d[\d\s\u00A0.,]*\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€).*$',
+        r'[\s\u00A0–—-]*(?:от\s*)?\d[\д\s\u00A0.,]*\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€).*$',
         '',
         s,
         flags=re.I
@@ -743,12 +670,10 @@ def localize_dt(dt: Optional[datetime]) -> str:
     except Exception:
         return f"🕒 {dt.strftime('%d.%m.%Y %H:%M')}"
 
-# ====== ДОП. ФОЛЛБЭКИ ======
 CONTACT_STOP_WORDS = (
     "заброниров", "брониров", "звоните", "тел:", "телефон", "whatsapp", "вацап",
     "менеджер", "директ", "адрес", "@", "+998", "+7", "+380", "call-центр", "колл-центр"
 )
-
 def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
     if not desc:
         return None
@@ -764,7 +689,6 @@ def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
         line = re.sub(r"^[\W_]{0,3}", "", line).strip()
         return line[:80]
     return None
-
 def extract_meal(text_a: Optional[str], text_b: Optional[str] = None) -> Optional[str]:
     joined = " ".join([t or "" for t in (text_a, text_b)]).lower()
     if re.search(r"\buai\b|ultra\s*all", joined): return "UAI (ultra)"
@@ -779,18 +703,15 @@ def is_favorite(user_id: int, tour_id: int) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM favorites WHERE user_id=%s AND tour_id=%s LIMIT 1;", (user_id, tour_id))
         return cur.fetchone() is not None
-
 def set_favorite(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO favorites(user_id, tour_id) VALUES (%s, %s)
             ON CONFLICT (user_id, tour_id) DO NOTHING;
         """, (user_id, tour_id))
-
 def unset_favorite(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM favorites WHERE user_id=%s AND tour_id=%s;", (user_id, tour_id))
-
 def create_lead(tour_id: int, phone: Optional[str], full_name: str, note: Optional[str] = None):
     try:
         with get_conn() as conn, conn.cursor() as cur:
@@ -806,7 +727,6 @@ def create_lead(tour_id: int, phone: Optional[str], full_name: str, note: Option
         return None
 
 def _tours_has_cols(*cols: str) -> Dict[str, bool]:
-    """Проверяем, существуют ли колонки в таблице tours (на любом инстансе БД)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT column_name FROM information_schema.columns
@@ -816,10 +736,6 @@ def _tours_has_cols(*cols: str) -> Dict[str, bool]:
     return {c: (c in have) for c in cols}
 
 async def load_recent_context(limit: int = 6) -> str:
-    """
-    Собирает короткий текст по последним турам для подмешивания в GPT.
-    Работает даже если нет колонок board/includes.
-    """
     try:
         flags = _tours_has_cols("board", "includes", "price", "currency", "dates", "hotel", "city", "country")
         select_parts = ["country", "city", "COALESCE(hotel,'') AS hotel"]
@@ -828,7 +744,6 @@ async def load_recent_context(limit: int = 6) -> str:
         select_parts.append("COALESCE(dates,'') AS dates" if flags["dates"] else "'' AS dates")
         select_parts.append("COALESCE(board,'') AS board" if flags["board"] else "'' AS board")
         select_parts.append("COALESCE(includes,'') AS includes" if flags["includes"] else "'' AS includes")
-
         sql = f"""
             SELECT {", ".join(select_parts)}
             FROM tours
@@ -838,7 +753,6 @@ async def load_recent_context(limit: int = 6) -> str:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql, (limit,))
             rows = cur.fetchall()
-
         lines = []
         for r in rows:
             price = fmt_price(r.get("price"), r.get("currency")) if r.get("price") is not None else "цена уточняется"
@@ -863,13 +777,11 @@ def set_pending_want(user_id: int, tour_id: int):
             INSERT INTO pending_wants(user_id, tour_id) VALUES (%s, %s)
             ON CONFLICT (user_id) DO UPDATE SET tour_id = EXCLUDED.tour_id, created_at = now();
         """, (user_id, tour_id))
-
 def get_pending_want(user_id: int) -> Optional[int]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT tour_id FROM pending_wants WHERE user_id=%s;", (user_id,))
         row = cur.fetchone()
         return row["tour_id"] if row else None
-
 def del_pending_want(user_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM pending_wants WHERE user_id=%s;", (user_id,))
@@ -888,7 +800,6 @@ async def fetch_tours(
     try:
         where_clauses = []
         params = []
-
         if query:
             where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
             params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
@@ -907,7 +818,6 @@ async def fetch_tours(
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if max_price is not None else "ORDER BY posted_at DESC"
 
         select_list = _select_tours_clause()
-
         with get_conn() as conn, conn.cursor() as cur:
             sql_recent = f"""
                 SELECT {select_list}
@@ -999,12 +909,10 @@ async def fetch_tours_page(
 
 # ================= GPT =================
 last_gpt_call = defaultdict(float)
-
 async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[str]:
     now = time.monotonic()
     if now - last_gpt_call[user_id] < 12.0:
         return ["😮‍💨 Подожди пару секунд — я ещё обрабатываю твой предыдущий запрос."]
-
     last_gpt_call[user_id] = now
 
     kb_text = await load_kb_context(max_rows=80)
@@ -1046,14 +954,12 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                     },
                     json=payload,
                 )
-
                 if r.status_code == 200:
                     data = r.json()
                     msg = (data.get("choices") or [{}])[0].get("message", {}).get("content")
                     if not msg:
                         logging.error(f"OpenAI no choices/message: {data}")
                         break
-
                     answer = msg.strip()
                     hint = ""
                     if premium:
@@ -1070,15 +976,12 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                     delay = min(20.0, (2 ** attempt) + random.random())
                     await asyncio.sleep(delay)
                     continue
-
                 logging.error(f"OpenAI error {r.status_code}: {r.text[:400]}")
                 break
     except Exception as e:
         logging.exception(f"GPT call failed: {e}")
 
-    return [
-        "⚠️ ИИ сейчас перегружен. Попробуй ещё раз — а пока загляни в «🎒 Найти туры»: там только свежие предложения за последние 72 часа."
-    ]
+    return ["⚠️ ИИ сейчас перегружен. Попробуй ещё раз — а пока загляни в «🎒 Найти туры»: там только свежие предложения за последние 72 часа."]
 
 # ================= КАРТОЧКИ/УВЕДОМЛЕНИЯ =================
 def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
@@ -1086,35 +989,26 @@ def tour_inline_kb(t: dict, is_fav: bool) -> InlineKeyboardMarkup:
     url = (t.get("source_url") or "").strip()
     if url:
         open_btn = [InlineKeyboardButton(text="🔗 Открыть", url=url)]
-
     fav_btn = InlineKeyboardButton(
         text=("❤️ В избранном" if is_fav else "🤍 В избранное"),
         callback_data=f"fav:{'rm' if is_fav else 'add'}:{t['id']}"
     )
     want_btn = InlineKeyboardButton(text="📝 Хочу этот тур", callback_data=f"want:{t['id']}")
-
     rows = []
     if open_btn:
         rows.append(open_btn)
     rows.append([fav_btn, want_btn])
-    rows.append([InlineKeyboardButton(text="⬅️ К фильтрам", callback_data="back_filters")])
+    rows.append([InlineKeyboardButton(text=t(0, "back"), callback_data="back_filters")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_card_text(t: dict) -> str:
     price_str = fmt_price(t.get("price"), t.get("currency"))
-
-    # hotel: из БД, если нет — из описания, иначе fallback
     hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
     hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
-
-    # питание: сначала из БД (collector), если нет — эвристика
     board = (t.get("board") or "").strip()
     if not board:
         board = extract_meal(t.get("hotel"), t.get("description")) or ""
-
-    # что включено: из БД (collector)
     includes = (t.get("includes") or "").strip()
-
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
     url = (t.get("source_url") or "").strip()
@@ -1133,7 +1027,6 @@ def build_card_text(t: dict) -> str:
         parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
     if time_str:
         parts.append(time_str)
-
     return "\n".join(parts)
 
 async def send_tour_card(chat_id: int, user_id: int, t: dict):
@@ -1146,19 +1039,15 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     for t in rows:
         await send_tour_card(chat_id, user_id, t)
         await asyncio.sleep(0)
-    # запоминаем результаты для "дай ссылку"
     LAST_RESULTS[user_id] = rows
     LAST_QUERY_AT[user_id] = time.monotonic()
-
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
 async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
-    """Отправляет карточку лида в группу заявок (поддерживает темы). Не показываем user_id."""
     chat_id = resolve_leads_chat_id()
     if not chat_id:
         logging.warning("notify_leads_group: LEADS_CHAT_ID не задан")
         return
-
     try:
         price_str = fmt_price(t.get("price"), t.get("currency"))
         hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
@@ -1166,7 +1055,6 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         dates_norm = normalize_dates_for_display(t.get("dates"))
         time_str = localize_dt(t.get("posted_at"))
 
-        # 👇 ТОЛЬКО username (или Имя Фамилия, если username нет)
         if getattr(user, "username", None):
             user_label = f"@{user.username}"
         else:
@@ -1214,7 +1102,7 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         logging.error(f"notify_leads_group failed: {e}")
 
 # ----- анти-дубль приветствия -----
-_RECENT_GREETING = defaultdict(float)  # user_id -> mono_ts
+_RECENT_GREETING = defaultdict(float)
 def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
     now = time.monotonic()
     last = _RECENT_GREETING.get(user_id, 0.0)
@@ -1222,15 +1110,9 @@ def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
         _RECENT_GREETING[user_id] = now
         return True
     return False
-
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
-
 def is_menu_label(text: str, key: str) -> bool:
-    """
-    key: 'menu_find' | 'menu_gpt' | 'menu_sub' | 'menu_settings'
-    Сравниваем текст с переводами всех поддерживаемых языков.
-    """
     variants = {_norm(TRANSLATIONS[lang][key]) for lang in SUPPORTED_LANGS}
     return _norm(text) in variants
 
@@ -1238,32 +1120,17 @@ def is_menu_label(text: str, key: str) -> bool:
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     uid = message.from_user.id
-
-    # если язык ещё не выбран — предлагаем выбор и выходим
     if get_config(f"lang_{uid}", None) is None:
         await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
         return
-
-    # анти-дубль, если пользователь жмёт /start несколько раз подряд
     if not _should_greet_once(uid):
         return
-
     text = (
         t(uid, "hello") + "\n\n"
-        f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n"
-        f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
+        f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
+        f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
     )
     await message.answer(text, reply_markup=main_kb_for(uid))
-
-@dp.message(F.text.regexp(r"насколько.*актуал", flags=re.I))
-async def faq_actual(message: Message):
-    txt = (
-        "Актуальность:\n"
-        "• В подборках показываем свежие туры за последние 72 часа (в карточке есть время публикации).\n"
-        "• ИИ использует базу последних объявлений и лист KB — поэтому отвечает «на сегодня», без старых справок.\n"
-        "Если нужно — напиши страну и бюджет, соберу варианты ✈️"
-    )
-    await message.answer(txt)
 
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: Message):
@@ -1302,15 +1169,11 @@ async def cmd_leadstest(message: Message):
     await notify_leads_group(t, lead_id=fake_lead_id, user=message.from_user, phone="+99890XXXXXXX", pin=False)
     await message.reply("Тестовая заявка отправлена в группу.")
 
-@dp.message(F.text == "🎒 Найти туры")
+# Быстрые команды
 async def entry_find_tours(message: Message):
     await message.answer("Выбери быстрый фильтр:", reply_markup=filters_inline_kb())
-
-@dp.message(F.text == "🤖 Спросить GPT")
 async def entry_gpt(message: Message):
     await message.answer("Спроси что угодно про путешествия (отели, сезоны, визы, бюджеты).")
-
-@dp.message(F.text == "🔔 Подписка")
 async def entry_sub(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -1329,13 +1192,13 @@ async def entry_sub(message: Message):
         "Выбери способ оплаты и тариф (по умолчанию — <b>Basic 49 000 UZS / 30 дней</b>):",
         reply_markup=kb
     )
-
 async def entry_settings(message: Message):
     uid = message.from_user.id
     await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
 
+@dp.message(Command("language"))
 @dp.message(Command("settings"))
-async def cmd_settings(message: Message):
+async def cmd_language(message: Message):
     await entry_settings(message)
 
 @dp.callback_query(F.data == "tours_recent")
@@ -1360,10 +1223,6 @@ async def cb_recent(call: CallbackQuery):
     _remember_query(call.from_user.id, "актуальные за 72ч")
     next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, next_offset)
-
-@dp.message(Command("language"))
-async def cmd_language(message: Message):
-    await message.answer(t(message.from_user.id, "choose_lang"), reply_markup=lang_inline_kb())
 
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
@@ -1390,8 +1249,8 @@ async def cb_country(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("sub:"))
 async def cb_sub(call: CallbackQuery):
-    _, provider, kind = call.data.split(":", 2)   # provider: click|payme; kind: recurring|oneoff
-    plan_code = "basic_m"                         # можно дать выбор планов по кнопкам
+    _, provider, kind = call.data.split(":", 2)
+    plan_code = "basic_m"
     order_id = create_order(call.from_user.id, provider=provider, plan_code=plan_code, kind=kind)
     url = build_checkout_link(provider, order_id, plan_code)
 
@@ -1515,7 +1374,6 @@ async def cb_fav_add(call: CallbackQuery):
         await call.answer("Ошибка избранного.", show_alert=False); return
     set_favorite(call.from_user.id, tour_id)
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
-
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
@@ -1530,7 +1388,6 @@ async def cb_fav_rm(call: CallbackQuery):
         await call.answer("Ошибка избранного.", show_alert=False); return
     unset_favorite(call.from_user.id, tour_id)
     await call.answer("Убрано из избранного 🤍", show_alert=False)
-
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
@@ -1541,32 +1398,21 @@ async def cb_fav_rm(call: CallbackQuery):
 async def cb_lang(call: CallbackQuery):
     uid = call.from_user.id
     _, lang = call.data.split(":", 1)
-
-    # применяем язык, если поменялся
     if get_user_lang(uid) != lang:
         set_user_lang(uid, lang)
-
-    # убрать клавиатуру выбора, чтобы не кликали повторно
     try:
         await call.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-
-    # короткая всплывашка; кэшируем, чтобы при повторном тапе не спамить
     try:
         await call.answer("OK", cache_time=60)
     except Exception:
         pass
-
-    # анти-дубль приветствия
-    if not _should_greet_once(uid):
-        return
-
     await call.message.answer(t(uid, "lang_saved"))
     text = (
         t(uid, "hello") + "\n\n"
-        f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n"
-        f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
+        f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
+        f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
     )
     await call.message.answer(text, reply_markup=main_kb_for(uid))
 
@@ -1579,8 +1425,6 @@ async def cb_want(call: CallbackQuery):
         return
 
     uid = call.from_user.id
-
-    # --- Проверка подписки / первой заявки ---
     if user_has_leads(uid) and not user_has_subscription(uid):
         await call.message.answer(
             "⚠️ У тебя уже была бесплатная заявка.\n"
@@ -1590,7 +1434,6 @@ async def cb_want(call: CallbackQuery):
         await call.answer()
         return
 
-    # --- Если первая заявка или есть подписка ---
     WANT_STATE[uid] = {"tour_id": tour_id}
     try:
         set_pending_want(uid, tour_id)
@@ -1622,7 +1465,6 @@ async def on_contact(message: Message):
     phone = message.contact.phone_number
     tour_id = st["tour_id"]
 
-    # Безопасно формируем ФИО
     full_name = (getattr(message.from_user, "full_name", "") or "").strip()
     if not full_name:
         parts = [(message.from_user.first_name or ""), (message.from_user.last_name or "")]
@@ -1631,7 +1473,6 @@ async def on_contact(message: Message):
 
     lead_id = create_lead(tour_id, phone, full_name, note="from contact share")
 
-    # подтянем тур и отправим в группу заявок
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"""
             SELECT {_select_tours_clause()}
@@ -1652,49 +1493,38 @@ async def cb_noop(call: CallbackQuery):
 
 @dp.callback_query(F.data == "back_filters")
 async def cb_back_filters(call: CallbackQuery):
-    await call.message.answer(
-        "Вернулся к фильтрам:",
-        reply_markup=filters_inline_kb()
-    )
+    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb())
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
 
+# --- Кнопки меню (на любом языке)
 @dp.message(F.text)
 async def on_menu_buttons(message: Message):
     txt = message.text or ""
     if is_menu_label(txt, "menu_find"):
-        await entry_find_tours(message)
-        return
+        await entry_find_tours(message); return
     if is_menu_label(txt, "menu_gpt"):
-        await entry_gpt(message)
-        return
+        await entry_gpt(message); return
     if is_menu_label(txt, "menu_sub"):
-        await entry_sub(message)
-        return
+        await entry_sub(message); return
     if is_menu_label(txt, "menu_settings"):
-        await entry_settings(message)
-        return
+        await entry_settings(message); return
 
 # --- Смарт-роутер текста
 @dp.message(F.text)
 async def smart_router(message: Message):
     user_text = (message.text or "").strip()
-
-    # если это одна из кнопок меню — ничего не делаем (их ловит on_menu_buttons)
     if any(is_menu_label(user_text, k) for k in ("menu_find", "menu_gpt", "menu_sub", "menu_settings")):
         return
 
     await bot.send_chat_action(message.chat.id, "typing")
 
-    # --- 1) "дай ссылку", "источник", "ссылку на источник"
     if re.search(r"\b((дай\s+)?ссылк\w*|источник\w*|link)\b", user_text, flags=re.I):
         last = LAST_RESULTS.get(message.from_user.id) or []
         premium_users = {123456789}
         is_premium = message.from_user.id in premium_users
-
-        # если карточек нет — пробуем реконструировать запрос и найти их сейчас
         if not last:
             guess = _guess_query_from_link_phrase(user_text) or LAST_QUERY_TEXT.get(message.from_user.id)
             if guess:
@@ -1702,7 +1532,6 @@ async def smart_router(message: Message):
                 if rows:
                     LAST_RESULTS[message.from_user.id] = rows
                     last = rows
-
         if not last:
             q_hint = LAST_QUERY_TEXT.get(message.from_user.id)
             hint_txt = f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл." if q_hint else "Не вижу последних карточек."
@@ -1711,26 +1540,23 @@ async def smart_router(message: Message):
                 reply_markup=filters_inline_kb()
             )
             return
-
         shown = 0
-        for t in last[:3]:
-            src = (t.get("source_url") or "").strip()
+        for trow in last[:3]:
+            src = (trow.get("source_url") or "").strip()
             if is_premium and src:
                 text = f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>'
                 await message.answer(text, disable_web_page_preview=True)
             else:
-                ch = (t.get("source_chat") or "").lstrip("@")
-                when = localize_dt(t.get("posted_at"))
+                ch = (trow.get("source_chat") or "").lstrip("@")
+                when = localize_dt(trow.get("posted_at"))
                 label = f"Источник: {escape(ch) or 'тур-канал'}, {when or 'дата неизвестна'}"
                 hint = " • В Premium покажу прямую ссылку."
                 await message.answer(f"{label}{hint}")
             shown += 1
-
         if shown == 0:
             await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
         return
 
-    # --- 2) Быстрый маршрут: погода
     if re.search(r"\bпогод", user_text, flags=re.I):
         place = _extract_place_from_weather_query(user_text)
         await message.answer("Секунду, уточняю погоду…")
@@ -1738,20 +1564,16 @@ async def smart_router(message: Message):
         await message.answer(reply, disable_web_page_preview=True)
         return
 
-    # --- 3) Быстрый маршрут: "<что-то> интересует"
     m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
     if m_interest or (len(user_text) <= 30):
         q = m_interest.group(1) if m_interest else user_text
         queries = _expand_query(q)
         rows_all: List[dict] = []
-
         for qx in queries:
             rows, _is_recent = await fetch_tours(qx, hours=72, limit_recent=6, limit_fallback=0)
             rows_all.extend(rows)
-
         if not rows_all:
             rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
-
         if rows_all:
             _remember_query(message.from_user.id, q)
             header = "Нашёл варианты по запросу: " + escape(q)
@@ -1770,7 +1592,6 @@ async def smart_router(message: Message):
             await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
             return
 
-    # --- 4) Короткие запросы: быстрый поиск по базе за 72 часа
     if len(user_text) <= 40:
         rows, is_recent = await fetch_tours(user_text, hours=72)
         if rows:
@@ -1791,7 +1612,6 @@ async def smart_router(message: Message):
             await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
             return
 
-    # --- 5) Фолбэк: GPT
     _remember_query(message.from_user.id, user_text)
     premium_users = {123456789}
     is_premium = message.from_user.id in premium_users
@@ -1829,7 +1649,6 @@ async def on_startup():
     except Exception as e:
         logging.error(f"Schema ensure failed: {e}")
 
-    # --- GS warmup (подготовим таблицу и лист "Заявки")
     try:
         gc = _get_gs_client()
         if not gc:
@@ -1839,14 +1658,11 @@ async def on_startup():
             logging.info(f"GS warmup: trying open spreadsheet id='{sid}'")
             sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
             logging.info(f"GS warmup: opened spreadsheet title='{sh.title}'")
-
-            # логируем существующие листы — удобно для диагностики
             try:
                 titles = [ws.title for ws in sh.worksheets()]
                 logging.info(f"GS warmup: worksheets={titles}")
             except Exception as e_list:
                 logging.warning(f"GS: cannot list worksheets: {e_list}")
-
             header = [
                 "created_utc", "lead_id", "username", "full_name", "phone",
                 "country", "city", "hotel", "price", "currency", "dates",
@@ -1862,7 +1678,6 @@ async def on_startup():
     except Exception as e:
         logging.error(f"GS warmup failed (generic): {e}")
 
-    # гарантируем новые колонки (безопасно, IF NOT EXISTS)
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS board TEXT;")
@@ -1870,7 +1685,6 @@ async def on_startup():
     except Exception as e:
         logging.warning(f"Ensure tours columns failed: {e}")
 
-    # --- Снимем фактическую схему tours и DSN
     try:
         with get_conn() as conn, conn.cursor() as cur:
             info = conn.info
@@ -1907,17 +1721,15 @@ async def click_cb(request: Request):
     if ok and order_id:
         try:
             activate_after_payment(order_id)
-            # уведомим пользователя
             o = get_order_safe(order_id)
             if o:
                 await bot.send_message(o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}")
-        except Exception as e:
+        except Exception:
             pass
     return JSONResponse({"status": "ok" if ok else "error", "message": msg})
 
 @app.post("/payme/callback")
 async def payme_cb(request: Request):
-    # Payme Hosted обычно шлёт form-data; если JSON — поменяй на await request.json()
     form = dict(await request.form())
     ok, msg, order_id, trx = payme_handle_callback(form, dict(request.headers))
     if ok and order_id:
@@ -1926,7 +1738,7 @@ async def payme_cb(request: Request):
             o = get_order_safe(order_id)
             if o:
                 await bot.send_message(o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}")
-        except Exception as e:
+        except Exception:
             pass
     return JSONResponse({"status": "ok" if ok else "error", "message": msg})
 
@@ -1937,5 +1749,3 @@ async def pay_success():
 @app.get("/pay/cancel")
 async def pay_cancel():
     return JSONResponse({"status": "canceled", "html": "<h3>Платёж отменён. Попробуйте снова из бота.</h3>"})
-
-
