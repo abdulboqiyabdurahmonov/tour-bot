@@ -1331,6 +1331,10 @@ async def cb_recent(call: CallbackQuery):
     next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, next_offset)
 
+@dp.message(Command("language"))
+async def cmd_language(message: Message):
+    await message.answer(t(message.from_user.id, "choose_lang"), reply_markup=lang_inline_kb())
+
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
@@ -1515,7 +1519,7 @@ async def cb_lang(call: CallbackQuery):
     text = t(uid, "hello") + "\n\n" + \
            f"{t(uid, 'menu_find')} — покажу карточки с кнопками.\n" + \
            f"{t(uid, 'menu_gpt')} — умные ответы про сезоны, визы и бюджеты.\n"
-    await call.message.answer(text, reply_markup=main_kb_for(uid))
+    await call.message.answer(text, reply_markup=main_kb_for(message.from_user.id))
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
@@ -1563,7 +1567,7 @@ async def on_contact(message: Message):
     st = WANT_STATE.pop(message.from_user.id, None)
     if not st:
         logging.info(f"Contact came without pending want (user_id={message.from_user.id})")
-        await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb)
+        await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb_for(message.from_user.id))
         return
 
     phone = message.contact.phone_number
@@ -1589,7 +1593,7 @@ async def on_contact(message: Message):
     if t and lead_id:
         await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
         append_lead_to_sheet(lead_id, message.from_user, phone, t)
-        await message.answer(f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞", reply_markup=main_kb)
+        await message.answer(f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞", reply_markup=main_kb_for(message.from_user.id))
     else:
         await message.answer("Контакт получен, но не удалось создать заявку. Попробуй ещё раз или напиши менеджеру.", reply_markup=main_kb)
 
@@ -1599,11 +1603,11 @@ async def cb_noop(call: CallbackQuery):
 
 @dp.callback_query(F.data == "back_filters")
 async def cb_back_filters(call: CallbackQuery):
-    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb())
+    await call.message.answer("Вернулся к фильтрам:", reply_markup=main_kb_for(message.from_user.id))
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
-    await call.message.answer("Главное меню:", reply_markup=main_kb)
+    await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
 
 # --- Смарт-роутер текста
 @dp.message(F.text & ~F.text.in_({"🎒 Найти туры", "🤖 Спросить GPT", "🔔 Подписка", "⚙️ Настройки"}))
