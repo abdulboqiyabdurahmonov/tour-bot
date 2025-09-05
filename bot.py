@@ -1652,7 +1652,10 @@ async def cb_noop(call: CallbackQuery):
 
 @dp.callback_query(F.data == "back_filters")
 async def cb_back_filters(call: CallbackQuery):
-    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb()
+    await call.message.answer(
+        "Вернулся к фильтрам:",
+        reply_markup=filters_inline_kb()
+    )
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
