@@ -1330,11 +1330,13 @@ async def entry_sub(message: Message):
         reply_markup=kb
     )
 
-@dp.message(F.text)
 async def entry_settings(message: Message):
-    # этот хендлер будет вызван через on_menu_buttons → entry_settings
     uid = message.from_user.id
     await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
+
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message):
+    await entry_settings(message)
 
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
@@ -1650,7 +1652,7 @@ async def cb_noop(call: CallbackQuery):
 
 @dp.callback_query(F.data == "back_filters")
 async def cb_back_filters(call: CallbackQuery):
-    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb())
+    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb()
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
