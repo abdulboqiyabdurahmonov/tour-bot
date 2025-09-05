@@ -1330,9 +1330,11 @@ async def entry_sub(message: Message):
         reply_markup=kb
     )
 
-@dp.message(F.text == "⚙️ Настройки")
+@dp.message(F.text)
 async def entry_settings(message: Message):
-    await message.answer("Скоро: язык/валюта/бюджет по умолчанию. Пока в разработке ⚙️")
+    # этот хендлер будет вызван через on_menu_buttons → entry_settings
+    uid = message.from_user.id
+    await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
 
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
