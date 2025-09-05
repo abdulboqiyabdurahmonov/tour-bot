@@ -1,4 +1,4 @@
-# db_init.py — безопасный для импорта
+# db_init.py — расширено таблицами orders/subscriptions/payment_transactions
 
 import os
 import logging
@@ -11,9 +11,8 @@ def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
 def init_db():
-    """Создание таблиц/индексов и лёгкие миграции (всё внутри курсора)."""
     with get_conn() as conn, conn.cursor() as cur:
-        # Пользователи
+        # users
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -21,7 +20,7 @@ def init_db():
             );
         """)
 
-        # Логи GPT-запросов
+        # requests (GPT)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -32,7 +31,7 @@ def init_db():
             );
         """)
 
-        # Туры
+        # tours
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tours (
                 id SERIAL PRIMARY KEY,
@@ -55,7 +54,7 @@ def init_db():
             );
         """)
 
-        # Избранное
+        # favorites
         cur.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
                 user_id BIGINT,
@@ -65,7 +64,7 @@ def init_db():
             );
         """)
 
-        # Лиды (минимум; дальше бот догоним недостающие поля через ensure_leads_schema)
+        # leads
         cur.execute("""
             CREATE TABLE IF NOT EXISTS leads (
                 id SERIAL PRIMARY KEY,
@@ -77,7 +76,7 @@ def init_db():
             );
         """)
 
-        # KV-конфиг
+        # app_config
         cur.execute("""
             CREATE TABLE IF NOT EXISTS app_config (
                 key TEXT PRIMARY KEY,
@@ -85,15 +84,54 @@ def init_db():
             );
         """)
 
-        # Индексы
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours (posted_at DESC);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_country ON tours (LOWER(country));")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_city ON tours (LOWER(city));")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_hotel ON tours (LOWER(hotel));")
-        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tours_stable_key ON tours (stable_key);")
-        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tours_source_msg ON tours (source_chat, message_id);")
+        # ====== PAYMENTS ======
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                provider TEXT NOT NULL,              -- 'click' | 'payme'
+                plan_code TEXT NOT NULL,
+                amount BIGINT NOT NULL,
+                currency TEXT NOT NULL,
+                kind TEXT NOT NULL,                  -- 'oneoff' | 'recurring'
+                status TEXT NOT NULL DEFAULT 'pending',  -- pending|paid|failed|canceled
+                provider_trx_id TEXT,
+                paid_at TIMESTAMP,
+                raw JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
 
-    logging.info("📦 База данных инициализирована")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id BIGINT PRIMARY KEY,
+                plan_code TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',     -- active|past_due|canceled
+                current_period_end TIMESTAMP NOT NULL,
+                payment_token TEXT,                        -- для рекуррента (если используете vault)
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS payment_transactions (
+                id BIGSERIAL PRIMARY KEY,
+                order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                status TEXT NOT NULL,         -- paid|failed|callback|...
+                payload JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+
+        # Indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tours_posted_at ON tours (posted_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_end ON subscriptions (current_period_end);")
+
+    logging.info("📦 База данных инициализирована/мигрирована")
 
 def save_user(user):
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
@@ -111,16 +149,6 @@ def save_request(user_id: int, query: str, response: str):
             VALUES (%s, %s, %s);
         """, (user_id, query, response))
 
-def search_tours(query: str):
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            SELECT * FROM tours
-            WHERE (country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s)
-            ORDER BY posted_at DESC
-            LIMIT 5;
-        """, (f"%{query}%", f"%{query}%", f"%{query}%"))
-        return cur.fetchall()
-
 def get_config(key: str, default: str | None = None) -> str | None:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT val FROM app_config WHERE key=%s;", (key,))
@@ -134,6 +162,5 @@ def set_config(key: str, val: str):
             ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
         """, (key, val))
 
-# Для ручного запуска миграций:
 if __name__ == "__main__":
     init_db()
