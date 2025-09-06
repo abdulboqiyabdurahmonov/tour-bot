@@ -1588,6 +1588,37 @@ async def smart_router(message: Message):
             await message.answer(reply, disable_web_page_preview=True)
             return
 
+        # ===== интент: "актуальные/свежие/горящие туры" =====
+        m_recent = re.search(
+            r"\b(актуальн\w*|свеж\w*|горящ\w*|последн\w*)\s+(туры|предложени\w*)\b", 
+            user_text, flags=re.I
+        )
+        m_72 = re.search(r"\b(72\s*ч|за\s*72\s*час\w*|за\s*3\s*дн\w*)\b", user_text, flags=re.I)
+        m_sort_price = re.search(r"\b(дешевле|дешёвые|по\s*цене|сортировк\w+\s*по\s*цене)\b", user_text, flags=re.I)
+
+        if m_recent or m_72:
+            hours = 72  # хотим «свежак»
+            order_by_price = bool(m_sort_price)
+
+            rows = await fetch_tours_page(hours=hours, order_by_price=order_by_price, limit=6, offset=0)
+            header = "🔥 Актуальные за 72 часа" + (" — дешевле → дороже" if order_by_price else "")
+            await message.answer(f"<b>{header}</b>")
+
+            token = _new_token()
+            PAGER_STATE[token] = {
+                "chat_id": message.chat.id,
+                "query": None,
+                "country": None,
+                "currency_eq": None,
+                "max_price": None,
+                "hours": hours,
+                "order_by_price": order_by_price,
+                "ts": time.monotonic(),
+            }
+
+            await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
+            return
+        
         # короткие смысловые запросы → сразу подбирать туры
         m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
         if m_interest or (len(user_text) <= 30):
