@@ -1878,6 +1878,13 @@ async def on_startup():
     except Exception as e:
         logging.error(f"Ошибка init_db(): {e}")
 
+        try:
+        ensure_pending_wants_table()
+        ensure_leads_schema()
+        ensure_questions_schema()   # 👈 вот эта строка
+    except Exception as e:
+        logging.error(f"Schema ensure failed: {e}")
+
     try:
         ensure_pending_wants_table()
         ensure_leads_schema()
