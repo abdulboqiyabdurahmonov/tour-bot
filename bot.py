@@ -1687,19 +1687,15 @@ async def on_question_text(message: Message):
         await message.answer("Не нашёл карточку тура. Попробуй ещё раз из карточки.", reply_markup=main_kb_for(message.from_user.id))
         return
 
-            # генерируем ключ и запоминаем, кому слать ответ
-    answer_key = secrets.token_urlsafe(5)  # 5+ символов; подходит под ваш регекс
-    ANSWER_MAP[answer_key] = {"user_id": message.from_user.id, "tour_id": tour_id}
+            # сохраняем вопрос в БД и шлём карточку в группу с меткой [Q#123]
+        await save_question_and_notify(t, user=message.from_user, text=txt)
 
-    # отправляем в админ-группу с ключом
-    await notify_question_group(t, user=message.from_user, question=txt, answer_key=answer_key)
+        ASK_STATE.pop(message.from_user.id, None)
+        await message.answer(
+            "Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬",
+            reply_markup=main_kb_for(message.from_user.id),
+        )
 
-    # выходим из режима вопроса у пользователя
-    ASK_STATE.pop(message.from_user.id, None)
-    await message.answer(
-        "Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬",
-        reply_markup=main_kb_for(message.from_user.id)
-    )
 
 # --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
