@@ -1302,6 +1302,36 @@ async def cb_ask(call: CallbackQuery):
     )
     await call.answer()
 
+@dp.message(F.reply_to_message, F.chat.id == resolve_leads_chat_id())
+async def on_admin_reply(message: Message):
+    try:
+        # берём исходное сообщение, на которое ответили
+        orig = message.reply_to_message
+        if not orig or "Вопрос по туру" not in (orig.text or orig.caption or ""):
+            return  # отвечаем только на сообщения "❓ Вопрос по туру"
+
+        # из текста/подписи вытаскиваем @username
+        m = re.search(r"от\s+(@\w+)", orig.text or orig.caption or "")
+        if not m:
+            return
+        username = m.group(1)
+
+        # ищем юзера по username (или сохраняем user_id при вопросе — лучше!)
+        # если при notify_question_group мы сохраняем user_id → здесь проще
+        # допустим, ты сохранил user_id в БД или dict ASK_STATE
+
+        # здесь пример: берём user_id из нашей временной базы
+        user_id = LAST_QUESTION_USERS.get(username)
+        if not user_id:
+            return
+
+        # текст ответа админа
+        reply_text = message.text or "(без текста)"
+        await bot.send_message(user_id, f"📬 Ответ менеджера:\n{reply_text}")
+
+    except Exception as e:
+        logging.error(f"on_admin_reply failed: {e}")
+
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
