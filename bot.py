@@ -1365,14 +1365,15 @@ async def admin_reply_to_question(message: Message):
         return
 
     user_id = row["user_id"]
-    # шлём пользователю
+
     try:
+        # отправляем пользователю
         await bot.send_message(
             user_id,
             f"📬 Ответ по вашему вопросу [Q#{qid}]:\n\n{escape(answer)}",
             disable_web_page_preview=True
         )
-        # пометим в БД
+        # обновляем статус в БД
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""
                 UPDATE questions
