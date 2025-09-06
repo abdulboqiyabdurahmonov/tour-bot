@@ -256,6 +256,7 @@ def ensure_leads_schema():
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS user_id BIGINT;")
         cur.execute("CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads(created_at);")
+        
 
 # ================== ПРОВЕРКА ЛИДОВ / ПОДПИСКИ ==================
 def user_has_leads(user_id: int) -> bool:
@@ -1128,6 +1129,39 @@ async def notify_question_group(t: dict, *, user, question: str):
     except Exception as e:
         logging.error(f"notify_question_group failed: {e}")
 
+def _format_q_header(qid: int) -> str:
+    return f"❓ <b>Вопрос по туру</b>  [Q#{qid}]"
+
+async def save_question_and_notify(t: dict, *, user, text: str) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO questions(user_id, tour_id, question)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """, (user.id, t.get("id"), text))
+        row = cur.fetchone()
+        qid = row["id"]
+
+    # собираем блок тура, как у тебя
+    tour_block, photo = _compose_tour_block(t)
+    head = f"{_format_q_header(qid)}\n👤 от {escape(_admin_user_label(user))}\n📝 {escape(text)}"
+    msg_text = f"{head}\n\n{tour_block}"
+
+    chat_id = resolve_leads_chat_id()
+    kwargs = {"message_thread_id": LEADS_TOPIC_ID} if LEADS_TOPIC_ID else {}
+    if photo:
+        m = await bot.send_photo(chat_id, photo=photo, caption=msg_text, parse_mode="HTML", **kwargs)
+    else:
+        m = await bot.send_message(chat_id, msg_text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
+
+    # сохраним, куда отправили
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            UPDATE questions
+               SET admin_chat_id=%s, admin_message_id=%s
+             WHERE id=%s
+        """, (chat_id, m.message_id, qid))
+
 # ----- анти-дубль приветствия -----
 _RECENT_GREETING = defaultdict(float)
 def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
@@ -1290,6 +1324,64 @@ async def cb_recent(call: CallbackQuery):
     _remember_query(call.from_user.id, "актуальные за 72ч")
     next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, next_offset)
+
+Q_MARK_RE = re.compile(r"\[Q#(\d+)\]")
+
+def _extract_qid_from_msg(msg: Message) -> Optional[int]:
+    text = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "") 
+    m = Q_MARK_RE.search(text)
+    if m:
+        try: return int(m.group(1))
+        except: return None
+    return None
+
+@dp.message(F.chat.id == resolve_leads_chat_id(), F.reply_to_message)
+async def admin_reply_to_question(message: Message):
+    # берём исходную карточку, на которую ответили
+    src = message.reply_to_message
+    qid = _extract_qid_from_msg(src)
+    if not qid:
+        return  # не наша карточка — игнор
+
+    answer = (message.text or "").strip()
+    if not answer:
+        await message.reply("Пустой ответ не отправлен.")
+        return
+
+    # достаём кому слать
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id, status FROM questions WHERE id=%s;", (qid,))
+        row = cur.fetchone()
+
+    if not row:
+        await message.reply("Не нашёл вопрос в базе.")
+        return
+
+    user_id = row["user_id"]
+    # шлём пользователю
+    try:
+        await bot.send_message(
+            user_id,
+            f"📬 Ответ по вашему вопросу [Q#{qid}]:\n\n{escape(answer)}",
+            disable_web_page_preview=True
+        )
+        # пометим в БД
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                UPDATE questions
+                   SET status='answered', answer=%s, answered_at=now()
+                 WHERE id=%s
+            """, (answer, qid))
+        await message.reply("✅ Ответ отправлен пользователю.")
+    except Exception as e:
+        logging.warning(f"send answer failed: {e}")
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                UPDATE questions
+                   SET status='failed', answer=%s, answered_at=now()
+                 WHERE id=%s
+            """, (answer, qid))
+        await message.reply("⚠️ Не удалось доставить (возможно, пользователь закрыл ЛС).")
 
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
@@ -1850,6 +1942,24 @@ async def on_startup():
         logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
     else:
         logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
+
+def ensure_questions_schema():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS questions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                tour_id INTEGER,
+                question TEXT NOT NULL,
+                admin_chat_id BIGINT,
+                admin_message_id BIGINT,
+                status TEXT NOT NULL DEFAULT 'open',
+                answer TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                answered_at TIMESTAMPTZ
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS questions_user_id_idx ON questions(user_id);")
 
 @app.on_event("shutdown")
 async def on_shutdown():
