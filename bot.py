@@ -62,6 +62,7 @@ LAST_RESULTS: dict[int, list[dict]] = {}   # user_id -> последние по�
 LAST_QUERY_AT: dict[int, float] = {}       # user_id -> ts последнего показа
 LAST_PREMIUM_HINT_AT: dict[int, float] = {}  # user_id -> ts последней плашки "премиум"
 LAST_QUERY_TEXT: dict[int, str] = {}       # user_id -> последний смысловой запрос
+ASK_STATE: Dict[int, Dict] = {}
 
 # Синонимы/алиасы гео (минимальный словарик)
 ALIASES = {
@@ -987,10 +988,15 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
 from typing import Optional  # (повторный импорт не критичен)
 
 def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
-    open_btn = []
+    rows = []
+
+    # 🔒 ссылку видит только администратор
     url = (tour.get("source_url") or "").strip()
-    if url:
-        open_btn = [InlineKeyboardButton(text="🔗 Открыть", url=url)]
+    if url and user_id == ADMIN_USER_ID:
+        rows.append([InlineKeyboardButton(text="🔗 Открыть (админ)", url=url)])
+
+    # новая кнопка "вопрос"
+    ask_btn = InlineKeyboardButton(text="✍️ Вопрос по туру", callback_data=f"ask:{tour['id']}")
 
     fav_btn = InlineKeyboardButton(
         text=("❤️ В избранном" if is_fav else "🤍 В избранное"),
@@ -1000,11 +1006,11 @@ def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> I
 
     back_text = t(user_id, "back") if user_id is not None else TRANSLATIONS["ru"]["back"]
 
-    rows = []
-    if open_btn:
-        rows.append(open_btn)
+    # порядок кнопок: Вопрос • Избранное • Хочу • Назад
+    rows.append([ask_btn])
     rows.append([fav_btn, want_btn])
     rows.append([InlineKeyboardButton(text=back_text, callback_data="back_filters")])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_card_text(t: dict) -> str:
@@ -1049,63 +1055,78 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     LAST_QUERY_AT[user_id] = time.monotonic()
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
-async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
+# ===== Общие хелперы для админ-уведомлений =====
+
+def _admin_user_label(user) -> str:
+    if getattr(user, "username", None):
+        return f"@{user.username}"
+    return (f"{(user.first_name or '')} {(user.last_name or '')}".strip() or "Гость")
+
+def _compose_tour_block(t: dict) -> tuple[str, str | None]:
+    price_str = fmt_price(t.get("price"), t.get("currency"))
+    hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
+    hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
+    dates_norm = normalize_dates_for_display(t.get("dates"))
+    time_str = localize_dt(t.get("posted_at"))
+    board = (t.get("board") or "").strip()
+    includes = (t.get("includes") or "").strip()
+    src = (t.get("source_url") or "").strip()
+
+    lines = [
+        f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}",
+        f"🏨 {safe(hotel_clean)}",
+        f"💵 {price_str}",
+        f"📅 {dates_norm}",
+        time_str or "",
+    ]
+    if board:    lines.append(f"🍽 Питание: {escape(board)}")
+    if includes: lines.append(f"✅ Включено: {escape(includes)}")
+    if src:      lines.append(f'🔗 <a href="{escape(src)}">Источник</a>')
+    text = "\n".join([l for l in lines if l]).strip()
+    photo = (t.get("photo_url") or "").strip() or None
+    return text, photo
+
+async def _send_to_admin_group(text: str, photo: str | None, pin: bool = False):
     chat_id = resolve_leads_chat_id()
     if not chat_id:
-        logging.warning("notify_leads_group: LEADS_CHAT_ID не задан")
+        logging.warning("admin notify: LEADS_CHAT_ID не задан")
         return
+    kwargs = {}
+    if LEADS_TOPIC_ID:
+        kwargs["message_thread_id"] = LEADS_TOPIC_ID
+    if photo:
+        # телега ограничивает длину подписи, страхуемся
+        short = text if len(text) <= 1000 else (text[:990].rstrip() + "…")
+        msg = await bot.send_photo(chat_id, photo=photo, caption=short, parse_mode="HTML", **kwargs)
+    else:
+        msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
+    if pin:
+        try:
+            await bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
+        except Exception as e:
+            logging.warning(f"pin failed: {e}")
+
+# ===== Конкретные уведомления =====
+
+async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bool = False):
     try:
-        price_str = fmt_price(t.get("price"), t.get("currency"))
-        hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
-        hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
-        dates_norm = normalize_dates_for_display(t.get("dates"))
-        time_str = localize_dt(t.get("posted_at"))
-
-        if getattr(user, "username", None):
-            user_label = f"@{user.username}"
-        else:
-            user_label = f"{(user.first_name or '')} {(user.last_name or '')}".strip() or "Гость"
-
-        src = (t.get("source_url") or "").strip()
-        src_line = f'\n🔗 <a href="{escape(src)}">Источник</a>' if src else ""
-
-        board = (t.get("board") or "").strip()
-        includes = (t.get("includes") or "").strip()
-
-        board_line = f"\n🍽 Питание: {escape(board)}" if board else ""
-        incl_line = f"\n✅ Включено: {escape(includes)}" if includes else ""
-
-        text = (
-            f"🆕 <b>Заявка №{lead_id}</b>\n"
-            f"👤 {escape(user_label)}\n"
-            f"📞 {escape(phone)}\n"
-            f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}\n"
-            f"🏨 {safe(hotel_clean)}\n"
-            f"💵 {price_str}\n"
-            f"📅 {dates_norm}\n"
-            f"{time_str}"
-            f"{board_line}{incl_line}"
-            f"{src_line}"
-        ).strip()
-
-        kwargs = {}
-        if LEADS_TOPIC_ID:
-            kwargs["message_thread_id"] = LEADS_TOPIC_ID
-
-        photo = (t.get("photo_url") or "").strip()
-        if photo:
-            short = text if len(text) <= 1000 else (text[:990].rstrip() + "…")
-            msg = await bot.send_photo(chat_id, photo=photo, caption=short, parse_mode="HTML", **kwargs)
-        else:
-            msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
-
-        if pin:
-            try:
-                await bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
-            except Exception as e:
-                logging.warning(f"pin failed: {e}")
+        user_label = _admin_user_label(user)
+        tour_block, photo = _compose_tour_block(t)
+        head = f"🆕 <b>Заявка №{lead_id}</b>\n👤 {escape(user_label)}\n📞 {escape(phone)}"
+        text = f"{head}\n{tour_block}"
+        await _send_to_admin_group(text, photo, pin=pin)
     except Exception as e:
         logging.error(f"notify_leads_group failed: {e}")
+
+async def notify_question_group(t: dict, *, user, question: str):
+    try:
+        user_label = _admin_user_label(user)
+        tour_block, photo = _compose_tour_block(t)
+        head = f"❓ <b>Вопрос по туру</b>\n👤 от {escape(user_label)}\n📝 {escape(question)}"
+        text = f"{head}\n\n{tour_block}"
+        await _send_to_admin_group(text, photo, pin=False)
+    except Exception as e:
+        logging.error(f"notify_question_group failed: {e}")
 
 # ----- анти-дубль приветствия -----
 _RECENT_GREETING = defaultdict(float)
@@ -1220,6 +1241,32 @@ async def entry_settings(message: Message):
 @dp.message(Command("settings"))
 async def cmd_language(message: Message):
     await entry_settings(message)
+
+@dp.callback_query(F.data.startswith("ask:"))
+async def cb_ask(call: CallbackQuery):
+    try:
+        tour_id = int(call.data.split(":", 1)[1])
+    except Exception:
+        await call.answer("Не удалось открыть форму вопроса.", show_alert=False)
+        return
+
+    uid = call.from_user.id
+    ASK_STATE[uid] = {"tour_id": tour_id, "since": time.monotonic()}
+
+    cancel_kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена вопроса")]],
+        resize_keyboard=True, one_time_keyboard=True, selective=True
+    )
+
+    await call.message.answer(
+        "Напиши свой вопрос по этой карточке. Например:\n"
+        "• Не вижу название отеля / страны\n"
+        "• Уточните даты или питание\n"
+        "• Сколько будет на 2 взрослых и ребёнка\n\n"
+        "Чтобы отменить — нажми «❌ Отмена вопроса».",
+        reply_markup=cancel_kb
+    )
+    await call.answer()
 
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
@@ -1519,6 +1566,37 @@ async def cb_back_filters(call: CallbackQuery):
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
+
+@dp.message(F.text)
+async def on_question_text(message: Message):
+    st = ASK_STATE.get(message.from_user.id)
+    if not st:
+        return  # не в режиме вопроса → пусть обработают другие хэндлеры
+
+    txt = (message.text or "").strip()
+    if txt.lower() in {"отмена", "❌ отмена вопроса", "❌ отмена", "❌ отмена вопроса".lower(), "❌ отмена"} or txt.startswith("❌"):
+        ASK_STATE.pop(message.from_user.id, None)
+        await message.answer("Ок, вопрос отменён.", reply_markup=main_kb_for(message.from_user.id))
+        return
+
+    tour_id = st.get("tour_id")
+
+    # достаём тур из БД
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
+        t = cur.fetchone()
+
+    if not t:
+        ASK_STATE.pop(message.from_user.id, None)
+        await message.answer("Не нашёл карточку тура. Попробуй ещё раз из карточки.", reply_markup=main_kb_for(message.from_user.id))
+        return
+
+    # отправляем в админ-группу
+    await notify_question_group(t, user=message.from_user, question=txt)
+
+    # отвечаем пользователю
+    ASK_STATE.pop(message.from_user.id, None)
+    await message.answer("Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬", reply_markup=main_kb_for(message.from_user.id))
 
 # --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
