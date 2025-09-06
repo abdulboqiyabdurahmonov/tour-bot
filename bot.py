@@ -1309,36 +1309,6 @@ async def cb_ask(call: CallbackQuery):
     )
     await call.answer()
 
-@dp.message(F.reply_to_message, F.chat.id == resolve_leads_chat_id())
-async def on_admin_reply(message: Message):
-    try:
-        # берём исходное сообщение, на которое ответили
-        orig = message.reply_to_message
-        if not orig or "Вопрос по туру" not in (orig.text or orig.caption or ""):
-            return  # отвечаем только на сообщения "❓ Вопрос по туру"
-
-        # из текста/подписи вытаскиваем @username
-        m = re.search(r"от\s+(@\w+)", orig.text or orig.caption or "")
-        if not m:
-            return
-        username = m.group(1)
-
-        # ищем юзера по username (или сохраняем user_id при вопросе — лучше!)
-        # если при notify_question_group мы сохраняем user_id → здесь проще
-        # допустим, ты сохранил user_id в БД или dict ASK_STATE
-
-        # здесь пример: берём user_id из нашей временной базы
-        user_id = LAST_QUESTION_USERS.get(username)
-        if not user_id:
-            return
-
-        # текст ответа админа
-        reply_text = message.text or "(без текста)"
-        await bot.send_message(user_id, f"📬 Ответ менеджера:\n{reply_text}")
-
-    except Exception as e:
-        logging.error(f"on_admin_reply failed: {e}")
-
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
@@ -1717,17 +1687,19 @@ async def on_question_text(message: Message):
         await message.answer("Не нашёл карточку тура. Попробуй ещё раз из карточки.", reply_markup=main_kb_for(message.from_user.id))
         return
 
-        # генерируем ключ и запоминаем, кому слать ответ
-    answer_key = secrets.token_urlsafe(4)  # короткий, типа "a1B_2C"
+            # генерируем ключ и запоминаем, кому слать ответ
+    answer_key = secrets.token_urlsafe(5)  # 5+ символов; подходит под ваш регекс
     ANSWER_MAP[answer_key] = {"user_id": message.from_user.id, "tour_id": tour_id}
 
     # отправляем в админ-группу с ключом
     await notify_question_group(t, user=message.from_user, question=txt, answer_key=answer_key)
 
-    await notify_question_group(t, user=message.from_user, question=txt)
+    # выходим из режима вопроса у пользователя
     ASK_STATE.pop(message.from_user.id, None)
-    await message.answer("Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬",
-                         reply_markup=main_kb_for(message.from_user.id))
+    await message.answer(
+        "Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬",
+        reply_markup=main_kb_for(message.from_user.id)
+    )
 
 # --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
@@ -1954,12 +1926,6 @@ async def on_startup():
         ensure_pending_wants_table()
         ensure_leads_schema()
         ensure_questions_schema()   # 👈 вот эта строка
-    except Exception as e:
-        logging.error(f"Schema ensure failed: {e}")
-
-    try:
-        ensure_pending_wants_table()
-        ensure_leads_schema()
     except Exception as e:
         logging.error(f"Schema ensure failed: {e}")
 
