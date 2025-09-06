@@ -63,6 +63,8 @@ LAST_QUERY_AT: dict[int, float] = {}       # user_id -> ts последнего 
 LAST_PREMIUM_HINT_AT: dict[int, float] = {}  # user_id -> ts последней плашки "премиум"
 LAST_QUERY_TEXT: dict[int, str] = {}       # user_id -> последний смысловой запрос
 ASK_STATE: Dict[int, Dict] = {}
+# ключ -> {user_id, tour_id}
+ANSWER_MAP: dict[str, dict] = {}
 
 # Синонимы/алиасы гео (минимальный словарик)
 ALIASES = {
@@ -1119,11 +1121,16 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
     except Exception as e:
         logging.error(f"notify_leads_group failed: {e}")
 
-async def notify_question_group(t: dict, *, user, question: str):
+async def notify_question_group(t: dict, *, user, question: str, answer_key: str):
     try:
         user_label = _admin_user_label(user)
         tour_block, photo = _compose_tour_block(t)
-        head = f"❓ <b>Вопрос по туру</b>\n👤 от {escape(user_label)}\n📝 {escape(question)}"
+        head = (
+            f"❓ <b>Вопрос по туру</b>\n"
+            f"👤 от {escape(user_label)}\n"
+            f"📝 {escape(question)}\n\n"
+            f"🧩 Ответьте реплаем на это сообщение и начните с <code>#{answer_key}</code>"
+        )
         text = f"{head}\n\n{tour_block}"
         await _send_to_admin_group(text, photo, pin=False)
     except Exception as e:
@@ -1709,6 +1716,13 @@ async def on_question_text(message: Message):
         ASK_STATE.pop(message.from_user.id, None)
         await message.answer("Не нашёл карточку тура. Попробуй ещё раз из карточки.", reply_markup=main_kb_for(message.from_user.id))
         return
+
+        # генерируем ключ и запоминаем, кому слать ответ
+    answer_key = secrets.token_urlsafe(4)  # короткий, типа "a1B_2C"
+    ANSWER_MAP[answer_key] = {"user_id": message.from_user.id, "tour_id": tour_id}
+
+    # отправляем в админ-группу с ключом
+    await notify_question_group(t, user=message.from_user, question=txt, answer_key=answer_key)
 
     await notify_question_group(t, user=message.from_user, question=txt)
     ASK_STATE.pop(message.from_user.id, None)
