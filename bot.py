@@ -1122,6 +1122,11 @@ def is_menu_label(text: str, key: str) -> bool:
     variants = {_norm(TRANSLATIONS[lang][key]) for lang in SUPPORTED_LANGS}
     return _norm(text) in variants
 
+MENU_KEYS = ("menu_find", "menu_gpt", "menu_sub", "menu_settings")
+
+def _is_menu_text(txt: str) -> bool:
+    return any(is_menu_label(txt or "", k) for k in MENU_KEYS)
+
 # === helper: «пульс» индикатора набора ===
 async def _typing_pulse(chat_id: int):
     try:
@@ -1516,7 +1521,7 @@ async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
 
 # --- Кнопки меню (на любом языке)
-@dp.message(F.text)
+@dp.message(F.text.func(_is_menu_text))
 async def on_menu_buttons(message: Message):
     txt = message.text or ""
     if is_menu_label(txt, "menu_find"):
@@ -1586,8 +1591,8 @@ async def smart_router(message: Message):
         # короткие смысловые запросы → сразу подбирать туры
         m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
         if m_interest or (len(user_text) <= 30):
-            # ✨ нормализуем фразу: «найди туры в Египет», «хочу в Дубай» → «Египет» / «Дубай»
             q_raw = m_interest.group(1) if m_interest else user_text
+            # «найди туры в Египет» → «Египет»
             q = _guess_query_from_link_phrase(q_raw) or q_raw
 
             queries = _expand_query(q)
@@ -1597,19 +1602,17 @@ async def smart_router(message: Message):
                 if rows:
                     rows_all.extend(rows)
 
-            # если по свежим не нашли — расширяем горизонт и делаем общий фоллбек
             if not rows_all:
                 rows_all, _ = await fetch_tours(q, hours=168, limit_recent=0, limit_fallback=6)
 
-            # дедуп по id на всякий (алиасы могут вернуть одно и то же)
-            seen_ids = set()
-            rows_all = [r for r in rows_all if not (r.get("id") in seen_ids or seen_ids.add(r.get("id")))]
+            # дедуп по id
+            seen = set()
+            rows_all = [r for r in rows_all if not (r.get("id") in seen or seen.add(r.get("id")))]
 
             if rows_all:
                 _remember_query(message.from_user.id, q)
                 header = "Нашёл варианты по запросу: " + escape(q)
                 await message.answer(f"<b>{header}</b>")
-
                 token = _new_token()
                 PAGER_STATE[token] = {
                     "chat_id": message.chat.id,
@@ -1621,14 +1624,7 @@ async def smart_router(message: Message):
                     "order_by_price": False,
                     "ts": time.monotonic(),
                 }
-
-                await send_batch_cards(
-                    message.chat.id,
-                    message.from_user.id,
-                    rows_all[:6],
-                    token,
-                    len(rows_all[:6])
-                )
+                await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
                 return
 
         # чуть длиннее — сначала пробуем актуальные 72ч по фразе
