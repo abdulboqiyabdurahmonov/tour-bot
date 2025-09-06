@@ -1586,14 +1586,25 @@ async def smart_router(message: Message):
         # короткие смысловые запросы → сразу подбирать туры
         m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
         if m_interest or (len(user_text) <= 30):
-            q = m_interest.group(1) if m_interest else user_text
+            # ✨ нормализуем фразу: «найди туры в Египет», «хочу в Дубай» → «Египет» / «Дубай»
+            q_raw = m_interest.group(1) if m_interest else user_text
+            q = _guess_query_from_link_phrase(q_raw) or q_raw
+
             queries = _expand_query(q)
             rows_all: List[dict] = []
             for qx in queries:
                 rows, _is_recent = await fetch_tours(qx, hours=72, limit_recent=6, limit_fallback=0)
-                rows_all.extend(rows)
+                if rows:
+                    rows_all.extend(rows)
+
+            # если по свежим не нашли — расширяем горизонт и делаем общий фоллбек
             if not rows_all:
-                rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
+                rows_all, _ = await fetch_tours(q, hours=168, limit_recent=0, limit_fallback=6)
+
+            # дедуп по id на всякий (алиасы могут вернуть одно и то же)
+            seen_ids = set()
+            rows_all = [r for r in rows_all if not (r.get("id") in seen_ids or seen_ids.add(r.get("id")))]
+
             if rows_all:
                 _remember_query(message.from_user.id, q)
                 header = "Нашёл варианты по запросу: " + escape(q)
