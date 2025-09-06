@@ -984,7 +984,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
     return ["⚠️ ИИ сейчас перегружен. Попробуй ещё раз — а пока загляни в «🎒 Найти туры»: там только свежие предложения за последние 72 часа."]
 
 # ================= КАРТОЧКИ/УВЕДОМЛЕНИЯ =================
-from typing import Optional
+from typing import Optional  # (повторный импорт не критичен)
 
 def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     open_btn = []
@@ -1121,6 +1121,15 @@ def _norm(s: str) -> str:
 def is_menu_label(text: str, key: str) -> bool:
     variants = {_norm(TRANSLATIONS[lang][key]) for lang in SUPPORTED_LANGS}
     return _norm(text) in variants
+
+# === helper: «пульс» индикатора набора ===
+async def _typing_pulse(chat_id: int):
+    try:
+        while True:
+            await bot.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(4.0)
+    except asyncio.CancelledError:
+        pass
 
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
@@ -1398,7 +1407,8 @@ async def cb_fav_rm(call: CallbackQuery):
         cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
-        await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True, call.from_user.id))
+        # Фикс: после удаления показываем кнопку «добавить», т.е. is_fav=False
+        await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False, call.from_user.id))
 
 @dp.callback_query(F.data.startswith("lang:"))
 async def cb_lang(call: CallbackQuery):
@@ -1525,105 +1535,121 @@ async def smart_router(message: Message):
     if any(is_menu_label(user_text, k) for k in ("menu_find", "menu_gpt", "menu_sub", "menu_settings")):
         return
 
-    await bot.send_chat_action(message.chat.id, "typing")
+    # пульс «печатает…» на время всей обработки
+    pulse = asyncio.create_task(_typing_pulse(message.chat.id))
+    try:
+        # быстрые источники
+        if re.search(r"\b((дай\s+)?ссылк\w*|источник\w*|link)\b", user_text, flags=re.I):
+            last = LAST_RESULTS.get(message.from_user.id) or []
+            premium_users = {123456789}
+            is_premium = message.from_user.id in premium_users
+            if not last:
+                guess = _guess_query_from_link_phrase(user_text) or LAST_QUERY_TEXT.get(message.from_user.id)
+                if guess:
+                    rows, _is_recent = await fetch_tours(guess, hours=168, limit_recent=6, limit_fallback=6)
+                    if rows:
+                        LAST_RESULTS[message.from_user.id] = rows
+                        last = rows
+            if not last:
+                q_hint = LAST_QUERY_TEXT.get(message.from_user.id)
+                hint_txt = f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл." if q_hint else "Не вижу последних карточек."
+                await message.answer(
+                    f"{hint_txt} Нажми «🎒 Найти туры» и выбери вариант — тогда пришлю источник.",
+                    reply_markup=filters_inline_kb()
+                )
+                return
+            shown = 0
+            for trow in last[:3]:
+                src = (trow.get("source_url") or "").strip()
+                if is_premium and src:
+                    text = f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>'
+                    await message.answer(text, disable_web_page_preview=True)
+                else:
+                    ch = (trow.get("source_chat") or "").lstrip("@")
+                    when = localize_dt(trow.get("posted_at"))
+                    label = f"Источник: {escape(ch) or 'тур-канал'}, {when or 'дата неизвестна'}"
+                    hint = " • В Premium покажу прямую ссылку."
+                    await message.answer(f"{label}{hint}")
+                shown += 1
+            if shown == 0:
+                await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
+            return
 
-    if re.search(r"\b((дай\s+)?ссылк\w*|источник\w*|link)\b", user_text, flags=re.I):
-        last = LAST_RESULTS.get(message.from_user.id) or []
+        # погода
+        if re.search(r"\bпогод", user_text, flags=re.I):
+            place = _extract_place_from_weather_query(user_text)
+            await message.answer("Секунду, уточняю погоду…")
+            reply = await get_weather_text(place or "")
+            await message.answer(reply, disable_web_page_preview=True)
+            return
+
+        # короткие смысловые запросы → сразу подбирать туры
+        m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
+        if m_interest or (len(user_text) <= 30):
+            q = m_interest.group(1) if m_interest else user_text
+            queries = _expand_query(q)
+            rows_all: List[dict] = []
+            for qx in queries:
+                rows, _is_recent = await fetch_tours(qx, hours=72, limit_recent=6, limit_fallback=0)
+                rows_all.extend(rows)
+            if not rows_all:
+                rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
+            if rows_all:
+                _remember_query(message.from_user.id, q)
+                header = "Нашёл варианты по запросу: " + escape(q)
+                await message.answer(f"<b>{header}</b>")
+
+                token = _new_token()
+                PAGER_STATE[token] = {
+                    "chat_id": message.chat.id,
+                    "query": q,
+                    "country": None,
+                    "currency_eq": None,
+                    "max_price": None,
+                    "hours": 72,
+                    "order_by_price": False,
+                    "ts": time.monotonic(),
+                }
+
+                await send_batch_cards(
+                    message.chat.id,
+                    message.from_user.id,
+                    rows_all[:6],
+                    token,
+                    len(rows_all[:6])
+                )
+                return
+
+        # чуть длиннее — сначала пробуем актуальные 72ч по фразе
+        if len(user_text) <= 40:
+            rows, is_recent = await fetch_tours(user_text, hours=72)
+            if rows:
+                _remember_query(message.from_user.id, user_text)
+                header = "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
+                await message.answer(f"<b>{header}</b>")
+                token = _new_token()
+                PAGER_STATE[token] = {
+                    "chat_id": message.chat.id,
+                    "query": user_text,
+                    "country": None,
+                    "currency_eq": None,
+                    "max_price": None,
+                    "hours": 72 if is_recent else None,
+                    "order_by_price": False,
+                    "ts": time.monotonic(),
+                }
+                await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
+                return
+
+        # fallback → GPT консультация
+        _remember_query(message.from_user.id, user_text)
         premium_users = {123456789}
         is_premium = message.from_user.id in premium_users
-        if not last:
-            guess = _guess_query_from_link_phrase(user_text) or LAST_QUERY_TEXT.get(message.from_user.id)
-            if guess:
-                rows, _is_recent = await fetch_tours(guess, hours=168, limit_recent=6, limit_fallback=6)
-                if rows:
-                    LAST_RESULTS[message.from_user.id] = rows
-                    last = rows
-        if not last:
-            q_hint = LAST_QUERY_TEXT.get(message.from_user.id)
-            hint_txt = f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл." if q_hint else "Не вижу последних карточек."
-            await message.answer(
-                f"{hint_txt} Нажми «🎒 Найти туры» и выбери вариант — тогда пришлю источник.",
-                reply_markup=filters_inline_kb()
-            )
-            return
-        shown = 0
-        for trow in last[:3]:
-            src = (trow.get("source_url") or "").strip()
-            if is_premium and src:
-                text = f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>'
-                await message.answer(text, disable_web_page_preview=True)
-            else:
-                ch = (trow.get("source_chat") or "").lstrip("@")
-                when = localize_dt(trow.get("posted_at"))
-                label = f"Источник: {escape(ch) or 'тур-канал'}, {when or 'дата неизвестна'}"
-                hint = " • В Premium покажу прямую ссылку."
-                await message.answer(f"{label}{hint}")
-            shown += 1
-        if shown == 0:
-            await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
-        return
-
-    if re.search(r"\bпогод", user_text, flags=re.I):
-        place = _extract_place_from_weather_query(user_text)
-        await message.answer("Секунду, уточняю погоду…")
-        reply = await get_weather_text(place or "")
-        await message.answer(reply, disable_web_page_preview=True)
-        return
-
-    m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
-    if m_interest or (len(user_text) <= 30):
-        q = m_interest.group(1) if m_interest else user_text
-        queries = _expand_query(q)
-        rows_all: List[dict] = []
-        for qx in queries:
-            rows, _is_recent = await fetch_tours(qx, hours=72, limit_recent=6, limit_fallback=0)
-            rows_all.extend(rows)
-        if not rows_all:
-            rows_all, _ = await fetch_tours(user_text, hours=168, limit_recent=0, limit_fallback=6)
-        if rows_all:
-            _remember_query(message.from_user.id, q)
-            header = "Нашёл варианты по запросу: " + escape(q)
-            await message.answer(f"<b>{header}</b>")
-            token = _new_token()
-            PAGER_STATE[token] = {
-                "chat_id": message.chat.id,
-                "query": q,
-                "country": None,
-                "currency_eq": None,
-                "max_price": None,
-                "hours": 72,
-                "order_by_price": False,
-                "ts": time.monotonic(),
-            }
-            await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
-            return
-
-    if len(user_text) <= 40:
-        rows, is_recent = await fetch_tours(user_text, hours=72)
-        if rows:
-            _remember_query(message.from_user.id, user_text)
-            header = "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
-            await message.answer(f"<b>{header}</b>")
-            token = _new_token()
-            PAGER_STATE[token] = {
-                "chat_id": message.chat.id,
-                "query": user_text,
-                "country": None,
-                "currency_eq": None,
-                "max_price": None,
-                "hours": 72 if is_recent else None,
-                "order_by_price": False,
-                "ts": time.monotonic(),
-            }
-            await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
-            return
-
-    _remember_query(message.from_user.id, user_text)
-    premium_users = {123456789}
-    is_premium = message.from_user.id in premium_users
-    replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
-    for part in replies:
-        await message.answer(part, parse_mode=None)
+        replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
+        for part in replies:
+            await message.answer(part, parse_mode=None)
+    finally:
+        pulse.cancel()
 
 # ================= WEBHOOK =================
 @app.get("/")
