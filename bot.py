@@ -1567,21 +1567,18 @@ async def cb_back_filters(call: CallbackQuery):
 async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
 
-@dp.message(F.text)
+# срабатывает ТОЛЬКО если юзер находится в ASK_STATE
+@dp.message(F.text, lambda m: m.from_user.id in ASK_STATE)
 async def on_question_text(message: Message):
-    st = ASK_STATE.get(message.from_user.id)
-    if not st:
-        return  # не в режиме вопроса → пусть обработают другие хэндлеры
-
+    st = ASK_STATE.get(message.from_user.id)  # тут уже гарантированно есть
     txt = (message.text or "").strip()
-    if txt.lower() in {"отмена", "❌ отмена вопроса", "❌ отмена", "❌ отмена вопроса".lower(), "❌ отмена"} or txt.startswith("❌"):
+
+    if txt.lower() in {"отмена", "❌ отмена вопроса"} or txt.startswith("❌"):
         ASK_STATE.pop(message.from_user.id, None)
         await message.answer("Ок, вопрос отменён.", reply_markup=main_kb_for(message.from_user.id))
         return
 
     tour_id = st.get("tour_id")
-
-    # достаём тур из БД
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
@@ -1591,12 +1588,10 @@ async def on_question_text(message: Message):
         await message.answer("Не нашёл карточку тура. Попробуй ещё раз из карточки.", reply_markup=main_kb_for(message.from_user.id))
         return
 
-    # отправляем в админ-группу
     await notify_question_group(t, user=message.from_user, question=txt)
-
-    # отвечаем пользователю
     ASK_STATE.pop(message.from_user.id, None)
-    await message.answer("Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬", reply_markup=main_kb_for(message.from_user.id))
+    await message.answer("Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬",
+                         reply_markup=main_kb_for(message.from_user.id))
 
 # --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
