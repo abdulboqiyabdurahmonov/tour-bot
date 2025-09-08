@@ -1139,37 +1139,6 @@ async def notify_question_group(t: dict, *, user, question: str, answer_key: str
 def _format_q_header(qid: int) -> str:
     return f"❓ <b>Вопрос по туру</b>  [Q#{qid}]"
 
-async def save_question_and_notify(t: dict, *, user, text: str) -> None:
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO questions(user_id, tour_id, question)
-            VALUES (%s, %s, %s)
-            RETURNING id
-        """, (user.id, t.get("id"), text))
-        row = cur.fetchone()
-        qid = row["id"]
-
-    # собираем блок тура, как у тебя
-    tour_block, photo = _compose_tour_block(t)
-    head = f"{_format_q_header(qid)}\n👤 от {escape(_admin_user_label(user))}\n📝 {escape(text)}"
-    msg_text = f"{head}\n\n{tour_block}"
-
-    chat_id = resolve_leads_chat_id()
-    kwargs = {"message_thread_id": LEADS_TOPIC_ID} if LEADS_TOPIC_ID else {}
-    if photo:
-        m = await bot.send_photo(chat_id, photo=photo, caption=msg_text, parse_mode="HTML", **kwargs)
-    else:
-        m = await bot.send_message(chat_id, msg_text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
-
-    # сохраним, куда отправили
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            UPDATE questions
-               SET admin_chat_id=%s, admin_message_id=%s
-             WHERE id=%s
-        """, (chat_id, m.message_id, qid))
-
-# ----- анти-дубль приветствия -----
 _RECENT_GREETING = defaultdict(float)
 def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
     now = time.monotonic()
@@ -1332,24 +1301,9 @@ async def cb_recent(call: CallbackQuery):
     next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, next_offset)
 
-Q_MARK_RE = re.compile(r"\[Q#(\d+)\]")
-
-def _extract_qid_from_msg(msg: Message) -> Optional[int]:
-    text = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "") 
-    m = Q_MARK_RE.search(text)
-    if m:
-        try: return int(m.group(1))
-        except: return None
-    return None
-
-@dp.message(F.reply_to_message)
-async def admin_reply_to_question(message: Message):
-    # динамически сверяем ID группы
-    if message.chat.id != resolve_leads_chat_id():
-        return
-    # если используешь топики — следим, что ответ в той же теме
-    if LEADS_TOPIC_ID and getattr(message, "message_thread_id", None) != LEADS_TOPIC_ID:
-        return
+# ОТКЛЮЧЕНО: старый путь через [Q#id]
+def _admin_reply_to_question_disabled(message: Message):
+    return
 
     answer = (message.text or "").strip()
     if not answer:
