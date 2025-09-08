@@ -1874,32 +1874,41 @@ async def smart_router(message: Message):
     finally:
         pulse.cancel()
 
+# ответ админа вида: "#abc12 Текст ответа" (обязательно РЕПЛАЙ на сообщение бота)
 @dp.message(F.reply_to_message, F.text.regexp(r"#([A-Za-z0-9_\-]{5,})"))
 async def on_admin_group_answer(message: Message):
+    # 1) динамически убеждаемся, что это нужная группа и (если надо) нужная тема
     if message.chat.id != resolve_leads_chat_id():
         return
     if LEADS_TOPIC_ID and getattr(message, "message_thread_id", None) != LEADS_TOPIC_ID:
         return
 
-    m = re.search(r"#([A-Za-z0-9_\-]{5,})", message.text)
+    # 2) достаём ключ
+    m = re.search(r"#([A-Za-z0-9_\-]{5,})", message.text or "")
     if not m:
         return
     key = m.group(1)
 
+    # 3) находим, кому слать
     route = ANSWER_MAP.pop(key, None)
     if not route:
         await message.reply("Ключ ответа не найден или просрочен.")
         return
 
     user_id = route["user_id"]
-    from html import escape
-    text_to_user = re.sub(r"#([A-Za-z0-9_\-]{5,})\s*", "", message.text, count=1).strip() or "—"
-        await bot.send_message(user_id, f"📩 Ответ от менеджера:\n\n{escape(text_to_user)}")
-                )
 
+    # 4) чистим текст от ключа и экранируем под HTML
+    text_to_user = re.sub(r"#([A-Za-z0-9_\-]{5,})\s*", "", message.text, count=1).strip() or "—"
+
+    try:
+        await bot.send_message(
+            user_id,
+            f"📩 Ответ от менеджера:\n\n{escape(text_to_user)}",
+            disable_web_page_preview=True,
+        )
         await message.reply("Отправлено пользователю ✅")
     except Exception as e:
-        logging.error(f"forward answer failed: {e}")
+        logging.error("forward answer failed: %s", e)
         await message.reply("Не смог отправить пользователю.")
 
 # ================= WEBHOOK =================
