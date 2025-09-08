@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-collector.py — надёжный коллектор постов из телеграм-каналов тур-операторов с
-поддержкой редактированных сообщений (MessageEdited).
+collector.py — надёжный коллектор постов из телеграм-каналов тур-операторов
+с поддержкой редактированных сообщений (MessageEdited) и мульти-отельных постов.
 
 Что делает:
 - Читает каналы через Telethon (StringSession пользователя).
 - Парсит «свалочный» текст: отели (n-gram по заглавным), даты (RU/UZ), цену+валюту, питание (board), "включено" (includes).
 - Фильтрует «опасные» гео/топонимы, не путая их с отелями.
-- Пишет в таблицу tours (upsert) + создаёт недостающие колонки (board/includes), индексы и чекпоинты.
+- Пишет в таблицу tours (upsert) и создаёт недостающие колонки/индексы.
 - Чекпоинты по каналам (collect_checkpoints) — обрабатывает только новые сообщения.
 - Батч-апсерты (executemany) + устойчивые ретраи (safe_run/RetryPolicy).
-- ⚡ Новое: ловит edits (events.MessageEdited), перепарсивает и бережно обновляет запись.
+- Ловит edits (events.MessageEdited), перепарсивает и ОБНОВЛЯЕТ набор отелей из поста:
+  — апсертит новые/изменённые,
+  — удаляет устаревшие варианты для того же (source_chat, message_id).
+- Ключ уникальности — stable_key (включает отель), поэтому один пост может давать несколько строк.
 
 ENV (обязательные):
   DATABASE_URL
@@ -70,7 +73,7 @@ def _normalize_channel(s: str) -> str:
     s = (s or "").strip()
     if not s:
         return s
-    s = s.replace("https://t.me/", "@").replace("t.me/", "@")
+    s = s.replace("https://t.me/", "@").replace("http://t.me/", "@").replace("t.me/", "@")
     if not s.startswith("@") and s.isalnum():
         s = "@" + s
     return s
@@ -88,17 +91,25 @@ def get_conn():
 def ensure_schema_and_indexes():
     """Гарантируем всё нужное в БД один раз при запуске."""
     with get_conn() as conn, conn.cursor() as cur:
-        # tours: дополнительные колонки
+        # базовая таблица tours предполагается существующей; добавим недостающие колонки
         cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS board TEXT;")
         cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS includes TEXT;")
-        # уникальность по источнику+сообщению
+        cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS stable_key TEXT;")
+        # индексы/уникальность:
+        # — старый уникальный индекс по (source_chat, message_id) мешает мульти-отельным постам → заменим на неуникальный
+        cur.execute("DROP INDEX IF EXISTS tours_src_msg_uidx;")
         cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS tours_src_msg_uidx
-            ON tours (source_chat, message_id);
+            CREATE INDEX IF NOT EXISTS tours_src_msg_idx
+              ON tours (source_chat, message_id);
+        """)
+        # — уникальность теперь по stable_key
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS tours_stable_key_uidx
+              ON tours (stable_key);
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS tours_posted_at_idx
-            ON tours (posted_at DESC);
+              ON tours (posted_at DESC);
         """)
         # чекпоинты по каналам
         cur.execute("""
@@ -137,7 +148,7 @@ VALUES (
     %(source_url)s, %(posted_at)s, %(message_id)s, %(source_chat)s, %(stable_key)s,
     %(board)s, %(includes)s
 )
-ON CONFLICT (message_id, source_chat) DO UPDATE SET
+ON CONFLICT (stable_key) DO UPDATE SET
     country     = COALESCE(EXCLUDED.country, tours.country),
     city        = COALESCE(EXCLUDED.city, tours.city),
     hotel       = COALESCE(EXCLUDED.hotel, tours.hotel),
@@ -147,7 +158,6 @@ ON CONFLICT (message_id, source_chat) DO UPDATE SET
     description = COALESCE(EXCLUDED.description, tours.description),
     source_url  = COALESCE(EXCLUDED.source_url, tours.source_url),
     posted_at   = COALESCE(EXCLUDED.posted_at, tours.posted_at),
-    stable_key  = COALESCE(EXCLUDED.stable_key, tours.stable_key),
     board       = COALESCE(EXCLUDED.board, tours.board),
     includes    = COALESCE(EXCLUDED.includes, tours.includes);
 """
@@ -170,17 +180,33 @@ def save_tours_bulk(rows: list[dict]):
                 logging.error("❌ Ошибка при сохранении тура (msg_id=%s chat=%s): %s",
                               r.get("message_id"), r.get("source_chat"), ee)
 
-def get_existing_row(source_chat: str, message_id: int) -> Optional[dict]:
+def get_existing_rows(source_chat: str, message_id: int) -> List[dict]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT country, city, hotel, price, currency, dates, description,
-                   source_url, posted_at, message_id, source_chat, stable_key,
-                   board, includes
-            FROM tours
-            WHERE source_chat=%s AND message_id=%s
-            LIMIT 1
+            SELECT *
+              FROM tours
+             WHERE source_chat=%s AND message_id=%s
         """, (source_chat, message_id))
-        return cur.fetchone()
+        return cur.fetchall() or []
+
+def delete_rows_not_in(source_chat: str, message_id: int, keep_stable_keys: List[str]):
+    """Удаляет старые отельные варианты для данного сообщения, которых больше нет в свежем парсе."""
+    if keep_stable_keys:
+        placeholders = ",".join(["%s"] * len(keep_stable_keys))
+        params = [source_chat, message_id, *keep_stable_keys]
+        sql = f"""
+            DELETE FROM tours
+             WHERE source_chat=%s AND message_id=%s
+               AND stable_key NOT IN ({placeholders})
+        """
+    else:
+        params = [source_chat, message_id]
+        sql = """
+            DELETE FROM tours
+             WHERE source_chat=%s AND message_id=%s
+        """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
 
 # ======================= СЛОВАРИ/РЕГЕКС =======================
 WHITELIST_SUFFIXES = [
@@ -539,14 +565,14 @@ async def collect_once(client: TelegramClient):
         last_id = _get_cp(channel)
         max_seen = last_id
 
-        # читаем только новее чекпоинта, в прямом порядке (старые -> новые)
+        # читаем только новее чекпоинта, в прямом порядке (старые → новые)
         async for msg in client.iter_messages(channel, min_id=last_id, reverse=True, limit=FETCH_LIMIT):
             text = (msg.text or "").strip()
             if not text:
                 continue
 
-            # слишком старые посты скипаем
-            if msg.date and msg.date < cutoff:
+            # слишком старые посты — скипаем
+            if msg.date and msg.date.replace(tzinfo=timezone.utc) < cutoff:
                 continue
 
             def _make_rows() -> List[dict]:
@@ -625,31 +651,27 @@ async def _build_channel_maps(client: TelegramClient):
         except Exception as e:
             logging.warning("Не удалось получить entity для %s: %s", ch, e)
 
-def _merge_with_existing_preserve_nulls(new_row: dict) -> dict:
-    """Если новое значение отсутствует, сохраняем старое из БД (бережный апдейт)."""
-    existing = get_existing_row(new_row["source_chat"], new_row["message_id"])
-    if not existing:
-        return new_row
-    merged = {**existing}
+def _merge_preserve(old: dict, new_row: dict) -> dict:
+    """Если новое значение отсутствует — сохраняем старое (бережный апдейт)."""
+    merged = {**old}
     for k in ("country", "city", "hotel", "price", "currency", "dates",
-              "description", "source_url", "posted_at", "stable_key", "board", "includes"):
+              "description", "source_url", "posted_at", "board", "includes"):
         v = new_row.get(k)
         if v is not None and v != "":
             merged[k] = v
-    # поля, которых нет в select, но требуются для апсерта
+    merged["stable_key"] = new_row["stable_key"]
     merged["message_id"] = new_row["message_id"]
     merged["source_chat"] = new_row["source_chat"]
     return merged
 
 async def handle_edit_event(event: events.MessageEdited.Event):
-    """Обработчик редактирования: перепарс и бережный апдейт записи."""
-    chat_id = event.chat_id
-    channel = CH_ID2NAME.get(int(chat_id))
+    """Редактирование: перепарс всего поста — апсерт новых/изменённых + удаление устаревших вариантов."""
+    chat_id = int(event.chat_id)
+    channel = CH_ID2NAME.get(chat_id)
     if not channel:
-        # не наш канал — игнор
         return
 
-    text = (event.text or "").strip()
+    text = (getattr(event, "text", None) or getattr(event.message, "message", "") or "").strip()
     if not text:
         return
 
@@ -668,29 +690,53 @@ async def handle_edit_event(event: events.MessageEdited.Event):
         event.message.date if event.message.date.tzinfo else event.message.date.replace(tzinfo=timezone.utc)
     )
 
-    # выбираем одну запись для апдейта (у нас уникальность по (message_id, source_chat))
-    hotel = hotels[0] if hotels else None
-    row = {
-        **base,
-        "hotel": hotel,
-        "stable_key": build_tour_key(
-            source_chat=base["source_chat"],
-            message_id=base["message_id"],
-            city=base.get("city") or "",
-            hotel=hotel or "",
-            price=(base.get("price"), base.get("currency")) if base.get("price") else None,
-        )
-    }
+    # соберём новые строки (могут быть несколько отелей)
+    new_rows: List[dict] = []
+    for h in (hotels or [None]):
+        if h is None:
+            continue
+        row = {
+            **base,
+            "hotel": h,
+            "stable_key": build_tour_key(
+                source_chat=base["source_chat"],
+                message_id=base["message_id"],
+                city=base.get("city") or "",
+                hotel=h or "",
+                price=(base.get("price"), base.get("currency")) if base.get("price") else None,
+            )
+        }
+        new_rows.append(row)
 
-    # если включён REQUIRE_PRICE и новая правка без цены — не затираем существующую
-    if REQUIRE_PRICE and (row.get("price") is None or row.get("currency") is None):
-        row = _merge_with_existing_preserve_nulls(row)
-    else:
-        # в любом случае применяем «бережный» merge, чтобы пустыми значениями не стирать прежние
-        row = _merge_with_existing_preserve_nulls(row)
+    if not new_rows and not REQUIRE_PRICE:
+        # разрешён режим без цены — сохраним «пустой» отель
+        new_rows = [{
+            **base,
+            "hotel": None,
+            "stable_key": build_tour_key(base["source_chat"], base["message_id"], base.get("city") or "", "", None)
+        }]
 
-    save_tours_bulk([row])
-    logging.info("✏️ Edit обновил %s #%s", channel, event.message.id)
+    if REQUIRE_PRICE:
+        new_rows = [r for r in new_rows if (r.get("price") is not None and r.get("currency") is not None)]
+
+    # бережно объединяем с существующим (на случай, если часть данных в новой версии исчезла)
+    existing = {r["stable_key"]: r for r in get_existing_rows(channel, event.message.id)}
+    merged_rows = []
+    for r in new_rows:
+        if r["stable_key"] in existing:
+            merged_rows.append(_merge_preserve(existing[r["stable_key"]], r))
+        else:
+            merged_rows.append(r)
+
+    # апсертим новые/изменённые
+    if merged_rows:
+        save_tours_bulk(merged_rows)
+
+    # удаляем устаревшие варианты (которых больше нет в посте)
+    keep_keys = [r["stable_key"] for r in merged_rows]
+    delete_rows_not_in(channel, event.message.id, keep_keys)
+
+    logging.info("✏️ Edit синхронизировал %s #%s (вариантов: %d)", channel, event.message.id, len(merged_rows))
 
 # ======================= RUN =======================
 async def run_collector():
