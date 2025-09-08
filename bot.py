@@ -1408,7 +1408,7 @@ async def _typing_pulse(chat_id: int):
 
 
 # ================= ХЕНДЛЕРЫ =================
-@dp.message(Command("start"))
+@dp.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
     uid = message.from_user.id
     if get_config(f"lang_{uid}", None) is None:
@@ -1794,7 +1794,7 @@ async def cb_want(call: CallbackQuery):
     await call.answer()
 
 
-@dp.message(Command("weather"))
+@dp.message(Command("weather"), F.chat.type == "private")
 async def cmd_weather(message: Message):
     ask = (message.text or "").partition(" ")[2].strip()
     place = ask or "Ташкент"
@@ -1803,7 +1803,7 @@ async def cmd_weather(message: Message):
     await message.answer(txt, disable_web_page_preview=True)
 
 
-@dp.message(F.contact)
+@dp.message(F.chat.type == "private", F.contact)
 async def on_contact(message: Message):
     st = WANT_STATE.pop(message.from_user.id, None)
     if not st:
@@ -1867,7 +1867,7 @@ async def cb_back_main(call: CallbackQuery):
 
 
 # срабатывает ТОЛЬКО если юзер находится в ASK_STATE
-@dp.message(F.text, lambda m: m.from_user.id in ASK_STATE)
+@dp.message(F.chat.type == "private", F.text, lambda m: m.from_user.id in ASK_STATE)
 async def on_question_text(message: Message):
     st = ASK_STATE.get(message.from_user.id)
     txt = (message.text or "").strip()
@@ -1923,7 +1923,7 @@ async def on_menu_buttons(message: Message):
 
 
 # --- Смарт-роутер текста
-@dp.message(F.text)
+@dp.message(F.chat.type == "private", F.text)
 async def smart_router(message: Message):
     user_text = (message.text or "").strip()
     if any(is_menu_label(user_text, k) for k in ("menu_find", "menu_gpt", "menu_sub", "menu_settings")):
