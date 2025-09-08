@@ -2086,38 +2086,54 @@ async def smart_router(message: Message):
         pulse.cancel()
 
 
-# ответ админа вида: "#abc12 Текст ответа" (обязательно РЕПЛАЙ на сообщение бота)
-@dp.message(F.reply_to_message, F.text.regexp(r"#([A-Za-z0-9_\-]{5,})"))
+# ---- helpers ----
+def _extract_answer_key_from_message(msg: Message) -> Optional[str]:
+    """Ищем #ключ в самом сообщении и/или в том, на которое ответили (text/caption)."""
+    def _find(s: Optional[str]) -> Optional[str]:
+        if not s:
+            return None
+        m = re.search(r"#([A-Za-z0-9_\-]{5,})", s)
+        return m.group(1) if m else None
+
+    # 1) пытаемся в самом ответе
+    key = _find(getattr(msg, "text", None)) or _find(getattr(msg, "caption", None))
+    if key:
+        return key
+
+    # 2) пробуем в исходном сообщении, на которое сделали reply
+    r = getattr(msg, "reply_to_message", None)
+    if r:
+        return _find(getattr(r, "text", None)) or _find(getattr(r, "caption", None))
+    return None
+
+# ответ админа из группы: ДОЛЖЕН быть reply на сообщение бота (ключ можно не писать)
+@dp.message(F.reply_to_message)
 async def on_admin_group_answer(message: Message):
-    # 1) динамически убеждаемся, что это нужная группа и (если надо) нужная тема
+    # обрабатываем только нужную группу/топик
     if message.chat.id != resolve_leads_chat_id():
         return
     if LEADS_TOPIC_ID and getattr(message, "message_thread_id", None) != LEADS_TOPIC_ID:
         return
 
-    # 2) достаём ключ
-    m = re.search(r"#([A-Za-z0-9_\-]{5,})", message.text or "")
-    if not m:
+    key = _extract_answer_key_from_message(message)
+    if not key:
+        # тихо выходим, чтобы не спамить группу — менеджер ответил не на то сообщение
         return
-    key = m.group(1)
 
-    # 3) находим, кому слать
     route = ANSWER_MAP.pop(key, None)
-    logging.info(
-        "admin_answer chat=%s thread=%s key=%s has_route=%s",
-        message.chat.id,
-        getattr(message, "message_thread_id", None),
-        key,
-        bool(route),
-    )
     if not route:
-        await message.reply("Ключ ответа не найден или просрочен.")
+        await message.reply("Ключ ответа не найден или устарел. Попросите пользователя задать вопрос заново.")
         return
 
     user_id = route["user_id"]
 
-    # 4) чистим текст от ключа и экранируем под HTML
-    text_to_user = re.sub(r"#([A-Za-z0-9_\-]{5,})\s*", "", message.text, count=1).strip() or "—"
+    # сам текст ответа менеджера
+    text_raw = (message.text or message.caption or "").strip()
+    # если вдруг менеджер всё-таки дописал #ключ — уберём его из тела
+    text_to_user = re.sub(r"#([A-Za-z0-9_\-]{5,})\s*", "", text_raw, count=1).strip()
+    if not text_to_user:
+        await message.reply("Пустой ответ не отправлен.")
+        return
 
     try:
         await bot.send_message(
@@ -2129,7 +2145,6 @@ async def on_admin_group_answer(message: Message):
     except Exception as e:
         logging.error("forward answer failed: %s", e)
         await message.reply("Не смог отправить пользователю.")
-
 
 # ================= WEBHOOK =================
 @app.get("/")
