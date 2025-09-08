@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-collector.py — надёжный коллектор постов из телеграм-каналов тур-операторов.
+collector.py — надёжный коллектор постов из телеграм-каналов тур-операторов с
+поддержкой редактированных сообщений (MessageEdited).
 
 Что делает:
 - Читает каналы через Telethon (StringSession пользователя).
 - Парсит «свалочный» текст: отели (n-gram по заглавным), даты (RU/UZ), цену+валюту, питание (board), "включено" (includes).
 - Фильтрует «опасные» гео/топонимы, не путая их с отелями.
 - Пишет в таблицу tours (upsert) + создаёт недостающие колонки (board/includes), индексы и чекпоинты.
-- Работает с чекпоинтом на канал (collect_checkpoints), обрабатывает только новые сообщения.
+- Чекпоинты по каналам (collect_checkpoints) — обрабатывает только новые сообщения.
 - Батч-апсерты (executemany) + устойчивые ретраи (safe_run/RetryPolicy).
+- ⚡ Новое: ловит edits (events.MessageEdited), перепарсивает и бережно обновляет запись.
 
 ENV (обязательные):
   DATABASE_URL
@@ -32,10 +34,10 @@ import re
 import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from telethon.sessions import StringSession
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from psycopg import connect
 from psycopg.rows import dict_row
 
@@ -73,7 +75,11 @@ def _normalize_channel(s: str) -> str:
         s = "@" + s
     return s
 
-CHANNELS: List[str] = [ _normalize_channel(c) for c in CHANNELS_RAW.split(",") if _normalize_channel(c) ]
+CHANNELS: List[str] = [_normalize_channel(c) for c in CHANNELS_RAW.split(",") if _normalize_channel(c)]
+
+# Для корректной обработки edits держим соответствия chat_id <-> '@username'
+CH_ID2NAME: Dict[int, str] = {}
+CH_NAME2ID: Dict[str, int] = {}
 
 # ======================= БД =======================
 def get_conn():
@@ -119,7 +125,7 @@ def _set_cp(chat: str, last_id: int):
                 updated_at=now();
         """, (chat, int(last_id)))
 
-# ======================= UPSERT =======================
+# ======================= UPSERT/SELECT =======================
 SQL_UPSERT_TOUR = """
 INSERT INTO tours(
     country, city, hotel, price, currency, dates, description,
@@ -132,18 +138,18 @@ VALUES (
     %(board)s, %(includes)s
 )
 ON CONFLICT (message_id, source_chat) DO UPDATE SET
-    country     = EXCLUDED.country,
-    city        = EXCLUDED.city,
-    hotel       = EXCLUDED.hotel,
-    price       = EXCLUDED.price,
-    currency    = EXCLUDED.currency,
-    dates       = EXCLUDED.dates,
-    description = EXCLUDED.description,
-    source_url  = EXCLUDED.source_url,
-    posted_at   = EXCLUDED.posted_at,
-    stable_key  = EXCLUDED.stable_key,
-    board       = EXCLUDED.board,
-    includes    = EXCLUDED.includes;
+    country     = COALESCE(EXCLUDED.country, tours.country),
+    city        = COALESCE(EXCLUDED.city, tours.city),
+    hotel       = COALESCE(EXCLUDED.hotel, tours.hotel),
+    price       = COALESCE(EXCLUDED.price, tours.price),
+    currency    = COALESCE(EXCLUDED.currency, tours.currency),
+    dates       = COALESCE(EXCLUDED.dates, tours.dates),
+    description = COALESCE(EXCLUDED.description, tours.description),
+    source_url  = COALESCE(EXCLUDED.source_url, tours.source_url),
+    posted_at   = COALESCE(EXCLUDED.posted_at, tours.posted_at),
+    stable_key  = COALESCE(EXCLUDED.stable_key, tours.stable_key),
+    board       = COALESCE(EXCLUDED.board, tours.board),
+    includes    = COALESCE(EXCLUDED.includes, tours.includes);
 """
 
 def save_tours_bulk(rows: list[dict]):
@@ -163,6 +169,18 @@ def save_tours_bulk(rows: list[dict]):
             except Exception as ee:
                 logging.error("❌ Ошибка при сохранении тура (msg_id=%s chat=%s): %s",
                               r.get("message_id"), r.get("source_chat"), ee)
+
+def get_existing_row(source_chat: str, message_id: int) -> Optional[dict]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT country, city, hotel, price, currency, dates, description,
+                   source_url, posted_at, message_id, source_chat, stable_key,
+                   board, includes
+            FROM tours
+            WHERE source_chat=%s AND message_id=%s
+            LIMIT 1
+        """, (source_chat, message_id))
+        return cur.fetchone()
 
 # ======================= СЛОВАРИ/РЕГЕКС =======================
 WHITELIST_SUFFIXES = [
@@ -400,7 +418,6 @@ def _extract_includes(text: str) -> Optional[str]:
     if re.search(r"\bбагаж|luggage|baggage\b", low):           flags.append("багаж")
     if not flags:
         return None
-    # коротко, чтобы влезало в карточку
     return ", ".join(dict.fromkeys(flags))[:120]
 
 # ======================= ГЕО =======================
@@ -510,7 +527,7 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime
 
     return payload_base, (hotels if hotels else [hotel] if hotel else [])
 
-# ======================= КОЛЛЕКТОР =======================
+# ======================= COLLECT ONCE =======================
 async def collect_once(client: TelegramClient):
     """Один проход по всем каналам с батч-сохранением и фильтрами актуальности."""
     now_utc = datetime.now(timezone.utc)
@@ -533,11 +550,9 @@ async def collect_once(client: TelegramClient):
                 continue
 
             def _make_rows() -> List[dict]:
+                link = f"https://t.me/{channel.lstrip('@')}/{msg.id}"
                 base, hotels = parse_post(
-                    text,
-                    f"https://t.me/{channel.lstrip('@')}/{msg.id}",
-                    msg.id,
-                    channel,
+                    text, link, msg.id, channel,
                     msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc),
                 )
                 rows: List[dict] = []
@@ -595,10 +610,98 @@ async def collect_once(client: TelegramClient):
         else:
             logging.info("⏸ %s без новых сообщений", channel)
 
+# ======================= EDIT HANDLER =======================
+async def _build_channel_maps(client: TelegramClient):
+    """Заполняем CH_ID2NAME/CH_NAME2ID для корректного сопоставления edits."""
+    CH_ID2NAME.clear()
+    CH_NAME2ID.clear()
+    for ch in CHANNELS:
+        try:
+            ent = await client.get_entity(ch)
+            # если публичный канал — берём username, иначе оставим исходное имя из ENV
+            name = f"@{ent.username}" if getattr(ent, "username", None) else ch
+            CH_ID2NAME[int(ent.id)] = name
+            CH_NAME2ID[name] = int(ent.id)
+        except Exception as e:
+            logging.warning("Не удалось получить entity для %s: %s", ch, e)
+
+def _merge_with_existing_preserve_nulls(new_row: dict) -> dict:
+    """Если новое значение отсутствует, сохраняем старое из БД (бережный апдейт)."""
+    existing = get_existing_row(new_row["source_chat"], new_row["message_id"])
+    if not existing:
+        return new_row
+    merged = {**existing}
+    for k in ("country", "city", "hotel", "price", "currency", "dates",
+              "description", "source_url", "posted_at", "stable_key", "board", "includes"):
+        v = new_row.get(k)
+        if v is not None and v != "":
+            merged[k] = v
+    # поля, которых нет в select, но требуются для апсерта
+    merged["message_id"] = new_row["message_id"]
+    merged["source_chat"] = new_row["source_chat"]
+    return merged
+
+async def handle_edit_event(event: events.MessageEdited.Event):
+    """Обработчик редактирования: перепарс и бережный апдейт записи."""
+    chat_id = event.chat_id
+    channel = CH_ID2NAME.get(int(chat_id))
+    if not channel:
+        # не наш канал — игнор
+        return
+
+    text = (event.text or "").strip()
+    if not text:
+        return
+
+    # формируем ссылку (если username есть)
+    try:
+        ent = await event.get_chat()
+        if getattr(ent, "username", None):
+            link = f"https://t.me/{ent.username}/{event.message.id}"
+        else:
+            link = f"https://t.me/{channel.lstrip('@')}/{event.message.id}" if channel.startswith("@") else ""
+    except Exception:
+        link = f"https://t.me/{channel.lstrip('@')}/{event.message.id}" if channel.startswith("@") else ""
+
+    base, hotels = parse_post(
+        text, link, event.message.id, channel,
+        event.message.date if event.message.date.tzinfo else event.message.date.replace(tzinfo=timezone.utc)
+    )
+
+    # выбираем одну запись для апдейта (у нас уникальность по (message_id, source_chat))
+    hotel = hotels[0] if hotels else None
+    row = {
+        **base,
+        "hotel": hotel,
+        "stable_key": build_tour_key(
+            source_chat=base["source_chat"],
+            message_id=base["message_id"],
+            city=base.get("city") or "",
+            hotel=hotel or "",
+            price=(base.get("price"), base.get("currency")) if base.get("price") else None,
+        )
+    }
+
+    # если включён REQUIRE_PRICE и новая правка без цены — не затираем существующую
+    if REQUIRE_PRICE and (row.get("price") is None or row.get("currency") is None):
+        row = _merge_with_existing_preserve_nulls(row)
+    else:
+        # в любом случае применяем «бережный» merge, чтобы пустыми значениями не стирать прежние
+        row = _merge_with_existing_preserve_nulls(row)
+
+    save_tours_bulk([row])
+    logging.info("✏️ Edit обновил %s #%s", channel, event.message.id)
+
+# ======================= RUN =======================
 async def run_collector():
     ensure_schema_and_indexes()
     client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
     await client.start()
+    await _build_channel_maps(client)
+
+    # Подписываемся на edits глобально и фильтруем по нашим каналам внутри.
+    client.add_event_handler(handle_edit_event, events.MessageEdited())
+
     logging.info("✅ Collector запущен. Каналы: %s", ", ".join(CHANNELS))
 
     while True:
