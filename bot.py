@@ -23,19 +23,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
 
-def get_order_safe(order_id: int) -> dict | None:
-    with _pay_db() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM orders WHERE id=%s;", (order_id,))
-        return cur.fetchone()
-
-def fmt_sub_until(user_id: int) -> str:
-    with _pay_db() as conn, conn.cursor() as cur:
-        cur.execute("SELECT current_period_end FROM subscriptions WHERE user_id=%s;", (user_id,))
-        row = cur.fetchone()
-        if not row or not row["current_period_end"]:
-            return "—"
-        return row["current_period_end"].astimezone(TZ).strftime("%d.%m.%Y")
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
@@ -73,12 +60,14 @@ ALIASES = {
     "дубай": ["дубай", "dubai", "dxб"],
     "нячанг": ["нячанг", "nha trang", "nhatrang"],
 }
+
 def _expand_query(q: str) -> list[str]:
     low = q.lower().strip()
     for k, arr in ALIASES.items():
         if low in arr:
             return arr
     return [q]
+
 
 def _should_hint_premium(user_id: int, cooldown_sec: int = 6*3600) -> bool:
     now = time.monotonic()
@@ -88,10 +77,12 @@ def _should_hint_premium(user_id: int, cooldown_sec: int = 6*3600) -> bool:
         return True
     return False
 
+
 def _remember_query(user_id: int, q: str):
     q = (q or "").strip()
     if q:
         LAST_QUERY_TEXT[user_id] = q
+
 
 def _guess_query_from_link_phrase(text: str) -> Optional[str]:
     if not text:
@@ -141,8 +132,11 @@ WANT_STATE: Dict[int, Dict] = {}
 
 # --- Динамическая проверка колонок схемы
 SCHEMA_COLS: set[str] = set()
+
 def _has_cols(*names: str) -> bool:
     return all(n in SCHEMA_COLS for n in names)
+
+
 def _select_tours_clause() -> str:
     base = "id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description"
     extras = []
@@ -191,25 +185,35 @@ TRANSLATIONS = {
         "back": "⬅️ Артқа",
     },
 }
+
+
 def get_user_lang(user_id: int) -> str:
     try:
         val = get_config(f"lang_{user_id}", None)
         return val if val in SUPPORTED_LANGS else "ru"
     except Exception:
         return "ru"
+
+
 def set_user_lang(user_id: int, lang: str):
     if lang not in SUPPORTED_LANGS:
         lang = "ru"
     set_config(f"lang_{user_id}", lang)
+
+
 def t(user_id: int, key: str) -> str:
     lang = get_user_lang(user_id)
     return TRANSLATIONS.get(lang, TRANSLATIONS["ru"]).get(key, TRANSLATIONS["ru"].get(key, key))
+
+
 def lang_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Русский", callback_data="lang:ru")],
         [InlineKeyboardButton(text="O‘zbekcha", callback_data="lang:uz")],
         [InlineKeyboardButton(text="Qaraqalpaqsha", callback_data="lang:kk")],
     ])
+
+
 def main_kb_for(user_id: int) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -225,22 +229,28 @@ dp = Dispatcher()
 app = FastAPI()
 
 # ================= БД =================
+
 def get_conn():
     return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
+
 def ensure_pending_wants_table():
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS pending_wants (
                 user_id BIGINT PRIMARY KEY,
                 tour_id INTEGER NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
-        """)
+            """
+        )
+
 
 def ensure_leads_schema():
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS leads (
                 id BIGSERIAL PRIMARY KEY,
                 full_name TEXT NOT NULL DEFAULT '',
@@ -250,41 +260,84 @@ def ensure_leads_schema():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 user_id BIGINT
             );
-        """)
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT '';")
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone TEXT;")
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tour_id INTEGER;")
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS note TEXT;")
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
-        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS user_id BIGINT;")
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads(created_at);")
-        
+
+
+def ensure_favorites_schema():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id BIGINT NOT NULL,
+                tour_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY(user_id, tour_id)
+            );
+            """
+        )
+
+
+def ensure_questions_schema():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS questions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                tour_id INTEGER,
+                question TEXT NOT NULL,
+                admin_chat_id BIGINT,
+                admin_message_id BIGINT,
+                status TEXT NOT NULL DEFAULT 'open',
+                answer TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                answered_at TIMESTAMPTZ
+            );
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS questions_user_id_idx ON questions(user_id);")
+
 
 # ================== ПРОВЕРКА ЛИДОВ / ПОДПИСКИ ==================
+
 def user_has_leads(user_id: int) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM leads WHERE user_id=%s LIMIT 1;", (user_id,))
         return cur.fetchone() is not None
+
+
 def user_has_subscription(user_id: int) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT val FROM app_config WHERE key=%s;", (f"sub_{user_id}",))
         row = cur.fetchone()
-        return row and row["val"] == "active"
+        return bool(row and row["val"] == "active")
+
+
 def set_subscription(user_id: int, status: str):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO app_config(key, val) VALUES (%s, %s)
             ON CONFLICT(key) DO UPDATE SET val=EXCLUDED.val;
-        """, (f"sub_{user_id}", status))
+            """,
+            (f"sub_{user_id}", status),
+        )
+
 
 def get_pay_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить через Payme", url="https://payme.uz/example-link")],
-        [InlineKeyboardButton(text="💳 Оплатить через Click", url="https://my.click.uz/services/example-link")]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить через Payme", url="https://payme.uz/example-link")],
+            [InlineKeyboardButton(text="💳 Оплатить через Click", url="https://my.click.uz/services/example-link")],
+        ]
+    )
 
 # ============== GOOGLE SHEETS ==============
 _gs_client = None
+
+
 def _get_gs_client():
     global _gs_client
     if _gs_client is not None:
@@ -312,6 +365,7 @@ def _get_gs_client():
         _gs_client = None
         return None
 
+
 def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
     try:
         ws = spreadsheet.worksheet(title)
@@ -323,6 +377,7 @@ def _ensure_ws(spreadsheet, title: str, header: list[str]) -> gspread.Worksheet:
         ws.append_row(header, value_input_option="USER_ENTERED")
     logging.info(f"GS: created worksheet '{title}'")
     return ws
+
 
 def _ensure_header(ws, header: list[str]) -> None:
     try:
@@ -342,6 +397,7 @@ def _ensure_header(ws, header: list[str]) -> None:
         ws.add_cols(need)
     ws.update('1:1', [new])
     logging.info(f"GS: header updated -> {new}")
+
 
 async def load_kb_context(max_rows: int = 60) -> str:
     try:
@@ -369,18 +425,22 @@ async def load_kb_context(max_rows: int = 60) -> str:
         logging.warning(f"KB load failed: {e}")
         return ""
 
+
 async def load_recent_tours_context(max_rows: int = 12, hours: int = 120) -> str:
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT country, city, hotel, COALESCE(board, '') AS board, COALESCE(includes, '') AS includes,
                        price, currency, dates, posted_at
                 FROM tours
                 WHERE posted_at >= %s
                 ORDER BY posted_at DESC
                 LIMIT %s
-            """, (cutoff, max_rows))
+            """,
+                (cutoff, max_rows),
+            )
             rows = cur.fetchall()
         lines = []
         for r in rows:
@@ -390,14 +450,19 @@ async def load_recent_tours_context(max_rows: int = 12, hours: int = 120) -> str
             board = (r.get("board") or "").strip()
             inc = (r.get("includes") or "").strip()
             extra = []
-            if board: extra.append(f"питание: {board}")
-            if inc:   extra.append(f"включено: {inc}")
+            if board:
+                extra.append(f"питание: {board}")
+            if inc:
+                extra.append(f"включено: {inc}")
             extra_txt = f" ({'; '.join(extra)})" if extra else ""
-            lines.append(f"- {r.get('country')} — {r.get('city')}, {hotel}, {price}, даты: {r.get('dates') or '—'}{extra_txt}. {when}")
+            lines.append(
+                f"- {r.get('country')} — {r.get('city')}, {hotel}, {price}, даты: {r.get('dates') or '—'}{extra_txt}. {when}"
+            )
         return "\n".join(lines)
     except Exception as e:
         logging.warning(f"Recent context load failed: {e}")
         return ""
+
 
 def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
     try:
@@ -406,9 +471,21 @@ def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
             return
         sh = gc.open_by_key(SHEETS_SPREADSHEET_ID)
         header = [
-            "created_utc", "lead_id", "username", "full_name", "phone",
-            "country", "city", "hotel", "price", "currency", "dates",
-            "source_url", "posted_local", "board", "includes",
+            "created_utc",
+            "lead_id",
+            "username",
+            "full_name",
+            "phone",
+            "country",
+            "city",
+            "hotel",
+            "price",
+            "currency",
+            "dates",
+            "source_url",
+            "posted_local",
+            "board",
+            "includes",
         ]
         ws = _ensure_ws(sh, WORKSHEET_NAME, header)
         _ensure_header(ws, header)
@@ -419,33 +496,39 @@ def append_lead_to_sheet(lead_id: int, user, phone: str, t: dict):
         hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description")) or "Пакетный тур"
         hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text))
 
-        ws.append_row([
-            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-            int(lead_id),
-            username,
-            full_name,
-            phone,
-            t.get("country") or "",
-            t.get("city") or "",
-            hotel_clean,
-            t.get("price") or "",
-            (t.get("currency") or "").upper(),
-            t.get("dates") or "",
-            t.get("source_url") or "",
-            posted_local,
-            (t.get("board") or ""),
-            (t.get("includes") or ""),
-        ], value_input_option="USER_ENTERED")
+        ws.append_row(
+            [
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                int(lead_id),
+                username,
+                full_name,
+                phone,
+                t.get("country") or "",
+                t.get("city") or "",
+                hotel_clean,
+                t.get("price") or "",
+                (t.get("currency") or "").upper(),
+                t.get("dates") or "",
+                t.get("source_url") or "",
+                posted_local,
+                (t.get("board") or ""),
+                (t.get("includes") or ""),
+            ],
+            value_input_option="USER_ENTERED",
+        )
     except Exception as e:
         logging.error(f"append_lead_to_sheet failed: {e}")
 
+
 # ================= УТИЛИТЫ КОНФИГА =================
+
 def resolve_leads_chat_id() -> int:
     val = get_config("LEADS_CHAT_ID", LEADS_CHAT_ID_ENV)
     try:
         return int(val) if val else 0
     except Exception:
         return 0
+
 
 # ================= КЛАВИАТУРЫ =================
 main_kb = ReplyKeyboardMarkup(
@@ -455,6 +538,8 @@ main_kb = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
+
+
 def filters_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -476,6 +561,8 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="➕ Ещё фильтры скоро", callback_data="noop")],
         ]
     )
+
+
 def more_kb(token: str, next_offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -483,6 +570,8 @@ def more_kb(token: str, next_offset: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t(0, "back"), callback_data="back_filters")],
         ]
     )
+
+
 def want_contact_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📲 Поделиться номером", request_contact=True)]],
@@ -491,9 +580,13 @@ def want_contact_kb() -> ReplyKeyboardMarkup:
         selective=True,
     )
 
+
 # ================= ПАГИНАЦИЯ =================
+
 def _new_token() -> str:
     return secrets.token_urlsafe(6).rstrip("=-_")
+
+
 def _cleanup_pager_state():
     now = time.monotonic()
     to_del = []
@@ -503,12 +596,16 @@ def _cleanup_pager_state():
             to_del.append(k)
     for k in to_del:
         PAGER_STATE.pop(k, None)
+
+
 def _touch_state(token: str):
     st = PAGER_STATE.get(token)
     if st:
         st["ts"] = time.monotonic()
 
+
 # ================= ФОРМАТЫ =================
+
 def fmt_price(price, currency) -> str:
     if price is None:
         return "—"
@@ -524,6 +621,8 @@ def fmt_price(price, currency) -> str:
     elif cur in {"UZS", "СУМ", "СУМ.", "СУМЫ", "СУМОВ", "СУММ", "СУММЫ", "СОМ", "СУМ"}:
         cur = "UZS"
     return escape(f"{p:,} {cur}".replace(",", " "))
+
+
 def safe(s: Optional[str]) -> str:
     return escape(s or "—")
 
@@ -531,22 +630,42 @@ def safe(s: Optional[str]) -> str:
 WEATHER_CACHE: Dict[str, Tuple[float, Dict]] = {}
 WEATHER_TTL = 900
 WMO_RU = {
-    0: "Ясно ☀️", 1: "Преимущественно ясно 🌤", 2: "Переменная облачность ⛅️", 3: "Облачно ☁️",
-    45: "Туман 🌫", 48: "Гололёдный туман 🌫❄️",
-    51: "Морось слабая 🌦", 53: "Морось умеренная 🌦", 55: "Морось сильная 🌧",
-    61: "Дождь слабый 🌦", 63: "Дождь умеренный 🌧", 65: "Дождь сильный 🌧",
-    66: "Ледяной дождь слабый 🌧❄️", 67: "Ледяной дождь сильный 🌧❄️",
-    71: "Снег слабый ❄️", 73: "Снег умеренный ❄️", 75: "Снег сильный ❄️",
+    0: "Ясно ☀️",
+    1: "Преимущественно ясно 🌤",
+    2: "Переменная облачность ⛅️",
+    3: "Облачно ☁️",
+    45: "Туман 🌫",
+    48: "Гололёдный туман 🌫❄️",
+    51: "Морось слабая 🌦",
+    53: "Морось умеренная 🌦",
+    55: "Морось сильная 🌧",
+    61: "Дождь слабый 🌦",
+    63: "Дождь умеренный 🌧",
+    65: "Дождь сильный 🌧",
+    66: "Ледяной дождь слабый 🌧❄️",
+    67: "Ледяной дождь сильный 🌧❄️",
+    71: "Снег слабый ❄️",
+    73: "Снег умеренный ❄️",
+    75: "Снег сильный ❄️",
     77: "Снежная крупа 🌨",
-    80: "Ливни слабые 🌦", 81: "Ливни умеренные 🌧", 82: "Ливни сильные 🌧",
-    85: "Снегопад слабый 🌨", 86: "Снегопад сильный 🌨",
-    95: "Гроза ⛈", 96: "Гроза с градом ⛈🧊", 99: "Сильная гроза с градом ⛈🧊",
+    80: "Ливни слабые 🌦",
+    81: "Ливни умеренные 🌧",
+    82: "Ливни сильные 🌧",
+    85: "Снегопад слабый 🌨",
+    86: "Снегопад сильный 🌨",
+    95: "Гроза ⛈",
+    96: "Гроза с градом ⛈🧊",
+    99: "Сильная гроза с градом ⛈🧊",
 }
+
+
 def _cleanup_weather_cache():
     now = time.time()
     for k, (ts, _) in list(WEATHER_CACHE.items()):
         if now - ts > WEATHER_TTL:
             WEATHER_CACHE.pop(k, None)
+
+
 def _extract_place_from_weather_query(q: str) -> Optional[str]:
     txt = q.strip()
     txt = re.sub(r"(сегодня|сейчас|завтра|пожалуйста|pls|please)", "", txt, flags=re.I)
@@ -560,6 +679,8 @@ def _extract_place_from_weather_query(q: str) -> Optional[str]:
     place = re.sub(r"\b(сегодня|завтра|сейчас)\b", "", place, flags=re.I).strip()
     place = re.sub(r"^остров[аеуы]?\s+", "", place, flags=re.I)
     return place or None
+
+
 async def get_weather_text(place: str) -> str:
     if not place:
         return "Напиши город/место: например, «погода в Стамбуле» или «погода на Бали»."
@@ -572,15 +693,17 @@ async def get_weather_text(place: str) -> str:
         async with httpx.AsyncClient(timeout=10.0) as client:
             geo_r = await client.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": place, "count": 1, "language": "ru"}
+                params={"name": place, "count": 1, "language": "ru"},
             )
             if geo_r.status_code != 200 or not geo_r.json().get("results"):
                 return f"Не нашёл локацию «{escape(place)}». Попробуй иначе (город/остров/страна)."
             g = geo_r.json()["results"][0]
             lat, lon = g["latitude"], g["longitude"]
             label_parts = [g.get("name")]
-            if g.get("admin1"): label_parts.append(g["admin1"])
-            if g.get("country"): label_parts.append(g["country"])
+            if g.get("admin1"):
+                label_parts.append(g["admin1"])
+            if g.get("country"):
+                label_parts.append(g["country"])
             label = ", ".join([p for p in label_parts if p])
 
             params = {
@@ -631,6 +754,7 @@ async def get_weather_text(place: str) -> str:
         logging.warning(f"get_weather_text failed: {e}")
         return "Не удалось получить данные о погоде. Попробуй ещё раз чуть позже."
 
+
 def clean_text_basic(s: Optional[str]) -> str:
     if not s:
         return "—"
@@ -639,15 +763,17 @@ def clean_text_basic(s: Optional[str]) -> str:
     s = re.sub(r'\s{2,}', ' ', s)
     return s.strip()
 
+
 def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
     if not s:
         return s
     return re.sub(
-        r'[\s\u00A0–—-]*(?:от\s*)?\d[\д\s\u00A0.,]*\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€).*$',
+        r'[\s\u00A0–—-]*(?:от\s*)?\d[\d\s\u00A0.,]*\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€).*$',
         '',
         s,
-        flags=re.I
+        flags=re.I,
     ).strip()
+
 
 def normalize_dates_for_display(s: Optional[str]) -> str:
     if not s:
@@ -657,12 +783,19 @@ def normalize_dates_for_display(s: Optional[str]) -> str:
     if not m:
         return escape(s)
     d1, m1, y1, d2, m2, y2 = m.groups()
+
     def _norm(d, mo, y):
-        d = int(d); mo = int(mo); y = int(y)
-        if y < 100: y += 2000 if y < 70 else 1900
-        if mo > 12 and d <= 12: d, mo = mo, d
+        d = int(d)
+        mo = int(mo)
+        y = int(y)
+        if y < 100:
+            y += 2000 if y < 70 else 1900
+        if mo > 12 and d <= 12:
+            d, mo = mo, d
         return f"{d:02d}.{mo:02d}.{y:04d}"
+
     return f"{_norm(d1, m1, y1)}–{_norm(d2, m2, y2)}"
+
 
 def localize_dt(dt: Optional[datetime]) -> str:
     if not isinstance(dt, datetime):
@@ -674,10 +807,27 @@ def localize_dt(dt: Optional[datetime]) -> str:
     except Exception:
         return f"🕒 {dt.strftime('%d.%m.%Y %H:%M')}"
 
+
 CONTACT_STOP_WORDS = (
-    "заброниров", "брониров", "звоните", "тел:", "телефон", "whatsapp", "вацап",
-    "менеджер", "директ", "адрес", "@", "+998", "+7", "+380", "call-центр", "колл-центр"
+    "заброниров",
+    "брониров",
+    "звоните",
+    "тел:",
+    "телефон",
+    "whatsapp",
+    "вацап",
+    "менеджер",
+    "директ",
+    "адрес",
+    "@",
+    "+998",
+    "+7",
+    "+380",
+    "call-центр",
+    "колл-центр",
 )
+
+
 def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
     if not desc:
         return None
@@ -693,51 +843,76 @@ def derive_hotel_from_description(desc: Optional[str]) -> Optional[str]:
         line = re.sub(r"^[\W_]{0,3}", "", line).strip()
         return line[:80]
     return None
+
+
 def extract_meal(text_a: Optional[str], text_b: Optional[str] = None) -> Optional[str]:
     joined = " ".join([t or "" for t in (text_a, text_b)]).lower()
-    if re.search(r"\buai\b|ultra\s*all", joined): return "UAI (ultra)"
-    if re.search(r"\bai\b|all\s*inclusive|всё включено|все включено", joined): return "AI (всё включено)"
-    if re.search(r"\bhb\b|полупанси", joined): return "HB (полупансион)"
-    if re.search(r"\bbb\b|завтра(к|ки)", joined): return "BB (завтраки)"
-    if re.search(r"\bfb\b|полный\s*панс", joined): return "FB (полный)"
+    if re.search(r"\buai\b|ultra\s*all", joined):
+        return "UAI (ultra)"
+    if re.search(r"\bai\b|all\s*inclusive|всё включено|все включено", joined):
+        return "AI (всё включено)"
+    if re.search(r"\bhb\b|полупанси", joined):
+        return "HB (полупансион)"
+    if re.search(r"\bbb\b|завтра(к|ки)", joined):
+        return "BB (завтраки)"
+    if re.search(r"\bfb\b|полный\s*панс", joined):
+        return "FB (полный)"
     return None
 
+
 # ================= ДБ-ХЕЛПЕРЫ =================
+
 def is_favorite(user_id: int, tour_id: int) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM favorites WHERE user_id=%s AND tour_id=%s LIMIT 1;", (user_id, tour_id))
         return cur.fetchone() is not None
+
+
 def set_favorite(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO favorites(user_id, tour_id) VALUES (%s, %s)
             ON CONFLICT (user_id, tour_id) DO NOTHING;
-        """, (user_id, tour_id))
+            """,
+            (user_id, tour_id),
+        )
+
+
 def unset_favorite(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM favorites WHERE user_id=%s AND tour_id=%s;", (user_id, tour_id))
+
+
 def create_lead(tour_id: int, phone: Optional[str], full_name: str, note: Optional[str] = None):
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO leads (full_name, phone, tour_id, note)
                 VALUES (%s, %s, %s, %s)
                 RETURNING id;
-            """, (full_name, phone, tour_id, note))
+                """,
+                (full_name, phone, tour_id, note),
+            )
             row = cur.fetchone()
             return row["id"] if row else None
     except Exception as e:
         logging.error(f"create_lead failed: {e}")
         return None
 
+
 def _tours_has_cols(*cols: str) -> Dict[str, bool]:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT column_name FROM information_schema.columns
             WHERE table_name = 'tours'
-        """)
+            """
+        )
         have = {r["column_name"] for r in cur.fetchall()}
     return {c: (c in have) for c in cols}
+
 
 async def load_recent_context(limit: int = 6) -> str:
     try:
@@ -760,37 +935,52 @@ async def load_recent_context(limit: int = 6) -> str:
         lines = []
         for r in rows:
             price = fmt_price(r.get("price"), r.get("currency")) if r.get("price") is not None else "цена уточняется"
-            hotel = clean_text_basic(strip_trailing_price_from_hotel(r.get("hotel"))) if r.get("hotel") else "пакетный тур"
+            hotel = (
+                clean_text_basic(strip_trailing_price_from_hotel(r.get("hotel"))) if r.get("hotel") else "пакетный тур"
+            )
             parts = [
                 f"{r.get('country') or '—'} — {r.get('city') or '—'}",
                 f"{hotel}",
                 f"{price}",
             ]
-            if r.get("dates"):     parts.append(f"даты: {normalize_dates_for_display(r.get('dates'))}")
-            if r.get("board"):     parts.append(f"питание: {r.get('board')}")
-            if r.get("includes"):  parts.append(f"включено: {r.get('includes')}")
+            if r.get("dates"):
+                parts.append(f"даты: {normalize_dates_for_display(r.get('dates'))}")
+            if r.get("board"):
+                parts.append(f"питание: {r.get('board')}")
+            if r.get("includes"):
+                parts.append(f"включено: {r.get('includes')}")
             lines.append(" • ".join(parts))
         return "\n".join(lines)
     except Exception as e:
         logging.warning(f"Recent context load failed: {e}")
         return ""
 
+
 def set_pending_want(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO pending_wants(user_id, tour_id) VALUES (%s, %s)
             ON CONFLICT (user_id) DO UPDATE SET tour_id = EXCLUDED.tour_id, created_at = now();
-        """, (user_id, tour_id))
+            """,
+            (user_id, tour_id),
+        )
+
+
 def get_pending_want(user_id: int) -> Optional[int]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT tour_id FROM pending_wants WHERE user_id=%s;", (user_id,))
         row = cur.fetchone()
         return row["tour_id"] if row else None
+
+
 def del_pending_want(user_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM pending_wants WHERE user_id=%s;", (user_id,))
 
+
 # ================= ПОИСК ТУРОВ =================
+
 async def fetch_tours(
     query: Optional[str] = None,
     *,
@@ -819,7 +1009,9 @@ async def fetch_tours(
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if max_price is not None else "ORDER BY posted_at DESC"
+        order_clause = (
+            "ORDER BY price ASC NULLS LAST, posted_at DESC" if max_price is not None else "ORDER BY posted_at DESC"
+        )
 
         select_list = _select_tours_clause()
         with get_conn() as conn, conn.cursor() as cur:
@@ -848,6 +1040,7 @@ async def fetch_tours(
     except Exception as e:
         logging.error(f"Ошибка при fetch_tours: {e}")
         return [], False
+
 
 async def fetch_tours_page(
     query: Optional[str] = None,
@@ -889,9 +1082,7 @@ async def fetch_tours_page(
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         order_clause = (
-            "ORDER BY price ASC NULLS LAST, posted_at DESC"
-            if order_by_price
-            else "ORDER BY posted_at DESC"
+            "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
         )
 
         select_list = _select_tours_clause()
@@ -911,8 +1102,26 @@ async def fetch_tours_page(
         logging.error(f"Ошибка fetch_tours_page: {e}")
         return []
 
+
 # ================= GPT =================
 last_gpt_call = defaultdict(float)
+
+
+def get_order_safe(order_id: int) -> dict | None:
+    with _pay_db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM orders WHERE id=%s;", (order_id,))
+        return cur.fetchone()
+
+
+def fmt_sub_until(user_id: int) -> str:
+    with _pay_db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT current_period_end FROM subscriptions WHERE user_id=%s;", (user_id,))
+        row = cur.fetchone()
+        if not row or not row["current_period_end"]:
+            return "—"
+        return row["current_period_end"].astimezone(TZ).strftime("%d.%m.%Y")
+
+
 async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[str]:
     now = time.monotonic()
     if now - last_gpt_call[user_id] < 12.0:
@@ -974,7 +1183,7 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
                     answer += hint
 
                     MAX_LEN = 3800
-                    return [answer[i:i+MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
+                    return [answer[i : i + MAX_LEN] for i in range(0, len(answer), MAX_LEN)]
 
                 if r.status_code in (429, 500, 502, 503, 504):
                     delay = min(20.0, (2 ** attempt) + random.random())
@@ -985,10 +1194,12 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
     except Exception as e:
         logging.exception(f"GPT call failed: {e}")
 
-    return ["⚠️ ИИ сейчас перегружен. Попробуй ещё раз — а пока загляни в «🎒 Найти туры»: там только свежие предложения за последние 72 часа."]
+    return [
+        "⚠️ ИИ сейчас перегружен. Попробуй ещё раз — а пока загляни в «🎒 Найти туры»: там только свежие предложения за последние 72 часа.",
+    ]
+
 
 # ================= КАРТОЧКИ/УВЕДОМЛЕНИЯ =================
-from typing import Optional  # (повторный импорт не критичен)
 
 def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     rows = []
@@ -1003,7 +1214,7 @@ def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> I
 
     fav_btn = InlineKeyboardButton(
         text=("❤️ В избранном" if is_fav else "🤍 В избранное"),
-        callback_data=f"fav:{'rm' if is_fav else 'add'}:{tour['id']}"
+        callback_data=f"fav:{'rm' if is_fav else 'add'}:{tour['id']}",
     )
     want_btn = InlineKeyboardButton(text="📝 Хочу этот тур", callback_data=f"want:{tour['id']}")
 
@@ -1016,10 +1227,13 @@ def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> I
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 def build_card_text(t: dict) -> str:
     price_str = fmt_price(t.get("price"), t.get("currency"))
     hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
-    hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
+    hotel_clean = (
+        clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
+    )
     board = (t.get("board") or "").strip()
     if not board:
         board = extract_meal(t.get("hotel"), t.get("description")) or ""
@@ -1044,11 +1258,13 @@ def build_card_text(t: dict) -> str:
         parts.append(time_str)
     return "\n".join(parts)
 
+
 async def send_tour_card(chat_id: int, user_id: int, tour: dict):
-    fav = is_favorite(user_id, tour["id"])
+    fav = is_favorite(user_id, tour["id"]) 
     kb = tour_inline_kb(tour, fav, user_id)
     caption = build_card_text(tour)
     await bot.send_message(chat_id, caption, reply_markup=kb, disable_web_page_preview=True)
+
 
 async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
     for t in rows:
@@ -1058,6 +1274,7 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     LAST_QUERY_AT[user_id] = time.monotonic()
     await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
 
+
 # ===== Общие хелперы для админ-уведомлений =====
 
 def _admin_user_label(user) -> str:
@@ -1065,10 +1282,13 @@ def _admin_user_label(user) -> str:
         return f"@{user.username}"
     return (f"{(user.first_name or '')} {(user.last_name or '')}".strip() or "Гость")
 
+
 def _compose_tour_block(t: dict) -> tuple[str, str | None]:
     price_str = fmt_price(t.get("price"), t.get("currency"))
     hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
-    hotel_clean = clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
+    hotel_clean = (
+        clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
+    )
     dates_norm = normalize_dates_for_display(t.get("dates"))
     time_str = localize_dt(t.get("posted_at"))
     board = (t.get("board") or "").strip()
@@ -1082,12 +1302,16 @@ def _compose_tour_block(t: dict) -> tuple[str, str | None]:
         f"📅 {dates_norm}",
         time_str or "",
     ]
-    if board:    lines.append(f"🍽 Питание: {escape(board)}")
-    if includes: lines.append(f"✅ Включено: {escape(includes)}")
-    if src:      lines.append(f'🔗 <a href="{escape(src)}">Источник</a>')
+    if board:
+        lines.append(f"🍽 Питание: {escape(board)}")
+    if includes:
+        lines.append(f"✅ Включено: {escape(includes)}")
+    if src:
+        lines.append(f'🔗 <a href="{escape(src)}">Источник</a>')
     text = "\n".join([l for l in lines if l]).strip()
     photo = (t.get("photo_url") or "").strip() or None
     return text, photo
+
 
 async def _send_to_admin_group(text: str, photo: str | None, pin: bool = False):
     chat_id = resolve_leads_chat_id()
@@ -1102,12 +1326,15 @@ async def _send_to_admin_group(text: str, photo: str | None, pin: bool = False):
         short = text if len(text) <= 1000 else (text[:990].rstrip() + "…")
         msg = await bot.send_photo(chat_id, photo=photo, caption=short, parse_mode="HTML", **kwargs)
     else:
-        msg = await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs)
+        msg = await bot.send_message(
+            chat_id, text, parse_mode="HTML", disable_web_page_preview=True, **kwargs
+        )
     if pin:
         try:
             await bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
         except Exception as e:
             logging.warning(f"pin failed: {e}")
+
 
 # ===== Конкретные уведомления =====
 
@@ -1120,6 +1347,7 @@ async def notify_leads_group(t: dict, *, lead_id: int, user, phone: str, pin: bo
         await _send_to_admin_group(text, photo, pin=pin)
     except Exception as e:
         logging.error(f"notify_leads_group failed: {e}")
+
 
 async def notify_question_group(t: dict, *, user, question: str, answer_key: str):
     try:
@@ -1136,10 +1364,14 @@ async def notify_question_group(t: dict, *, user, question: str, answer_key: str
     except Exception as e:
         logging.error(f"notify_question_group failed: {e}")
 
+
 def _format_q_header(qid: int) -> str:
     return f"❓ <b>Вопрос по туру</b>  [Q#{qid}]"
 
+
 _RECENT_GREETING = defaultdict(float)
+
+
 def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
     now = time.monotonic()
     last = _RECENT_GREETING.get(user_id, 0.0)
@@ -1147,16 +1379,23 @@ def _should_greet_once(user_id: int, cooldown: float = 3.0) -> bool:
         _RECENT_GREETING[user_id] = now
         return True
     return False
+
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
 def is_menu_label(text: str, key: str) -> bool:
     variants = {_norm(TRANSLATIONS[lang][key]) for lang in SUPPORTED_LANGS}
     return _norm(text) in variants
 
+
 MENU_KEYS = ("menu_find", "menu_gpt", "menu_sub", "menu_settings")
+
 
 def _is_menu_text(txt: str) -> bool:
     return any(is_menu_label(txt or "", k) for k in MENU_KEYS)
+
 
 # === helper: «пульс» индикатора набора ===
 async def _typing_pulse(chat_id: int):
@@ -1166,6 +1405,7 @@ async def _typing_pulse(chat_id: int):
             await asyncio.sleep(4.0)
     except asyncio.CancelledError:
         pass
+
 
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"))
@@ -1177,15 +1417,18 @@ async def cmd_start(message: Message):
     if not _should_greet_once(uid):
         return
     text = (
-        t(uid, "hello") + "\n\n"
-        f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
-        f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
+        t(uid, "hello")
+        + "\n\n"
+        + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
+        + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
     )
     await message.answer(text, reply_markup=main_kb_for(uid))
+
 
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: Message):
     await message.reply(f"chat_id: {message.chat.id}\nthread_id: {getattr(message, 'message_thread_id', None)}")
+
 
 @dp.message(Command("setleadgroup"))
 async def cmd_setleadgroup(message: Message):
@@ -1199,11 +1442,12 @@ async def cmd_setleadgroup(message: Message):
     new_id = parts[1].strip()
     try:
         int(new_id)
-    except:
+    except Exception:
         await message.reply("Неверный chat_id.")
         return
     set_config("LEADS_CHAT_ID", new_id)
     await message.reply(f"LEADS_CHAT_ID обновлён: {new_id}")
+
 
 @dp.message(Command("leadstest"))
 async def cmd_leadstest(message: Message):
@@ -1220,37 +1464,46 @@ async def cmd_leadstest(message: Message):
     await notify_leads_group(t, lead_id=fake_lead_id, user=message.from_user, phone="+99890XXXXXXX", pin=False)
     await message.reply("Тестовая заявка отправлена в группу.")
 
+
 # Быстрые команды
 async def entry_find_tours(message: Message):
     await message.answer("Выбери быстрый фильтр:", reply_markup=filters_inline_kb())
+
+
 async def entry_gpt(message: Message):
     await message.answer("Спроси что угодно про путешествия (отели, сезоны, визы, бюджеты).")
+
+
 async def entry_sub(message: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="💳 Click (автопродление)", callback_data="sub:click:recurring"),
-            InlineKeyboardButton(text="💳 Payme (автопродление)", callback_data="sub:payme:recurring"),
-        ],
-        [
-            InlineKeyboardButton(text="Разовая оплата через Click", callback_data="sub:click:oneoff"),
-            InlineKeyboardButton(text="Разовая оплата через Payme", callback_data="sub:payme:oneoff"),
-        ],
-        [
-            InlineKeyboardButton(text="ℹ️ Подробнее о тарифах", callback_data="sub:info")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💳 Click (автопродление)", callback_data="sub:click:recurring"),
+                InlineKeyboardButton(text="💳 Payme (автопродление)", callback_data="sub:payme:recurring"),
+            ],
+            [
+                InlineKeyboardButton(text="Разовая оплата через Click", callback_data="sub:click:oneoff"),
+                InlineKeyboardButton(text="Разовая оплата через Payme", callback_data="sub:payme:oneoff"),
+            ],
+            [InlineKeyboardButton(text="ℹ️ Подробнее о тарифах", callback_data="sub:info")],
         ]
-    ])
+    )
     await message.answer(
         "Выбери способ оплаты и тариф (по умолчанию — <b>Basic 49 000 UZS / 30 дней</b>):",
-        reply_markup=kb
+        reply_markup=kb,
     )
+
+
 async def entry_settings(message: Message):
     uid = message.from_user.id
     await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
+
 
 @dp.message(Command("language"))
 @dp.message(Command("settings"))
 async def cmd_language(message: Message):
     await entry_settings(message)
+
 
 @dp.callback_query(F.data.startswith("ask:"))
 async def cb_ask(call: CallbackQuery):
@@ -1265,7 +1518,9 @@ async def cb_ask(call: CallbackQuery):
 
     cancel_kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отмена вопроса")]],
-        resize_keyboard=True, one_time_keyboard=True, selective=True
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        selective=True,
     )
 
     await call.message.answer(
@@ -1274,9 +1529,10 @@ async def cb_ask(call: CallbackQuery):
         "• Уточните даты или питание\n"
         "• Сколько будет на 2 взрослых и ребёнка\n\n"
         "Чтобы отменить — нажми «❌ Отмена вопроса».",
-        reply_markup=cancel_kb
+        reply_markup=cancel_kb,
     )
     await call.answer()
+
 
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
@@ -1301,57 +1557,15 @@ async def cb_recent(call: CallbackQuery):
     next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, next_offset)
 
-# ОТКЛЮЧЕНО: старый путь через [Q#id]
-def _admin_reply_to_question_disabled(message: Message):
-    return
-
-    answer = (message.text or "").strip()
-    if not answer:
-        await message.reply("Пустой ответ не отправлен.")
-        return
-
-    # достаём кому слать
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT user_id, status FROM questions WHERE id=%s;", (qid,))
-        row = cur.fetchone()
-
-    if not row:
-        await message.reply("Не нашёл вопрос в базе.")
-        return
-
-    user_id = row["user_id"]
-
-    try:
-        # отправляем пользователю
-        await bot.send_message(
-            user_id,
-            f"📬 Ответ по вашему вопросу [Q#{qid}]:\n\n{escape(answer)}",
-            disable_web_page_preview=True
-        )
-        # обновляем статус в БД
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-                UPDATE questions
-                   SET status='answered', answer=%s, answered_at=now()
-                 WHERE id=%s
-            """, (answer, qid))
-        await message.reply("✅ Ответ отправлен пользователю.")
-    except Exception as e:
-        logging.warning(f"send answer failed: {e}")
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-                UPDATE questions
-                   SET status='failed', answer=%s, answered_at=now()
-                 WHERE id=%s
-            """, (answer, qid))
-        await message.reply("⚠️ Не удалось доставить (возможно, пользователь закрыл ЛС).")
 
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
     country = call.data.split(":", 1)[1]
     rows, is_recent = await fetch_tours(None, country=country, hours=120, limit_recent=6, limit_fallback=6)
-    header = f"🇺🇳 Страна: {country} — актуальные" if is_recent else f"🇺🇳 Страна: {country} — последние найденные"
+    header = (
+        f"🇺🇳 Страна: {country} — актуальные" if is_recent else f"🇺🇳 Страна: {country} — последние найденные"
+    )
     await call.message.answer(f"<b>{escape(header)}</b>")
 
     token = _new_token()
@@ -1369,6 +1583,7 @@ async def cb_country(call: CallbackQuery):
     _remember_query(call.from_user.id, country)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
 
+
 @dp.callback_query(F.data.startswith("sub:"))
 async def cb_sub(call: CallbackQuery):
     _, provider, kind = call.data.split(":", 2)
@@ -1382,12 +1597,15 @@ async def cb_sub(call: CallbackQuery):
         f"Тариф: <b>Basic</b> (30 дней)\n\n"
         "Нажми, чтобы оплатить. Окно откроется прямо в Telegram."
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть оплату", url=url)],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")]
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть оплату", url=url)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")],
+        ]
+    )
     await call.message.answer(txt, reply_markup=kb)
     await call.answer()
+
 
 @dp.callback_query(F.data == "sub:info")
 async def cb_sub_info(call: CallbackQuery):
@@ -1395,9 +1613,10 @@ async def cb_sub_info(call: CallbackQuery):
         "Тарифы:\n"
         "• Basic — 49 000 UZS/мес: доступ к свежим турам и умным ответам\n"
         "• Pro — 99 000 UZS/мес: приоритет и расширенные источники\n\n"
-        "Оплата через Click/Payme. Автопродление можно отключить в любой момент."
+        "Оплата через Click/Payme. Автопродление можно отключить в любой момент.",
     )
     await call.answer()
+
 
 @dp.callback_query(F.data.startswith("budget:"))
 async def cb_budget(call: CallbackQuery):
@@ -1410,14 +1629,13 @@ async def cb_budget(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
 
     rows, is_recent = await fetch_tours(
-        None,
-        currency_eq=cur,
-        max_price=limit_val,
-        hours=120,
-        limit_recent=6,
-        limit_fallback=6
+        None, currency_eq=cur, max_price=limit_val, hours=120, limit_recent=6, limit_fallback=6
     )
-    hdr = f"💸 Бюджет: ≤ {int(limit_val)} {cur} — актуальные" if is_recent else f"💸 Бюджет: ≤ {int(limit_val)} {cur} — последние найденные"
+    hdr = (
+        f"💸 Бюджет: ≤ {int(limit_val)} {cur} — актуальные"
+        if is_recent
+        else f"💸 Бюджет: ≤ {int(limit_val)} {cur} — последние найденные"
+    )
     await call.message.answer(f"<b>{escape(hdr)}</b>")
 
     token = _new_token()
@@ -1434,6 +1652,7 @@ async def cb_budget(call: CallbackQuery):
 
     _remember_query(call.from_user.id, f"≤ {int(limit_val) if limit_val is not None else ''} {cur}".strip())
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
+
 
 @dp.callback_query(F.data == "sort:price_asc")
 async def cb_sort_price_asc(call: CallbackQuery):
@@ -1455,6 +1674,7 @@ async def cb_sort_price_asc(call: CallbackQuery):
 
     _remember_query(call.from_user.id, "актуальные за 72ч (сорт. по цене)")
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
+
 
 @dp.callback_query(F.data.startswith("more:"))
 async def cb_more(call: CallbackQuery):
@@ -1488,12 +1708,14 @@ async def cb_more(call: CallbackQuery):
     _touch_state(token)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, offset + len(rows))
 
+
 @dp.callback_query(F.data.startswith("fav:add:"))
 async def cb_fav_add(call: CallbackQuery):
     try:
         tour_id = int(call.data.split(":")[2])
     except Exception:
-        await call.answer("Ошибка избранного.", show_alert=False); return
+        await call.answer("Ошибка избранного.", show_alert=False)
+        return
     set_favorite(call.from_user.id, tour_id)
     await call.answer("Добавлено в избранное ❤️", show_alert=False)
     with get_conn() as conn, conn.cursor() as cur:
@@ -1502,20 +1724,23 @@ async def cb_fav_add(call: CallbackQuery):
     if t:
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, True, call.from_user.id))
 
+
 @dp.callback_query(F.data.startswith("fav:rm:"))
 async def cb_fav_rm(call: CallbackQuery):
     try:
         tour_id = int(call.data.split(":")[2])
     except Exception:
-        await call.answer("Ошибка избранного.", show_alert=False); return
+        await call.answer("Ошибка избранного.", show_alert=False)
+        return
     unset_favorite(call.from_user.id, tour_id)
     await call.answer("Убрано из избранного 🤍", show_alert=False)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT {_select_tours_clause()} FROM tours WHERE id=%s;", (tour_id,))
         t = cur.fetchone()
     if t:
-        # Фикс: после удаления показываем кнопку «добавить», т.е. is_fav=False
+        # после удаления показываем кнопку «добавить», т.е. is_fav=False
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False, call.from_user.id))
+
 
 @dp.callback_query(F.data.startswith("lang:"))
 async def cb_lang(call: CallbackQuery):
@@ -1533,11 +1758,13 @@ async def cb_lang(call: CallbackQuery):
         pass
     await call.message.answer(t(uid, "lang_saved"))
     text = (
-        t(uid, "hello") + "\n\n"
-        f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
-        f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
+        t(uid, "hello")
+        + "\n\n"
+        + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
+        + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
     )
     await call.message.answer(text, reply_markup=main_kb_for(uid))
+
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
@@ -1552,7 +1779,7 @@ async def cb_want(call: CallbackQuery):
         await call.message.answer(
             "⚠️ У тебя уже была бесплатная заявка.\n"
             "Для следующих нужно подключить подписку 🔔",
-            reply_markup=get_pay_kb()
+            reply_markup=get_pay_kb(),
         )
         await call.answer()
         return
@@ -1563,11 +1790,9 @@ async def cb_want(call: CallbackQuery):
     except Exception as e:
         logging.warning(f"set_pending_want failed: {e}")
 
-    await call.message.answer(
-        "Окей! Отправь контакт, чтобы менеджер связался 👇",
-        reply_markup=want_contact_kb()
-    )
+    await call.message.answer("Окей! Отправь контакт, чтобы менеджер связался 👇", reply_markup=want_contact_kb())
     await call.answer()
+
 
 @dp.message(Command("weather"))
 async def cmd_weather(message: Message):
@@ -1577,12 +1802,16 @@ async def cmd_weather(message: Message):
     txt = await get_weather_text(place)
     await message.answer(txt, disable_web_page_preview=True)
 
+
 @dp.message(F.contact)
 async def on_contact(message: Message):
     st = WANT_STATE.pop(message.from_user.id, None)
     if not st:
         logging.info(f"Contact came without pending want (user_id={message.from_user.id})")
-        await message.answer("Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».", reply_markup=main_kb_for(message.from_user.id))
+        await message.answer(
+            "Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».",
+            reply_markup=main_kb_for(message.from_user.id),
+        )
         return
 
     phone = message.contact.phone_number
@@ -1591,36 +1820,51 @@ async def on_contact(message: Message):
     full_name = (getattr(message.from_user, "full_name", "") or "").strip()
     if not full_name:
         parts = [(message.from_user.first_name or ""), (message.from_user.last_name or "")]
-        full_name = " ".join(p for p in parts if p).strip() or \
-                    (f"@{message.from_user.username}" if message.from_user.username else "Telegram user")
+        full_name = (
+            " ".join(p for p in parts if p).strip()
+            or (f"@{message.from_user.username}" if message.from_user.username else "Telegram user")
+        )
 
     lead_id = create_lead(tour_id, phone, full_name, note="from contact share")
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"""
+        cur.execute(
+            f"""
             SELECT {_select_tours_clause()}
             FROM tours WHERE id=%s;
-        """, (tour_id,))
+        """,
+            (tour_id,),
+        )
         t = cur.fetchone()
 
     if t and lead_id:
         await notify_leads_group(t, lead_id=lead_id, user=message.from_user, phone=phone, pin=False)
         append_lead_to_sheet(lead_id, message.from_user, phone, t)
-        await message.answer(f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞", reply_markup=main_kb_for(message.from_user.id))
+        await message.answer(
+            f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞",
+            reply_markup=main_kb_for(message.from_user.id),
+        )
     else:
-        await message.answer("Контакт получен, но не удалось создать заявку. Попробуй ещё раз или напиши менеджеру.", reply_markup=main_kb)
+        await message.answer(
+            "Контакт получен, но не удалось создать заявку. Попробуй ещё раз или напиши менеджеру.",
+            reply_markup=main_kb,
+        )
+
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
     await call.answer("Скоро добавим детальные фильтры 🤝", show_alert=False)
 
+
 @dp.callback_query(F.data == "back_filters")
 async def cb_back_filters(call: CallbackQuery):
     await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb())
 
+
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
     await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
+
 
 # срабатывает ТОЛЬКО если юзер находится в ASK_STATE
 @dp.message(F.text, lambda m: m.from_user.id in ASK_STATE)
@@ -1642,7 +1886,7 @@ async def on_question_text(message: Message):
         ASK_STATE.pop(message.from_user.id, None)
         await message.answer(
             "Не нашёл карточку тура. Попробуй ещё раз из карточки.",
-            reply_markup=main_kb_for(message.from_user.id)
+            reply_markup=main_kb_for(message.from_user.id),
         )
         return
 
@@ -1656,21 +1900,27 @@ async def on_question_text(message: Message):
     ASK_STATE.pop(message.from_user.id, None)
     await message.answer(
         "Спасибо! Передал вопрос менеджеру — вернёмся с уточнениями 📬",
-        reply_markup=main_kb_for(message.from_user.id)
+        reply_markup=main_kb_for(message.from_user.id),
     )
+
 
 # --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
 async def on_menu_buttons(message: Message):
     txt = message.text or ""
     if is_menu_label(txt, "menu_find"):
-        await entry_find_tours(message); return
+        await entry_find_tours(message)
+        return
     if is_menu_label(txt, "menu_gpt"):
-        await entry_gpt(message); return
+        await entry_gpt(message)
+        return
     if is_menu_label(txt, "menu_sub"):
-        await entry_sub(message); return
+        await entry_sub(message)
+        return
     if is_menu_label(txt, "menu_settings"):
-        await entry_settings(message); return
+        await entry_settings(message)
+        return
+
 
 # --- Смарт-роутер текста
 @dp.message(F.text)
@@ -1696,10 +1946,14 @@ async def smart_router(message: Message):
                         last = rows
             if not last:
                 q_hint = LAST_QUERY_TEXT.get(message.from_user.id)
-                hint_txt = f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл." if q_hint else "Не вижу последних карточек."
+                hint_txt = (
+                    f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл."
+                    if q_hint
+                    else "Не вижу последних карточек."
+                )
                 await message.answer(
                     f"{hint_txt} Нажми «🎒 Найти туры» и выбери вариант — тогда пришлю источник.",
-                    reply_markup=filters_inline_kb()
+                    reply_markup=filters_inline_kb(),
                 )
                 return
             shown = 0
@@ -1716,7 +1970,9 @@ async def smart_router(message: Message):
                     await message.answer(f"{label}{hint}")
                 shown += 1
             if shown == 0:
-                await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
+                await message.answer(
+                    "Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры."
+                )
             return
 
         # погода
@@ -1728,10 +1984,7 @@ async def smart_router(message: Message):
             return
 
         # ===== интент: "актуальные/свежие/горящие туры" =====
-        m_recent = re.search(
-            r"\b(актуальн\w*|свеж\w*|горящ\w*|последн\w*)\s+(туры|предложени\w*)\b", 
-            user_text, flags=re.I
-        )
+        m_recent = re.search(r"\b(актуальн\w*|свеж\w*|горящ\w*|последн\w*)\s+(туры|предложени\w*)\b", user_text, flags=re.I)
         m_72 = re.search(r"\b(72\s*ч|за\s*72\s*час\w*|за\s*3\s*дн\w*)\b", user_text, flags=re.I)
         m_sort_price = re.search(r"\b(дешевле|дешёвые|по\s*цене|сортировк\w+\s*по\s*цене)\b", user_text, flags=re.I)
 
@@ -1757,7 +2010,7 @@ async def smart_router(message: Message):
 
             await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
             return
-        
+
         # короткие смысловые запросы → сразу подбирать туры
         m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
         if m_interest or (len(user_text) <= 30):
@@ -1794,7 +2047,9 @@ async def smart_router(message: Message):
                     "order_by_price": False,
                     "ts": time.monotonic(),
                 }
-                await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
+                await send_batch_cards(
+                    message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6])
+                )
                 return
 
         # чуть длиннее — сначала пробуем актуальные 72ч по фразе
@@ -1802,7 +2057,9 @@ async def smart_router(message: Message):
             rows, is_recent = await fetch_tours(user_text, hours=72)
             if rows:
                 _remember_query(message.from_user.id, user_text)
-                header = "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
+                header = (
+                    "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
+                )
                 await message.answer(f"<b>{header}</b>")
                 token = _new_token()
                 PAGER_STATE[token] = {
@@ -1828,6 +2085,7 @@ async def smart_router(message: Message):
     finally:
         pulse.cancel()
 
+
 # ответ админа вида: "#abc12 Текст ответа" (обязательно РЕПЛАЙ на сообщение бота)
 @dp.message(F.reply_to_message, F.text.regexp(r"#([A-Za-z0-9_\-]{5,})"))
 async def on_admin_group_answer(message: Message):
@@ -1845,6 +2103,13 @@ async def on_admin_group_answer(message: Message):
 
     # 3) находим, кому слать
     route = ANSWER_MAP.pop(key, None)
+    logging.info(
+        "admin_answer chat=%s thread=%s key=%s has_route=%s",
+        message.chat.id,
+        getattr(message, "message_thread_id", None),
+        key,
+        bool(route),
+    )
     if not route:
         await message.reply("Ключ ответа не найден или просрочен.")
         return
@@ -1865,10 +2130,12 @@ async def on_admin_group_answer(message: Message):
         logging.error("forward answer failed: %s", e)
         await message.reply("Не смог отправить пользователю.")
 
+
 # ================= WEBHOOK =================
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "TripleA Travel Bot is running!"}
+
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
@@ -1881,6 +2148,7 @@ async def webhook(request: Request):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
     return JSONResponse({"status": "ok"})
 
+
 # ================= START/STOP =================
 @app.on_event("startup")
 async def on_startup():
@@ -1892,7 +2160,8 @@ async def on_startup():
     try:
         ensure_pending_wants_table()
         ensure_leads_schema()
-        ensure_questions_schema()   # 👈 вот эта строка
+        ensure_favorites_schema()
+        ensure_questions_schema()
     except Exception as e:
         logging.error(f"Schema ensure failed: {e}")
 
@@ -1911,15 +2180,29 @@ async def on_startup():
             except Exception as e_list:
                 logging.warning(f"GS: cannot list worksheets: {e_list}")
             header = [
-                "created_utc", "lead_id", "username", "full_name", "phone",
-                "country", "city", "hotel", "price", "currency", "dates",
-                "source_url", "posted_local", "board", "includes",
+                "created_utc",
+                "lead_id",
+                "username",
+                "full_name",
+                "phone",
+                "country",
+                "city",
+                "hotel",
+                "price",
+                "currency",
+                "dates",
+                "source_url",
+                "posted_local",
+                "board",
+                "includes",
             ]
             ws = _ensure_ws(sh, os.getenv("WORKSHEET_NAME", "Заявки"), header)
             _ensure_header(ws, header)
             logging.info(f"✅ GS warmup: лист '{ws.title}' готов (rows={ws.row_count}, cols={ws.col_count})")
     except gspread.SpreadsheetNotFound as e:
-        logging.error(f"GS warmup failed: spreadsheet not found by id='{SHEETS_SPREADSHEET_ID}': {e}")
+        logging.error(
+            f"GS warmup failed: spreadsheet not found by id='{SHEETS_SPREADSHEET_ID}': {e}"
+        )
     except gspread.exceptions.APIError as e:
         logging.error(f"GS warmup failed (APIError): {e}")
     except Exception as e:
@@ -1935,13 +2218,17 @@ async def on_startup():
     try:
         with get_conn() as conn, conn.cursor() as cur:
             info = conn.info
-            logging.info(f"🗄 DB DSN: host={info.host} db={info.dbname} user={info.user} port={info.port}")
-            cur.execute("""
+            logging.info(
+                f"🗄 DB DSN: host={info.host} db={info.dbname} user={info.user} port={info.port}"
+            )
+            cur.execute(
+                """
                 SELECT column_name
                 FROM information_schema.columns
                 WHERE table_name = 'tours'
                 ORDER BY ordinal_position
-            """)
+                """
+            )
             cols = [r["column_name"] for r in cur.fetchall()]
             global SCHEMA_COLS
             SCHEMA_COLS = set(cols)
@@ -1955,30 +2242,13 @@ async def on_startup():
     else:
         logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
 
-def ensure_questions_schema():
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS questions (
-                id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                tour_id INTEGER,
-                question TEXT NOT NULL,
-                admin_chat_id BIGINT,
-                admin_message_id BIGINT,
-                status TEXT NOT NULL DEFAULT 'open',
-                answer TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                answered_at TIMESTAMPTZ
-            );
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS questions_user_id_idx ON questions(user_id);")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
 
-from fastapi import Form
 
+# ====== Платёжные колбэки ======
 @app.post("/click/callback")
 async def click_cb(request: Request):
     form = dict(await request.form())
@@ -1988,10 +2258,13 @@ async def click_cb(request: Request):
             activate_after_payment(order_id)
             o = get_order_safe(order_id)
             if o:
-                await bot.send_message(o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}")
+                await bot.send_message(
+                    o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}"
+                )
         except Exception:
             pass
     return JSONResponse({"status": "ok" if ok else "error", "message": msg})
+
 
 @app.post("/payme/callback")
 async def payme_cb(request: Request):
@@ -2002,14 +2275,20 @@ async def payme_cb(request: Request):
             activate_after_payment(order_id)
             o = get_order_safe(order_id)
             if o:
-                await bot.send_message(o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}")
+                await bot.send_message(
+                    o["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o['user_id'])}"
+                )
         except Exception:
             pass
     return JSONResponse({"status": "ok" if ok else "error", "message": msg})
 
+
 @app.get("/pay/success")
 async def pay_success():
-    return JSONResponse({"status": "ok", "html": "<h3>Оплата принята. Можно закрыть окно и вернуться в бота ✨</h3>"})
+    return JSONResponse(
+        {"status": "ok", "html": "<h3>Оплата принята. Можно закрыть окно и вернуться в бота ✨</h3>"}
+    )
+
 
 @app.get("/pay/cancel")
 async def pay_cancel():
