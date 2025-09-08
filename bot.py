@@ -1342,13 +1342,14 @@ def _extract_qid_from_msg(msg: Message) -> Optional[int]:
         except: return None
     return None
 
-@dp.message(F.chat.id == resolve_leads_chat_id(), F.reply_to_message)
+@dp.message(F.reply_to_message)
 async def admin_reply_to_question(message: Message):
-    # берём исходную карточку, на которую ответили
-    src = message.reply_to_message
-    qid = _extract_qid_from_msg(src)
-    if not qid:
-        return  # не наша карточка — игнор
+    # динамически сверяем ID группы
+    if message.chat.id != resolve_leads_chat_id():
+        return
+    # если используешь топики — следим, что ответ в той же теме
+    if LEADS_TOPIC_ID and getattr(message, "message_thread_id", None) != LEADS_TOPIC_ID:
+        return
 
     answer = (message.text or "").strip()
     if not answer:
@@ -1873,9 +1874,10 @@ async def smart_router(message: Message):
     finally:
         pulse.cancel()
 
-@dp.message(F.chat.id == resolve_leads_chat_id(), F.reply_to_message, F.text.regexp(r"#([A-Za-z0-9_\-]{5,})"))
+@dp.message(F.reply_to_message, F.text.regexp(r"#([A-Za-z0-9_\-]{5,})"))
 async def on_admin_group_answer(message: Message):
-    # проверяем тему, если используется forum topic
+    if message.chat.id != resolve_leads_chat_id():
+        return
     if LEADS_TOPIC_ID and getattr(message, "message_thread_id", None) != LEADS_TOPIC_ID:
         return
 
@@ -1890,12 +1892,11 @@ async def on_admin_group_answer(message: Message):
         return
 
     user_id = route["user_id"]
+    from html import escape
     text_to_user = re.sub(r"#([A-Za-z0-9_\-]{5,})\s*", "", message.text, count=1).strip() or "—"
-    try:
-        await bot.send_message(
-            user_id,
-            f"📩 Ответ от менеджера:\n\n{text_to_user}"
-        )
+        await bot.send_message(user_id, f"📩 Ответ от менеджера:\n\n{escape(text_to_user)}")
+                )
+
         await message.reply("Отправлено пользователю ✅")
     except Exception as e:
         logging.error(f"forward answer failed: {e}")
