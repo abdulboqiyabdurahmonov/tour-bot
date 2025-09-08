@@ -1,19 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-collector.py — улучшенная версия с точным извлечением отелей/цен/дат из «свалочного» текста.
+collector.py — надёжный коллектор постов из телеграм-каналов тур-операторов.
 
-Главное:
-- Жёсткий анти-шум по гео: не путаем остров/город/регион с отелем.
-- N‑gram по заглавным словам + суффиксы-«маркеры отелей» + бренд‑хинты.
-- Поддержка списков: "Rixos Premium, Titanic Deluxe, Concorde ..." → несколько отелей.
-- Строгий парсинг дат для RU/UZ (кириллица/латиница) и форматов ("12–19 сент", "12.09–19.09", "с 12 по 19 сент").
-- Аккуратное извлечение цены/валюты, нормализация валют.
-- Батч‑апсерты и фильтры актуальности сохранены.
+Что делает:
+- Читает каналы через Telethon (StringSession пользователя).
+- Парсит «свалочный» текст: отели (n-gram по заглавным), даты (RU/UZ), цену+валюту, питание (board), "включено" (includes).
+- Фильтрует «опасные» гео/топонимы, не путая их с отелями.
+- Пишет в таблицу tours (upsert) + создаёт недостающие колонки (board/includes), индексы и чекпоинты.
+- Работает с чекпоинтом на канал (collect_checkpoints), обрабатывает только новые сообщения.
+- Батч-апсерты (executemany) + устойчивые ретраи (safe_run/RetryPolicy).
 
-Интеграция в существующий бот не требует изменений БД (схема из db_init.py подходит).
+ENV (обязательные):
+  DATABASE_URL
+  TG_API_ID
+  TG_API_HASH
+  TG_SESSION_B64         # StringSession пользователя
+  CHANNELS=@ch1,@ch2     # через запятую (можно t.me/..., можно @...)
+
+ENV (опциональные):
+  FETCH_LIMIT=200
+  MAX_POST_AGE_DAYS=60
+  REQUIRE_PRICE=1        # 0 — сохранять и без цены (не рекомендуется)
+  BATCH_SIZE=50
+  SLEEP_BASE_SEC=900
 """
 
 from __future__ import annotations
+
 import os
 import re
 import logging
@@ -24,47 +37,100 @@ from typing import List, Optional, Tuple
 from telethon.sessions import StringSession
 from telethon import TelegramClient
 from psycopg import connect
+from psycopg.rows import dict_row
 
-# >>> SAN: imports
+# внешние утилиты проекта
 from utils.sanitazer import (
     San, TourDraft, build_tour_key,
     safe_run, RetryPolicy
 )
-# <<< SAN: imports
 
-# ============ ЛОГИ ============
+# ======================= ЛОГИ =======================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# ============ ENV ============
-API_ID = int(os.getenv("TG_API_ID"))
-API_HASH = os.getenv("TG_API_HASH")
-SESSION_B64 = os.getenv("TG_SESSION_B64")
-CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]  # пример: @tour1,@tour2
-DATABASE_URL = os.getenv("DATABASE_URL")
+# ======================= ENV =======================
+API_ID = int(os.getenv("TG_API_ID", "0") or 0)
+API_HASH = os.getenv("TG_API_HASH") or ""
+SESSION_B64 = os.getenv("TG_SESSION_B64") or ""
+DATABASE_URL = os.getenv("DATABASE_URL") or ""
+CHANNELS_RAW = os.getenv("CHANNELS", "")
 
-# >>> SAN: настройки актуальности / нагрузки
-FETCH_LIMIT = int(os.getenv("FETCH_LIMIT", "80"))                 # сколько сообщений на канал за проход
-MAX_POST_AGE_DAYS = int(os.getenv("MAX_POST_AGE_DAYS", "45"))     # игнорировать посты старше N дней
-REQUIRE_PRICE = os.getenv("REQUIRE_PRICE", "1") == "1"            # если True — без цены не сохраняем
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "30"))                   # размер батча для upsert
-SLEEP_BASE = int(os.getenv("SLEEP_BASE_SEC", "900"))              # базовый интервал между проходами
-# <<< SAN: настройки
+FETCH_LIMIT = int(os.getenv("FETCH_LIMIT", "80"))
+MAX_POST_AGE_DAYS = int(os.getenv("MAX_POST_AGE_DAYS", "45"))
+REQUIRE_PRICE = os.getenv("REQUIRE_PRICE", "1") == "1"
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "30"))
+SLEEP_BASE = int(os.getenv("SLEEP_BASE_SEC", "900"))
 
-if not API_ID or not API_HASH or not SESSION_B64 or not CHANNELS:
-    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64 и CHANNELS в .env")
+if not (API_ID and API_HASH and SESSION_B64 and DATABASE_URL and CHANNELS_RAW.strip()):
+    raise ValueError("❌ Проверь TG_API_ID, TG_API_HASH, TG_SESSION_B64, DATABASE_URL и CHANNELS в .env")
 
-# ============ БД ============
+def _normalize_channel(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return s
+    s = s.replace("https://t.me/", "@").replace("t.me/", "@")
+    if not s.startswith("@") and s.isalnum():
+        s = "@" + s
+    return s
+
+CHANNELS: List[str] = [ _normalize_channel(c) for c in CHANNELS_RAW.split(",") if _normalize_channel(c) ]
+
+# ======================= БД =======================
 def get_conn():
-    return connect(DATABASE_URL, autocommit=True)
+    return connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
 
-# >>> SAN: UPSERT (named params) + bulk
+def ensure_schema_and_indexes():
+    """Гарантируем всё нужное в БД один раз при запуске."""
+    with get_conn() as conn, conn.cursor() as cur:
+        # tours: дополнительные колонки
+        cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS board TEXT;")
+        cur.execute("ALTER TABLE IF EXISTS tours ADD COLUMN IF NOT EXISTS includes TEXT;")
+        # уникальность по источнику+сообщению
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS tours_src_msg_uidx
+            ON tours (source_chat, message_id);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS tours_posted_at_idx
+            ON tours (posted_at DESC);
+        """)
+        # чекпоинты по каналам
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS collect_checkpoints (
+                source_chat TEXT PRIMARY KEY,
+                last_msg_id BIGINT NOT NULL DEFAULT 0,
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+        """)
+
+def _get_cp(chat: str) -> int:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT last_msg_id FROM collect_checkpoints WHERE source_chat=%s;", (chat,))
+        row = cur.fetchone()
+        return int(row["last_msg_id"]) if row and row["last_msg_id"] else 0
+
+def _set_cp(chat: str, last_id: int):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO collect_checkpoints(source_chat, last_msg_id)
+            VALUES (%s, %s)
+            ON CONFLICT (source_chat) DO UPDATE SET
+                last_msg_id=EXCLUDED.last_msg_id,
+                updated_at=now();
+        """, (chat, int(last_id)))
+
+# ======================= UPSERT =======================
 SQL_UPSERT_TOUR = """
 INSERT INTO tours(
     country, city, hotel, price, currency, dates, description,
-    source_url, posted_at, message_id, source_chat, stable_key
+    source_url, posted_at, message_id, source_chat, stable_key,
+    board, includes
 )
-VALUES (%(country)s, %(city)s, %(hotel)s, %(price)s, %(currency)s, %(dates)s, %(description)s,
-        %(source_url)s, %(posted_at)s, %(message_id)s, %(source_chat)s, %(stable_key)s)
+VALUES (
+    %(country)s, %(city)s, %(hotel)s, %(price)s, %(currency)s, %(dates)s, %(description)s,
+    %(source_url)s, %(posted_at)s, %(message_id)s, %(source_chat)s, %(stable_key)s,
+    %(board)s, %(includes)s
+)
 ON CONFLICT (message_id, source_chat) DO UPDATE SET
     country     = EXCLUDED.country,
     city        = EXCLUDED.city,
@@ -75,7 +141,9 @@ ON CONFLICT (message_id, source_chat) DO UPDATE SET
     description = EXCLUDED.description,
     source_url  = EXCLUDED.source_url,
     posted_at   = EXCLUDED.posted_at,
-    stable_key  = EXCLUDED.stable_key;
+    stable_key  = EXCLUDED.stable_key,
+    board       = EXCLUDED.board,
+    includes    = EXCLUDED.includes;
 """
 
 def save_tours_bulk(rows: list[dict]):
@@ -85,21 +153,18 @@ def save_tours_bulk(rows: list[dict]):
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.executemany(SQL_UPSERT_TOUR, rows)
-        logging.info(f"💾 Сохранил/обновил батч: {len(rows)} шт.")
+        logging.info("💾 Сохранил/обновил батч: %d шт.", len(rows))
     except Exception as e:
-        # На всякий случай fallback по одному — чтобы не потерять всё из-за одного кривого поста
-        logging.warning(f"⚠️ Bulk upsert failed, fallback to single. Reason: {e}")
+        logging.warning("⚠️ Bulk upsert failed, fallback to single. Reason: %s", e)
         for r in rows:
             try:
                 with get_conn() as conn, conn.cursor() as cur:
                     cur.execute(SQL_UPSERT_TOUR, r)
             except Exception as ee:
-                logging.error(f"❌ Ошибка при сохранении тура (msg={r.get('message_id')}): {ee}")
-# <<< SAN: UPSERT
+                logging.error("❌ Ошибка при сохранении тура (msg_id=%s chat=%s): %s",
+                              r.get("message_id"), r.get("source_chat"), ee)
 
-
-# ============ СЛОВАРИ/РЕГЕКСЫ ДЛЯ ТОЧНОГО ИЗВЛЕЧЕНИЯ ============
-# Суффиксы/маркеры отельных названий (ru/uz/en)
+# ======================= СЛОВАРИ/РЕГЕКС =======================
 WHITELIST_SUFFIXES = [
     # EN
     " hotel", " resort", " inn", " lodge", " suites", " villa", " villas", " bungalow", " bungalows",
@@ -111,7 +176,6 @@ WHITELIST_SUFFIXES = [
     " mehmonxona", " otel", " oteli",
 ]
 
-# Бренды/цепочки — усиливают уверенность
 BRAND_HINTS = [
     "rixos", "titanic", "voyage", "miracle", "concorde", "arcanus", "adam & eve", "maxx royal",
     "barut", "limak", "granada", "akra", "cornelia", "gloria", "susesi",
@@ -119,35 +183,34 @@ BRAND_HINTS = [
     "hilton", "marriott", "sheraton", "radisson", "novotel", "mercure", "fairmont", "four seasons",
 ]
 
-# Токены, которые не должны трактоваться как отели (гео/города/страны/общие слова)
 BLACKLIST_TOKENS = [
-    # Гео-общее
+    # гео-общее
     "island", "atoll", "archipelago", "peninsula", "bay", "gulf", "lagoon",
-    # RU/UZ популярные гео
+    # RU/UZ
     "остров", "атолл", "залив", "лагуна", "полуостров", "курорт", "пляж", "побережье",
     "турция", "египет", "оаэ", "оае", "таиланд", "узбекистан", "малдивы", "малдив", "черногория",
     "анталия", "алания", "бодрум", "кемер", "сиде", "белек", "шарм", "хургада", "дахааб", "марса алам",
-    # EN популярные острова/курорты
+    # EN популярные курорты
     "bali", "phuket", "samui", "lombok", "zanzibar", "goa", "antalya", "alanya", "kemer", "bodrum",
-    # Общие
+    # общее
     "центр", "парк", "аэропорт", "рынок", "молл", "набережная", "downtown", "airport",
 ]
 
-# Небольшой справочник «опасных» однословных гео — выключаем как одиночные отели
 KNOWN_GAZETTEER = {
     "bali", "phuket", "samui", "zanzibar", "goa", "antalya", "alanya", "kemer", "side", "belek",
     "dubai", "sharm", "hurghada", "dahab", "bodrum", "istanbul", "izmir", "batumi",
     "tashkent", "samarkand", "bukhara",
 }
 
-# Паттерны
-PRICE_RE = re.compile(r"(?P<cur>\$|usd|eur|€|сом|сум|uzs|руб|₽|aed|د\.إ)\s*(?P<amt>[\d\s.,]{2,})|(?P<amt2>[\d\s.,]{2,})\s*(?P<cur2>\$|usd|eur|€|сом|сум|uzs|руб|₽|aed)", re.I)
-NIGHTS_RE = re.compile(r"(?P<n>\d{1,2})\s*(ноч[еи]|ni[gh]hts?|kun|gece|gecesi)", re.I)
+PRICE_RE = re.compile(
+    r"(?P<cur>\$|usd|eur|€|сом|сум|uzs|руб|₽|aed|د\.إ)\s*(?P<amt>[\d\s.,]{2,})|"
+    r"(?P<amt2>[\d\s.,]{2,})\s*(?P<cur2>\$|usd|eur|€|сом|сум|uzs|руб|₽|aed)",
+    re.I
+)
 BOARD_RE = re.compile(r"\b(ai|uai|all\s*inclusive|bb|hb|fb|ro|ob|ultra\s*all)\b", re.I)
-DATE_RE = re.compile(r"(\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b|\b\d{1,2}\s*(янв|фев|мар|апр|май|июн|июл|авг|сен|окт|ноя|дек)\w*\b)", re.I)
 SPLIT_RE = re.compile(r"[,/\n•;|]\s*")
 
-# ============ ДАТЫ (RU/UZ) ============
+# ======================= ДАТЫ (RU/UZ) =======================
 MONTHS_MAP = {
     # RU краткие
     "янв": "01", "фев": "02", "мар": "03", "апр": "04", "май": "05", "мая": "05",
@@ -173,10 +236,8 @@ def _norm_year(y: Optional[str]) -> int:
         y += 2000 if y < 70 else 1900
     return y
 
-
 def _mk_date(d, m, y) -> str:
     return f"{int(d):02d}.{int(m):02d}.{_norm_year(y):04d}"
-
 
 def _month_to_mm(token: Optional[str]) -> Optional[str]:
     if not token:
@@ -187,9 +248,8 @@ def _month_to_mm(token: Optional[str]) -> Optional[str]:
             return mm
     return None
 
-
 def parse_dates_strict(text: str) -> Optional[str]:
-    """Поддержка: "12–19 сент", "12.09–19.09", "с 12 по 19 сент", одиночные даты."""
+    """Поддержка: '12–19 сент', '12.09–19.09', 'с 12 по 19 сент', одиночные даты."""
     t = text.strip()
     m = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s?[–\-]\s?(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", t)
     if m:
@@ -227,8 +287,7 @@ def parse_dates_strict(text: str) -> Optional[str]:
 
     return None
 
-# ============ ХЕЛПЕРЫ ============
-
+# ======================= ПАРС ХЕЛПЕРЫ =======================
 def _amount_to_float(s: Optional[str]) -> Optional[float]:
     if not s:
         return None
@@ -242,11 +301,9 @@ def _amount_to_float(s: Optional[str]) -> Optional[float]:
     except Exception:
         return None
 
-
 def _is_blacklisted(token: str) -> bool:
     t = token.lower()
     return t in KNOWN_GAZETTEER or any(t == b or t.endswith(b) or b in t for b in BLACKLIST_TOKENS)
-
 
 def _score_hotel_candidate(text: str) -> float:
     """Скоринг: маркер-суффикс, бренд-хинты, заглавные буквы, штраф за blacklist."""
@@ -267,9 +324,8 @@ def _score_hotel_candidate(text: str) -> float:
         score -= 0.6
     return max(0.0, min(1.0, score))
 
-
 def _enum_ngrams(line: str, max_len: int = 5) -> List[str]:
-    """N‑gram по заглавным словам: 'Rixos Premium Belek', 'Gloria Serenity Resort' и т.п."""
+    """N-gram по заглавным словам: 'Rixos Premium Belek', 'Gloria Serenity Resort' и т.п."""
     tokens = re.findall(r"[\w'&.-]+", line)
     caps = [(tok, i) for i, tok in enumerate(tokens) if tok[:1].isupper() or tok.isupper()]
     spans = []
@@ -278,12 +334,10 @@ def _enum_ngrams(line: str, max_len: int = 5) -> List[str]:
             spans.append(" ".join(tokens[i:j]))
     return spans
 
-
 def _split_candidates(raw: str) -> List[str]:
     parts = SPLIT_RE.split(raw)
     clean = [re.sub(r"\(.*?\)|\[.*?\]", "", p).strip() for p in parts]
     return [c for c in clean if c]
-
 
 def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
     if not s:
@@ -292,7 +346,6 @@ def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
         r'[\s–-]*(?:от\s*)?\d[\d\s.,]*\s*(?:USD|EUR|UZS|RUB|\$|€)\b.*$',
         '', s, flags=re.I
     ).strip()
-
 
 def _extract_prices(text: str) -> Tuple[Optional[float], Optional[str]]:
     for m in PRICE_RE.finditer(text):
@@ -308,18 +361,49 @@ def _extract_prices(text: str) -> Tuple[Optional[float], Optional[str]]:
                 cu = "EUR"
             elif cu in {"UZS", "СУМ", "СУМЫ", "СУМ."}:
                 cu = "UZS"
-            elif cu in {"РУБ", "РУБ."}:
+            elif cu in {"RUB", "РУБ", "РУБ."}:
                 cu = "RUB"
-            return val, (cu or None)
+            elif cu == "AED":
+                cu = "AED"
+            return val, cu
     return None, None
-
 
 def _extract_board(text: str) -> Optional[str]:
     m = BOARD_RE.search(text)
-    return m.group(0).upper().replace(" ", "") if m else None
+    if not m:
+        return None
+    token = m.group(0).lower().replace(" ", "")
+    if token in {"ai", "allinclusive"}:
+        return "AI"
+    if token in {"uai", "ultraall"}:
+        return "UAI"
+    if token == "bb":
+        return "BB"
+    if token == "hb":
+        return "HB"
+    if token == "fb":
+        return "FB"
+    if token in {"ro", "ob"}:
+        return token.upper()
+    return token.upper()
 
+def _extract_includes(text: str) -> Optional[str]:
+    """Простая агрегация того, что часто пишут как «включено»."""
+    low = text.lower()
+    flags = []
+    if re.search(r"\bперел[её]т|авиа\b|flight|air", low):       flags.append("перелёт")
+    if re.search(r"\bтрансфер|transfer\b", low):               flags.append("трансфер")
+    if re.search(r"\bстраховк|insurance\b", low):              flags.append("страховка")
+    if re.search(r"\bвиза|visa\b", low):                       flags.append("виза")
+    if re.search(r"\bэкскурс(ия|ии)|excursion\b", low):        flags.append("экскурсии")
+    if re.search(r"\bналоги|tax(es)?\b", low):                 flags.append("налоги")
+    if re.search(r"\bбагаж|luggage|baggage\b", low):           flags.append("багаж")
+    if not flags:
+        return None
+    # коротко, чтобы влезало в карточку
+    return ", ".join(dict.fromkeys(flags))[:120]
 
-# ============ ГЕО/СТРАНА ============
+# ======================= ГЕО =======================
 CITY2COUNTRY = {
     "Нячанг": "Вьетнам", "Анталья": "Турция", "Пхукет": "Таиланд",
     "Паттайя": "Таиланд", "Самуи": "Таиланд", "Краби": "Таиланд",
@@ -327,19 +411,14 @@ CITY2COUNTRY = {
     "Тбилиси": "Грузия", "Шарм": "Египет", "Хургада": "Египет",
 }
 
-
 def guess_country(city: Optional[str]) -> Optional[str]:
     if not city:
         return None
     return CITY2COUNTRY.get(city)
 
-
-# ============ ПАРСИНГ ПОСТА ============
-
+# ======================= ПАРС ПОСТА =======================
 def _extract_hotels(cleaned: str) -> List[str]:
-    """Достаём список вероятных отелей из неструктурированного текста.
-    Алгоритм: режем по списковым разделителям → n‑gram по заглавным → скорим → фильтруем.
-    """
+    """Достаём список вероятных отелей из неструктурированного текста."""
     hotels: List[str] = []
     for block in SPLIT_RE.split(cleaned):
         block = block.strip()
@@ -360,6 +439,7 @@ def _extract_hotels(cleaned: str) -> List[str]:
             toks = re.findall(r"[\w'-]+", top.lower())
             if not any(tok in KNOWN_GAZETTEER for tok in toks):
                 hotels.append(top)
+    # уникализация
     seen = set()
     uniq: List[str] = []
     for h in hotels:
@@ -369,55 +449,49 @@ def _extract_hotels(cleaned: str) -> List[str]:
             uniq.append(h)
     return uniq[:5]
 
-
-def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: "datetime"):
+def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: datetime):
     """Разбор поста (без картинок), устойчивый к мусору и форматам."""
     raw = text or ""
     cleaned = San.clean_text(raw)
     draft = TourDraft.from_raw(cleaned)
 
-    # Город (эвристика)
+    # город (эвристика)
     city_match = re.search(r"(Бали|Дубай|Нячанг|Анталья|Пхукет|Паттайя|Краби|Тбилиси|Шарм|Хургада)", cleaned, re.I)
     city = city_match.group(1) if city_match else (draft.city if getattr(draft, 'city', None) else None)
     if not city:
         m = re.search(r"\b([А-ЯЁ][а-яё]+)\b", cleaned)
         city = m.group(1) if m else None
 
-    # Отели (мульти-извлечение)
+    # отели (мульти-извлечение)
     hotels = _extract_hotels(cleaned)
     hotel = hotels[0] if hotels else (strip_trailing_price_from_hotel(draft.hotel) if draft.hotel else None)
 
-    # Даты: строгий разбор RU/UZ
+    # даты
     dates = parse_dates_strict(cleaned) or draft.dates
 
-    # Цена/валюта: сначала из draft, иначе fallback
+    # цена/валюта
     price, currency = draft.price, draft.currency
     if price is None or currency is None:
         price, currency = _extract_prices(cleaned)
 
-    # Валюта — нормализация, если пустая, пробуем по контексту
     if currency:
         cu = str(currency).strip().upper()
-        if cu in {"$", "US$", "USD$"}:
-            currency = "USD"
-        elif cu in {"€", "EUR€"}:
-            currency = "EUR"
-        elif cu in {"UZS", "СУМ", "СУМЫ", "СУМ."}:
-            currency = "UZS"
-        elif cu in {"RUB", "РУБ", "РУБ."}:
-            currency = "RUB"
-        else:
-            currency = cu
+        if cu in {"$", "US$", "USD$"}:   currency = "USD"
+        elif cu in {"€", "EUR€"}:        currency = "EUR"
+        elif cu in {"UZS", "СУМ", "СУМЫ", "СУМ."}: currency = "UZS"
+        elif cu in {"RUB", "РУБ", "РУБ."}:          currency = "RUB"
+        elif cu == "AED":                 currency = "AED"
+        else:                             currency = cu
     else:
         low = cleaned.lower()
-        if "сум" in low or "uzs" in low:
-            currency = "UZS"
-        elif "eur" in low or "€" in low:
-            currency = "EUR"
-        elif "usd" in low or "$" in low:
-            currency = "USD"
+        if "сум" in low or "uzs" in low:  currency = "UZS"
+        elif "eur" in low or "€" in low:  currency = "EUR"
+        elif "usd" in low or "$" in low:  currency = "USD"
+        elif "aed" in low:                currency = "AED"
 
-    # Стабильный ключ (уточним позже для каждого отеля)
+    board = _extract_board(cleaned)
+    includes = _extract_includes(cleaned)
+
     payload_base = {
         "country": guess_country(city) if city else None,
         "city": city,
@@ -426,48 +500,51 @@ def parse_post(text: str, link: str, msg_id: int, chat: str, posted_at: "datetim
         "dates": dates,
         "description": cleaned[:500],
         "source_url": link,
-        "posted_at": posted_at.replace(tzinfo=None),
+        # TIMESTAMPTZ: Telethon даёт aware-время; нормализуем к UTC
+        "posted_at": posted_at.astimezone(timezone.utc),
         "message_id": msg_id,
         "source_chat": chat,
+        "board": board,
+        "includes": includes,
     }
 
     return payload_base, (hotels if hotels else [hotel] if hotel else [])
 
-
-# ============ КОЛЛЕКТОР ============
+# ======================= КОЛЛЕКТОР =======================
 async def collect_once(client: TelegramClient):
     """Один проход по всем каналам с батч-сохранением и фильтрами актуальности."""
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=MAX_POST_AGE_DAYS)
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(days=MAX_POST_AGE_DAYS)
 
     for channel in CHANNELS:
-        logging.info(f"📥 Читаю канал: {channel}")
+        logging.info("📥 Канал: %s", channel)
         batch: list[dict] = []
+        last_id = _get_cp(channel)
+        max_seen = last_id
 
-        async for msg in client.iter_messages(channel, limit=FETCH_LIMIT):
-            if not msg.text:
+        # читаем только новее чекпоинта, в прямом порядке (старые -> новые)
+        async for msg in client.iter_messages(channel, min_id=last_id, reverse=True, limit=FETCH_LIMIT):
+            text = (msg.text or "").strip()
+            if not text:
                 continue
 
-            # игнорируем слишком старые посты
-            if msg.date and msg.date.replace(tzinfo=None) < cutoff.replace(tzinfo=None):
+            # слишком старые посты скипаем
+            if msg.date and msg.date < cutoff:
                 continue
 
             def _make_rows() -> List[dict]:
                 base, hotels = parse_post(
-                    msg.text,
-                    f"https://t.me/{channel.strip('@')}/{msg.id}",
+                    text,
+                    f"https://t.me/{channel.lstrip('@')}/{msg.id}",
                     msg.id,
                     channel,
-                    msg.date
+                    msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc),
                 )
                 rows: List[dict] = []
                 for h in hotels:
                     if not h:
                         continue
-                    row = {
-                        **base,
-                        "hotel": h,
-                    }
+                    row = {**base, "hotel": h}
                     row["stable_key"] = build_tour_key(
                         source_chat=base["source_chat"],
                         message_id=base["message_id"],
@@ -476,8 +553,15 @@ async def collect_once(client: TelegramClient):
                         price=(base.get("price"), base.get("currency")) if base.get("price") else None,
                     )
                     rows.append(row)
+                # если отель не определился и разрешено без цены — сохраним пустой hotel
                 if not rows and not REQUIRE_PRICE:
-                    rows.append({**base, "hotel": None, "stable_key": build_tour_key(base["source_chat"], base["message_id"], base.get("city") or "", "", None)})
+                    rows.append({
+                        **base,
+                        "hotel": None,
+                        "stable_key": build_tour_key(
+                            base["source_chat"], base["message_id"], base.get("city") or "", "", None
+                        )
+                    })
                 return rows
 
             rows = _make_rows()
@@ -486,29 +570,43 @@ async def collect_once(client: TelegramClient):
 
             if rows:
                 batch.extend(rows)
+                if msg.id and msg.id > max_seen:
+                    max_seen = msg.id
 
             # батч-сброс
             if len(batch) >= BATCH_SIZE:
-                await safe_run(lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
-                               RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0))
+                await safe_run(
+                    lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
+                    RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0)
+                )
                 batch.clear()
 
-        # остатки батча после канала
+        # остаток батча по каналу
         if batch:
-            await safe_run(lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
-                           RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0))
+            await safe_run(
+                lambda: asyncio.to_thread(save_tours_bulk, batch.copy()),
+                RetryPolicy(attempts=4, base_delay=0.25, max_delay=2.0)
+            )
             batch.clear()
 
+        if max_seen > last_id:
+            _set_cp(channel, max_seen)
+            logging.info("⏩ %s чекпоинт обновлён: %s → %s", channel, last_id, max_seen)
+        else:
+            logging.info("⏸ %s без новых сообщений", channel)
+
 async def run_collector():
+    ensure_schema_and_indexes()
     client = TelegramClient(StringSession(SESSION_B64), API_ID, API_HASH)
     await client.start()
-    logging.info("✅ Collector запущен")
+    logging.info("✅ Collector запущен. Каналы: %s", ", ".join(CHANNELS))
+
     while True:
         try:
             await collect_once(client)
         except Exception as e:
-            logging.error(f"❌ Ошибка в коллекторе: {e}")
-        # лёгкий джиттер, чтобы не попадать в ровные минуты и разойтись с другими процессами
+            logging.error("❌ Ошибка в коллекторе: %s", e)
+        # лёгкий джиттер, чтобы не совпадать с другими процессами по минутам
         await asyncio.sleep(SLEEP_BASE + int(10 * (os.getpid() % 3)))
 
 if __name__ == "__main__":
