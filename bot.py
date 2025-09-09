@@ -19,7 +19,7 @@ import secrets
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
 
@@ -110,6 +110,10 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 LEADS_CHAT_ID_ENV = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
+# --- Payme Merchant API (JSON-RPC) настройки ---
+PAYME_MERCHANT_XAUTH = os.getenv("PAYME_MERCHANT_XAUTH", "")  # секрет для заголовка X-Auth
+FISCAL_IKPU = os.getenv("FISCAL_IKPU", "00702001001000001")   # твой ИКПУ (можно тестовый)
+FISCAL_VAT_PERCENT = int(os.getenv("FISCAL_VAT_PERCENT", "12"))
 
 # Google Sheets ENV
 SHEETS_CREDENTIALS_B64 = (os.getenv("SHEETS_CREDENTIALS_B64") or "").strip()
@@ -2262,6 +2266,164 @@ async def on_startup():
 async def on_shutdown():
     await bot.session.close()
 
+# ================= PAYME MERCHANT API (JSON-RPC) =================
+# Эндпоинт, который Payme будет дергать из своей стороны.
+# Мы проверяем заказ, сумму, и отмечаем транзакции в нашей таблице orders.
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+def _rpc_ok(rpc_id, result: dict):
+    return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
+
+def _rpc_err(rpc_id, code: int, ru: str):
+    # Коды и структура ошибок по спецификации Payme
+    return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": {"ru": ru}}}
+
+def _order_amount_tiyin(o: dict) -> int | None:
+    """Берём сумму заказа в тийинах: amount|total|price (если суми — умножим на 100)."""
+    val = o.get("amount") or o.get("total") or o.get("price")
+    if val is None:
+        return None
+    try:
+        v = int(val)
+        return v if v > 10_000 else v * 100  # если число похоже на суми — переведём в тийины
+    except Exception:
+        try:
+            return int(float(val) * 100)
+        except Exception:
+            return None
+
+@app.post("/payme/merchant")
+async def payme_merchant(request: Request, x_auth: str = Header(default="")):
+    # 0) Простейшая аутентификация по заголовку
+    if not PAYME_MERCHANT_XAUTH or x_auth != PAYME_MERCHANT_XAUTH:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    body = await request.json()
+    rpc_id = body.get("id")
+    method = body.get("method")
+    params = body.get("params") or {}
+
+    account = params.get("account") or {}
+    order_id = account.get("order_id")
+    payme_tr = params.get("id")        # id транзакции в Payme (строка)
+    amount_in = params.get("amount")   # сумма (тийины, int)
+
+    # наш заказ
+    try:
+        o = get_order_safe(int(order_id)) if order_id is not None else None
+    except Exception:
+        o = None
+
+    # === CheckPerformTransaction ===
+    if method == "CheckPerformTransaction":
+        if not o:
+            return _rpc_err(rpc_id, -31050, "Заказ не найден")
+        amt = _order_amount_tiyin(o)
+        if amt is not None and amount_in is not None and int(amount_in) != int(amt):
+            return _rpc_err(rpc_id, -31001, "Сумма не совпадает")
+
+        # фискализация через detail (минимальный пример с одной позицией)
+        detail = {
+            "receipt_type": 0,
+            "items": [{
+                "title": f"Подписка {o.get('plan_code', 'TripleA')}",
+                "price": int(amount_in or (amt or 0)),
+                "count": 1,
+                "code": FISCAL_IKPU,
+                "vat_percent": FISCAL_VAT_PERCENT,
+            }]
+        }
+        return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
+
+    # === CreateTransaction ===
+    if method == "CreateTransaction":
+        if not o:
+            return _rpc_err(rpc_id, -31050, "Заказ не найден")
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
+                    (str(payme_tr), "created", int(order_id)),
+                )
+        except Exception:
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+        return _rpc_ok(rpc_id, {
+            "create_time": _now_ms(),
+            "transaction": str(payme_tr),
+            "state": 1
+        })
+
+    # === PerformTransaction ===
+    if method == "PerformTransaction":
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute("SELECT * FROM orders WHERE provider_trx_id=%s LIMIT 1;", (str(payme_tr),))
+                row = cur.fetchone()
+                if not row:
+                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+                cur.execute("UPDATE orders SET status=%s WHERE id=%s", ("paid", row["id"]))
+                # активируем подписку и уведомим пользователя
+                try:
+                    activate_after_payment(row["id"])
+                    o2 = get_order_safe(row["id"])
+                    if o2:
+                        await bot.send_message(
+                            o2["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o2['user_id'])}"
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (perform)")
+        return _rpc_ok(rpc_id, {
+            "perform_time": _now_ms(),
+            "transaction": str(payme_tr),
+            "state": 2
+        })
+
+    # === CancelTransaction ===
+    if method == "CancelTransaction":
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE orders SET status=%s WHERE provider_trx_id=%s", ("canceled", str(payme_tr)))
+        except Exception:
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
+        return _rpc_ok(rpc_id, {
+            "cancel_time": _now_ms(),
+            "transaction": str(payme_tr),
+            "state": -1
+        })
+
+    # === CheckTransaction ===
+    if method == "CheckTransaction":
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute("SELECT status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (str(payme_tr),))
+                row = cur.fetchone()
+            if not row:
+                return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+            st = {"new": 0, "created": 1, "paid": 2, "canceled": -1}.get(row["status"], 0)
+            return _rpc_ok(rpc_id, {
+                "create_time": 0, "perform_time": 0, "cancel_time": 0,
+                "transaction": str(payme_tr), "state": st
+            })
+        except Exception:
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (check)")
+
+    return _rpc_err(rpc_id, -32601, f"Метод {method} не поддерживается")
+
+
+# (опционально) Шорткат, чтобы быстро создать тестовый заказ под Merchant API
+@app.get("/payme/mock/new")
+async def payme_mock_new(amount: int = 4900000):  # тийины
+    oid = create_order(ADMIN_USER_ID or 0, provider="payme", plan_code="basic_m", kind="merchant")
+    with _pay_db() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("UPDATE orders SET amount=%s WHERE id=%s", (amount, oid))
+        except Exception:
+            pass
+    return {"order_id": oid, "amount": amount}
 
 # ====== Платёжные колбэки ======
 @app.post("/click/callback")
