@@ -2308,19 +2308,39 @@ def _order_amount_tiyin(o: dict) -> int | None:
             return None
 
 def _payme_auth_ok(x_auth: str, headers) -> bool:
-    # Вариант 1: X-Auth равен нашему секрету
-    if PAYME_MERCHANT_XAUTH and x_auth == PAYME_MERCHANT_XAUTH:
+    mid = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
+    k_test = (os.getenv("PAYME_MERCHANT_TEST_KEY") or "").strip()
+    k_prod = (os.getenv("PAYME_MERCHANT_KEY") or "").strip()
+    k_raw  = (os.getenv("PAYME_MERCHANT_XAUTH") or "").strip()  # опционально: заранее зашитое значение
+
+    # Сформируем допустимые заголовки "Basic base64(ID:KEY)"
+    cand = set()
+    if mid and k_test:
+        cand.add("Basic " + base64.b64encode(f"{mid}:{k_test}".encode()).decode())
+    if mid and k_prod:
+        cand.add("Basic " + base64.b64encode(f"{mid}:{k_prod}".encode()).decode())
+    if k_raw:
+        cand.add(k_raw)  # совместимость со старым способом
+
+    # 1) Проверяем X-Auth (Payme часто шлёт именно его)
+    if x_auth and x_auth in cand:
         return True
 
-    # Вариант 2: Basic Authorization "Paycom:<key>"
+    # 2) Проверяем Authorization (иногда шлют через него)
     auth = headers.get("authorization") or headers.get("Authorization")
-    if auth and auth.startswith("Basic "):
-        try:
-            raw = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
-            login, _, pwd = raw.partition(":")
-            return login == "Paycom" and pwd == PAYME_MERCHANT_XAUTH
-        except Exception:
-            return False
+    if auth and auth in cand:
+        return True
+
+    # 3) Доп.проверка на случай нестандартных пробелов/регистров: декодируем и сверяем ID/KEY
+    for header_val in (x_auth, auth):
+        if header_val and header_val.startswith("Basic "):
+            try:
+                raw = base64.b64decode(header_val.split(" ", 1)[1]).decode("utf-8")
+                login, _, pwd = raw.partition(":")
+                if login == mid and pwd in {k_test, k_prod}:
+                    return True
+            except Exception:
+                pass
 
     return False
 
