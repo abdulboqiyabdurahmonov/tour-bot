@@ -111,7 +111,10 @@ LEADS_CHAT_ID_ENV = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 # --- Payme Merchant API (JSON-RPC) настройки ---
-PAYME_MERCHANT_XAUTH = os.getenv("PAYME_MERCHANT_XAUTH", "")  # секрет для заголовка X-Auth
+PAYME_MERCHANT_XAUTH = os.getenv(
+    "PAYME_MERCHANT_XAUTH",
+    "g2c0pRXTd??yy96kOFgdDRmQsMtM?vkK#V#8"
+)
 FISCAL_IKPU = os.getenv("FISCAL_IKPU", "00702001001000001")   # твой ИКПУ (можно тестовый)
 FISCAL_VAT_PERCENT = int(os.getenv("FISCAL_VAT_PERCENT", "12"))
 
