@@ -982,6 +982,19 @@ def del_pending_want(user_id: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM pending_wants WHERE user_id=%s;", (user_id,))
 
+def _valid_xauth(val: str) -> bool:
+    cand = set()
+    mid = os.getenv("PAYME_MERCHANT_ID", "").strip()
+    k_test = os.getenv("PAYME_MERCHANT_TEST_KEY", "").strip()
+    k_prod = os.getenv("PAYME_MERCHANT_KEY", "").strip()
+    k_raw = os.getenv("PAYME_MERCHANT_XAUTH", "").strip()
+    if mid and k_test:
+        cand.add("Basic " + base64.b64encode(f"{mid}:{k_test}".encode()).decode())
+    if mid and k_prod:
+        cand.add("Basic " + base64.b64encode(f"{mid}:{k_prod}".encode()).decode())
+    if k_raw:
+        cand.add(k_raw)
+    return val in cand
 
 # ================= ПОИСК ТУРОВ =================
 
