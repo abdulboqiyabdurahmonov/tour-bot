@@ -2294,10 +2294,27 @@ def _order_amount_tiyin(o: dict) -> int | None:
         except Exception:
             return None
 
+def _payme_auth_ok(x_auth: str, headers) -> bool:
+    # Вариант 1: X-Auth равен нашему секрету
+    if PAYME_MERCHANT_XAUTH and x_auth == PAYME_MERCHANT_XAUTH:
+        return True
+
+    # Вариант 2: Basic Authorization "Paycom:<key>"
+    auth = headers.get("authorization") or headers.get("Authorization")
+    if auth and auth.startswith("Basic "):
+        try:
+            raw = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
+            login, _, pwd = raw.partition(":")
+            return login == "Paycom" and pwd == PAYME_MERCHANT_XAUTH
+        except Exception:
+            return False
+
+    return False
+
 @app.post("/payme/merchant")
 async def payme_merchant(request: Request, x_auth: str = Header(default="")):
-    # 0) Простейшая аутентификация по заголовку
-    if not PAYME_MERCHANT_XAUTH or x_auth != PAYME_MERCHANT_XAUTH:
+    # 0) Аутентификация: X-Auth ИЛИ Basic Paycom:<key>
+    if not _payme_auth_ok(x_auth, request.headers):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     body = await request.json()
