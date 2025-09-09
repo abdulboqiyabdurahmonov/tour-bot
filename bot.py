@@ -131,6 +131,16 @@ if not OPENAI_API_KEY:
 if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
 
+def build_payme_checkout_url(merchant_id: str, amount_tiyin: int, order_id: int, lang: str = "ru") -> str:
+    payload = {
+        "m": merchant_id,
+        "a": int(amount_tiyin),
+        "ac": {"order_id": int(order_id)},
+        "l": lang
+    }
+    token = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    return f"https://checkout.paycom.uz/{token}"
+
 # ================= КОНСТАНТЫ =================
 TZ = ZoneInfo("Asia/Tashkent")
 PAGER_STATE: Dict[str, Dict] = {}
@@ -1608,8 +1618,25 @@ async def cb_country(call: CallbackQuery):
 async def cb_sub(call: CallbackQuery):
     _, provider, kind = call.data.split(":", 2)
     plan_code = "basic_m"
+
+    # создаём заказ как и раньше
     order_id = create_order(call.from_user.id, provider=provider, plan_code=plan_code, kind=kind)
-    url = build_checkout_link(provider, order_id, plan_code)
+
+    # достанем сумму из заказа (в тийинах), если create_order её записывает
+    order = get_order_safe(order_id) or {}
+    amount_tiyin = int(order.get("amount") or 4900000)  # fallback: 49 000 сум = 4 900 000 тийин
+
+    # строим ссылку
+    if provider == "payme":
+        mid = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
+        if not mid:
+            await call.message.answer("⚠️ PAYME_MERCHANT_ID не задан в ENV. Сообщи администратору.")
+            await call.answer()
+            return
+        url = build_payme_checkout_url(mid, amount_tiyin, order_id, "ru")
+    else:
+        # для Click и прочего оставляем как было
+        url = build_checkout_link(provider, order_id, plan_code)
 
     txt = (
         f"🔐 Заказ №{order_id}\n"
@@ -1625,7 +1652,6 @@ async def cb_sub(call: CallbackQuery):
     )
     await call.message.answer(txt, reply_markup=kb)
     await call.answer()
-
 
 @dp.callback_query(F.data == "sub:info")
 async def cb_sub_info(call: CallbackQuery):
