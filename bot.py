@@ -2432,43 +2432,41 @@ async def payme_merchant(
 
     # === CheckPerformTransaction ===
     if method == "CheckPerformTransaction":
-        if not o:
-            return _rpc_err(rpc_id, -31050, "Заказ не найден")
-        amt = _order_amount_tiyin(o)
-        if amt is not None and amount_in is not None and int(amount_in) != int(amt):
-            return _rpc_err(rpc_id, -31001, "Сумма не совпадает")
+        # 1) базовая валидация счёта (order_id в account)
+        if order_id is None or str(order_id).strip() == "":
+            return _rpc_err(rpc_id, -31050, "Счёт не найден")
 
-        # фискализация через detail (минимальный пример с одной позицией)
+        try:
+            o = get_order_safe(int(order_id))
+        except Exception:
+            o = None
+        if not o:
+            return _rpc_err(rpc_id, -31050, "Счёт не найден")
+
+        # 2) сравнение сумм строго в тийинах
+        expected = _order_amount_tiyin(o)          # сумма из нашего заказа (в тийинах)
+        try:
+            received = int(amount_in)              # сумма из запроса Payme (в тийинах)
+        except Exception:
+            received = -1
+
+        # ВАЖНО: при несовпадении — именно -31001
+        if expected is None or expected <= 0 or received != expected:
+            return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+        # 3) если всё ок — разрешаем и отдаём фискальные реквизиты (detail)
         detail = {
             "receipt_type": 0,
             "items": [{
                 "title": f"Подписка {o.get('plan_code', 'TripleA')}",
-                "price": int(amount_in or (amt or 0)),
+                "price": received,
                 "count": 1,
                 "code": FISCAL_IKPU,
                 "vat_percent": FISCAL_VAT_PERCENT,
             }]
         }
         return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
-
-    # === CreateTransaction ===
-    if method == "CreateTransaction":
-        if not o:
-            return _rpc_err(rpc_id, -31050, "Заказ не найден")
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
-                    (str(payme_tr), "created", int(order_id)),
-                )
-        except Exception:
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
-        return _rpc_ok(rpc_id, {
-            "create_time": _now_ms(),
-            "transaction": str(payme_tr),
-            "state": 1
-        })
-
+       
     # === PerformTransaction ===
     if method == "PerformTransaction":
         try:
