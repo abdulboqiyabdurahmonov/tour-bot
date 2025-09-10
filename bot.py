@@ -115,6 +115,9 @@ PAYME_MERCHANT_XAUTH = os.getenv(
     "PAYME_MERCHANT_XAUTH",
     "g2c0pRXTd??yy96kOFgdDRmQsMtM?vkK#V#8"
 )
+# ===== PAYME =====
+PAYME_ACCOUNT_FIELD = os.getenv("PAYME_ACCOUNT_FIELD", "order_id").strip()
+PAYME_MERCHANT_ID = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
 FISCAL_IKPU = os.getenv("FISCAL_IKPU", "00702001001000001")   # твой ИКПУ (можно тестовый)
 FISCAL_VAT_PERCENT = int(os.getenv("FISCAL_VAT_PERCENT", "12"))
 
@@ -132,12 +135,16 @@ if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL не найден в переменных окружения!")
 
 def build_payme_checkout_url(merchant_id: str, amount_tiyin: int, order_id: int, lang: str = "ru") -> str:
-    payload = {
-        "m": merchant_id,
-        "a": int(amount_tiyin),
-        "ac": {"order_id": int(order_id)},
-        "l": lang
-    }
+    if not merchant_id:
+        raise ValueError("PAYME_MERCHANT_ID пуст — не могу собрать ссылку")
+
+    amt = int(round(float(amount_tiyin)))
+    if amt <= 0:
+        raise ValueError(f"Некорректная сумма для Payme (тийины): {amount_tiyin}")
+
+    ac = {PAYME_ACCOUNT_FIELD: int(order_id)}
+
+    payload = {"m": merchant_id, "a": amt, "ac": ac, "l": lang}
     token = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
     return f"https://checkout.paycom.uz/{token}"
 
