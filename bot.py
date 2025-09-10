@@ -111,10 +111,8 @@ LEADS_CHAT_ID_ENV = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 # --- Payme Merchant API (JSON-RPC) настройки ---
-PAYME_MERCHANT_XAUTH = os.getenv(
-    "PAYME_MERCHANT_XAUTH",
-    "g2c0pRXTd??yy96kOFgdDRmQsMtM?vkK#V#8"
-)
+PAYME_MERCHANT_XAUTH = os.getenv("PAYME_MERCHANT_XAUTH", "").strip()
+
 # ===== PAYME =====
 PAYME_ACCOUNT_FIELD = os.getenv("PAYME_ACCOUNT_FIELD", "order_id").strip()
 PAYME_MERCHANT_ID = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
