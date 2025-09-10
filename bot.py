@@ -2380,17 +2380,45 @@ def _payme_auth_ok(x_auth: str, headers) -> bool:
 
     return False
 
+from fastapi import Header
+from fastapi.responses import JSONResponse
+
+def _rpc_auth_error(rpc_id):
+    return JSONResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "error": {
+                "code": -32504,
+                "message": {
+                    "ru": "Недопустимая авторизация",
+                    "uz": "Ruxsat etilmagan avtorizatsiya",
+                    "en": "Unauthorized",
+                },
+                "data": "auth",
+            },
+        },
+        status_code=200,
+    )
+
 @app.post("/payme/merchant")
-async def payme_merchant(request: Request, x_auth: str = Header(default="")):
-    # 0) Аутентификация: X-Auth ИЛИ Basic Paycom:<key>
+async def payme_merchant(
+    request: Request,
+    x_auth: str = Header(default="", alias="X-Auth"),   # см. пункт 2
+):
+    # Сначала читаем тело, чтобы вернуть корректный id в ответе даже при ошибке auth
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    rpc_id = (body or {}).get("id")
+
+    # 0) Аутентификация: X-Auth ИЛИ Authorization: Basic ...
     if not _payme_auth_ok(x_auth, request.headers):
-        raise HTTPException(status_code=401, detail="unauthorized")
+        return _rpc_auth_error(rpc_id)
 
-    body = await request.json()
-    rpc_id = body.get("id")
-    method = body.get("method")
-    params = body.get("params") or {}
-
+    method = (body or {}).get("method")
+    params = (body or {}).get("params") or {}
     account = params.get("account") or {}
     order_id = account.get("order_id")
     payme_tr = params.get("id")        # id транзакции в Payme (строка)
