@@ -2349,9 +2349,16 @@ def _payme_auth_check(headers: dict) -> bool:
     test_key = (os.getenv("PAYME_MERCHANT_TEST_KEY") or "").strip()
     prod_key = (os.getenv("PAYME_MERCHANT_KEY") or "").strip()
 
-    # В песочнице работает TEST_KEY
+    # Берём оба варианта заголовков
     auth = headers.get("Authorization") or headers.get("authorization")
     xauth = headers.get("X-Auth") or headers.get("x-auth")
+
+    # 0) Если заголовок полностью совпадает с PAYME_MERCHANT_XAUTH — ок
+    header_raw = (auth or xauth or "").strip()
+    if _valid_xauth(header_raw):   # <-- тут используем уже написанный helper
+        return True
+
+    # 1) Иначе — обычная Basic проверка (mid:test/prod_key)
     return (
         _payme_auth_ok_from_header(auth, mid=mid, test_key=test_key, prod_key=prod_key) or
         _payme_auth_ok_from_header(xauth, mid=mid, test_key=test_key, prod_key=prod_key)
