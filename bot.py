@@ -1633,16 +1633,16 @@ async def cb_sub(call: CallbackQuery):
     order = get_order_safe(order_id) or {}
     amount_tiyin = int(order.get("amount") or 4900000)  # fallback: 49 000 сум = 4 900 000 тийин
 
-    # строим ссылку
+    amount_tiyin = 4900000  # или рассчитывай динамически
+
     if provider == "payme":
-        mid = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
+        mid = PAYME_MERCHANT_ID
         if not mid:
-            await call.message.answer("⚠️ PAYME_MERCHANT_ID не задан в ENV. Сообщи администратору.")
+            await call.message.answer("⚠️ PAYME_MERCHANT_ID не задан в ENV.")
             await call.answer()
             return
         url = build_payme_checkout_url(mid, amount_tiyin, order_id, "ru")
     else:
-        # для Click и прочего оставляем как было
         url = build_checkout_link(provider, order_id, plan_code)
 
     txt = (
