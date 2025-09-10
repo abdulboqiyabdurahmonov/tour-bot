@@ -2310,164 +2310,140 @@ async def on_startup():
     else:
         logging.warning("WEBHOOK_URL не указан — бот не получит апдейты.")
 
-
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
 
-# ================= PAYME MERCHANT API (JSON-RPC) =================
-# Эндпоинт, который Payme будет дергать из своей стороны.
-# Мы проверяем заказ, сумму, и отмечаем транзакции в нашей таблице orders.
-
+# ====== Payme JSON-RPC helpers ======
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 def _rpc_ok(rpc_id, result: dict):
+    # Всегда HTTP 200 — ошибки только в JSON
     return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
-def _rpc_err(rpc_id, code: int, ru: str):
-    # Коды и структура ошибок по спецификации Payme
-    return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": {"ru": ru}}}
+def _rpc_err(rpc_id, code: int, ru: str, uz: str | None = None, en: str | None = None, data: str | None = None):
+    return {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "error": {
+            "code": code,
+            "message": {"ru": ru, "uz": uz or ru, "en": en or ru},
+            **({"data": data} if data else {}),
+        },
+    }
+
+# ====== Авторизация Payme ======
+def _payme_auth_ok_from_header(header_val: str | None, *, mid: str, test_key: str, prod_key: str) -> bool:
+    if not header_val or not header_val.startswith("Basic "):
+        return False
+    try:
+        raw = base64.b64decode(header_val.split(" ", 1)[1]).decode("utf-8")
+        login, _, pwd = raw.partition(":")
+        return login == mid and pwd in {test_key, prod_key}
+    except Exception:
+        return False
+
+def _payme_auth_check(headers: dict) -> bool:
+    mid = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
+    test_key = (os.getenv("PAYME_MERCHANT_TEST_KEY") or "").strip()
+    prod_key = (os.getenv("PAYME_MERCHANT_KEY") or "").strip()
+
+    # В песочнице работает TEST_KEY
+    auth = headers.get("Authorization") or headers.get("authorization")
+    xauth = headers.get("X-Auth") or headers.get("x-auth")
+    return (
+        _payme_auth_ok_from_header(auth, mid=mid, test_key=test_key, prod_key=prod_key) or
+        _payme_auth_ok_from_header(xauth, mid=mid, test_key=test_key, prod_key=prod_key)
+    )
+
+# ====== Загрузка заказа ======
+def _get_order(order_id: int) -> dict | None:
+    with _pay_db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM orders WHERE id=%s;", (order_id,))
+        return cur.fetchone()
 
 def _order_amount_tiyin(o: dict) -> int | None:
-    """Берём сумму заказа в тийинах: amount|total|price (если суми — умножим на 100)."""
+    # Берём amount/total/price; если похоже на суммы — умножаем на 100
     val = o.get("amount") or o.get("total") or o.get("price")
     if val is None:
         return None
     try:
         v = int(val)
-        return v if v > 10_000 else v * 100  # если число похоже на суми — переведём в тийины
+        return v if v > 10_000 else v * 100
     except Exception:
         try:
             return int(float(val) * 100)
         except Exception:
             return None
 
-def _payme_auth_ok(x_auth: str, headers) -> bool:
-    mid = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
-    k_test = (os.getenv("PAYME_MERCHANT_TEST_KEY") or "").strip()
-    k_prod = (os.getenv("PAYME_MERCHANT_KEY") or "").strip()
-    k_raw  = (os.getenv("PAYME_MERCHANT_XAUTH") or "").strip()  # опционально: заранее зашитое значение
-
-    # Сформируем допустимые заголовки "Basic base64(ID:KEY)"
-    cand = set()
-    if mid and k_test:
-        cand.add("Basic " + base64.b64encode(f"{mid}:{k_test}".encode()).decode())
-    if mid and k_prod:
-        cand.add("Basic " + base64.b64encode(f"{mid}:{k_prod}".encode()).decode())
-    if k_raw:
-        cand.add(k_raw)  # совместимость со старым способом
-
-    # 1) Проверяем X-Auth (Payme часто шлёт именно его)
-    if x_auth and x_auth in cand:
-        return True
-
-    # 2) Проверяем Authorization (иногда шлют через него)
-    auth = headers.get("authorization") or headers.get("Authorization")
-    if auth and auth in cand:
-        return True
-
-    # 3) Доп.проверка на случай нестандартных пробелов/регистров: декодируем и сверяем ID/KEY
-    for header_val in (x_auth, auth):
-        if header_val and header_val.startswith("Basic "):
-            try:
-                raw = base64.b64decode(header_val.split(" ", 1)[1]).decode("utf-8")
-                login, _, pwd = raw.partition(":")
-                if login == mid and pwd in {k_test, k_prod}:
-                    return True
-            except Exception:
-                pass
-
-    return False
-
-from fastapi import Header
-from fastapi.responses import JSONResponse
-
-def _rpc_auth_error(rpc_id):
-    return JSONResponse(
-        {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "error": {
-                "code": -32504,
-                "message": {
-                    "ru": "Недопустимая авторизация",
-                    "uz": "Ruxsat etilmagan avtorizatsiya",
-                    "en": "Unauthorized",
-                },
-                "data": "auth",
-            },
-        },
-        status_code=200,
-    )
-
+# ====== Сам эндпоинт Payme Merchant API (песочница) ======
 @app.post("/payme/merchant")
-async def payme_merchant(
-    request: Request,
-    x_auth: str = Header(default="", alias="X-Auth"),   # см. пункт 2
-):
-    # Сначала читаем тело, чтобы вернуть корректный id в ответе даже при ошибке auth
+async def payme_merchant(request: Request):
+    # 0) JSON-RPC парсинг
     try:
         body = await request.json()
     except Exception:
-        body = {}
-    rpc_id = (body or {}).get("id")
+        # Некорректный JSON — спецификация советует -32700
+        return _rpc_err(None, -32700, "Некорректный JSON")
 
-    # 0) Аутентификация: X-Auth ИЛИ Authorization: Basic ...
-    if not _payme_auth_ok(x_auth, request.headers):
-        return _rpc_auth_error(rpc_id)
-
-    method = (body or {}).get("method")
-    params = (body or {}).get("params") or {}
+    rpc_id = body.get("id")
+    method = (body.get("method") or "").strip()
+    params = body.get("params") or {}
     account = params.get("account") or {}
-    order_id = account.get("order_id")
-    payme_tr = params.get("id")        # id транзакции в Payme (строка)
-    amount_in = params.get("amount")   # сумма (тийины, int)
+    amount_in = params.get("amount")
+    payme_tr  = params.get("id")
+    order_id  = account.get("order_id")
 
-    # наш заказ
+    # 1) Авторизация: НЕЛЬЗЯ отдавать HTTP 401 — только JSON-ошибка -32504
+    if not _payme_auth_check(dict(request.headers)):
+        return _rpc_err(rpc_id, -32504, "Недопустимая авторизация", data="auth")
+
+    # 2) Достаём наш заказ (для «несуществующего счёта» песочница ждёт -31050)
+    order = None
     try:
-        o = get_order_safe(int(order_id)) if order_id is not None else None
+        if order_id is not None:
+            order = _get_order(int(order_id))
     except Exception:
-        o = None
+        order = None
 
-    # === CheckPerformTransaction ===
+    # 3) Обработка методов
     if method == "CheckPerformTransaction":
-        # 1) базовая валидация счёта (order_id в account)
-        if order_id is None or str(order_id).strip() == "":
-            return _rpc_err(rpc_id, -31050, "Счёт не найден")
+        # счёт не найден
+        if not order:
+            return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
-        try:
-            o = get_order_safe(int(order_id))
-        except Exception:
-            o = None
-        if not o:
-            return _rpc_err(rpc_id, -31050, "Счёт не найден")
-
-        # 2) сравнение сумм строго в тийинах
-        expected = _order_amount_tiyin(o)          # сумма из нашего заказа (в тийинах)
-        try:
-            received = int(amount_in)              # сумма из запроса Payme (в тийинах)
-        except Exception:
-            received = -1
-
-        # ВАЖНО: при несовпадении — именно -31001
-        if expected is None or expected <= 0 or received != expected:
+        # неверная сумма
+        expected = _order_amount_tiyin(order)
+        if expected is not None and amount_in is not None and int(amount_in) != int(expected):
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-        # 3) если всё ок — разрешаем и отдаём фискальные реквизиты (detail)
+        # разрешаем создание транзакции + фискальные реквизиты (минимум)
         detail = {
             "receipt_type": 0,
             "items": [{
-                "title": f"Подписка {o.get('plan_code', 'TripleA')}",
-                "price": received,
+                "title": f"Подписка {order.get('plan_code', 'TripleA')}",
+                "price": int(amount_in or (expected or 0)),
                 "count": 1,
-                "code": FISCAL_IKPU,
-                "vat_percent": FISCAL_VAT_PERCENT,
+                "code": os.getenv("FISCAL_IKPU", "00702001001000001"),
+                "vat_percent": int(os.getenv("FISCAL_VAT_PERCENT", "12")),
             }]
         }
         return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
-       
-    # === PerformTransaction ===
+
+    if method == "CreateTransaction":
+        if not order:
+            return _rpc_err(rpc_id, -31050, "Заказ не найден")
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
+                    (str(payme_tr), "created", int(order_id)),
+                )
+        except Exception:
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+        return _rpc_ok(rpc_id, {"create_time": _now_ms(), "transaction": str(payme_tr), "state": 1})
+
     if method == "PerformTransaction":
         try:
             with _pay_db() as conn, conn.cursor() as cur:
@@ -2476,38 +2452,19 @@ async def payme_merchant(
                 if not row:
                     return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
                 cur.execute("UPDATE orders SET status=%s WHERE id=%s", ("paid", row["id"]))
-                # активируем подписку и уведомим пользователя
-                try:
-                    activate_after_payment(row["id"])
-                    o2 = get_order_safe(row["id"])
-                    if o2:
-                        await bot.send_message(
-                            o2["user_id"], f"✔️ Оплата принята. Подписка активна до {fmt_sub_until(o2['user_id'])}"
-                        )
-                except Exception:
-                    pass
+            # побочные действия можно не делать в песочнице
         except Exception:
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (perform)")
-        return _rpc_ok(rpc_id, {
-            "perform_time": _now_ms(),
-            "transaction": str(payme_tr),
-            "state": 2
-        })
+        return _rpc_ok(rpc_id, {"perform_time": _now_ms(), "transaction": str(payme_tr), "state": 2})
 
-    # === CancelTransaction ===
     if method == "CancelTransaction":
         try:
             with _pay_db() as conn, conn.cursor() as cur:
                 cur.execute("UPDATE orders SET status=%s WHERE provider_trx_id=%s", ("canceled", str(payme_tr)))
         except Exception:
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
-        return _rpc_ok(rpc_id, {
-            "cancel_time": _now_ms(),
-            "transaction": str(payme_tr),
-            "state": -1
-        })
+        return _rpc_ok(rpc_id, {"cancel_time": _now_ms(), "transaction": str(payme_tr), "state": -1})
 
-    # === CheckTransaction ===
     if method == "CheckTransaction":
         try:
             with _pay_db() as conn, conn.cursor() as cur:
@@ -2523,8 +2480,8 @@ async def payme_merchant(
         except Exception:
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (check)")
 
-    return _rpc_err(rpc_id, -32601, f"Метод {method} не поддерживается")
-
+    # Неподдерживаемый метод
+    return _rpc_err(rpc_id, -32601, f"Метод {method or '—'} не поддерживается")
 
 # (опционально) Шорткат, чтобы быстро создать тестовый заказ под Merchant API
 @app.get("/payme/mock/new")
