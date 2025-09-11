@@ -2563,62 +2563,47 @@ async def payme_merchant(request: Request):
 
     # ---------------- CancelTransaction ----------------
     elif method == "CancelTransaction":
-        # в Cancel ID приходит в params.id
         trx_id = str(params.get("id") or "").strip()
-        logging.info("[Payme] CancelTransaction params=%s, trx_id=%s", params, trx_id)
         if not trx_id:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        # пробуем память → БД
+        # восстановить состояние (из памяти или по БД)
         trx = TRX_STORE.get(trx_id) or _trx_from_db(trx_id)
+        if not trx:
+            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+
+        # Если уже отменена ранее — отвечаем идемпотентно теми же данными
+        if trx["state"] in (-1, -2):
+            return _rpc_ok(rpc_id, {
+                "cancel_time": trx.get("cancel_time", 0),
+                "transaction": trx_id,
+                "state": trx["state"],
+            })
+
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;",
-                    (trx_id,),
-                )
-                row = cur.fetchone()
-
-                if not trx and not row:
-                    # вообще не знаем такой транзакции
-                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-
-                prev_status = (row["status"] if row else None) or (  # из БД
-                    {2: "paid", 1: "created", -1: "canceled", -2: "canceled_after_perform"}.get((trx or {}).get("state"))
-                ) or ""
-
-                # решаем целевой state/статус
-                if prev_status.strip() == "paid":
-                    state_out = -2
-                    new_status = "canceled_after_perform"
+                # Отмена выполненной транзакции (после Perform) -> state = -2
+                if trx["state"] == 2:
+                    cur.execute(
+                        "UPDATE orders SET status=%s WHERE id=%s;",
+                        ("canceled_after_perform", trx["order_id"])
+                    )
+                    trx["state"] = -2
                 else:
-                    state_out = -1
-                    new_status = "canceled"
+                    # Отмена до Perform (state 0/1) -> state = -1
+                    cur.execute(
+                        "UPDATE orders SET status=%s WHERE id=%s;",
+                        ("canceled", trx["order_id"])
+                    )
+                    trx["state"] = -1
 
-                # фиксируем времена/состояние в памяти
-                if trx is None:
-                    trx = {
-                        "order_id": row["id"] if row else 0,
-                        "amount": 0,
-                        "state": state_out,
-                        "create_time": 0,
-                        "perform_time": 0,
-                        "cancel_time": _now_ms(),
-                    }
-                else:
-                    trx["state"] = state_out
-                    if not trx.get("cancel_time"):
-                        trx["cancel_time"] = _now_ms()
+                trx["cancel_time"] = _now_ms()
                 TRX_STORE[trx_id] = trx
-
-                # пишем статус в БД (если знаем id заказа)
-                if row:
-                    cur.execute("UPDATE orders SET status=%s WHERE id=%s;", (new_status, row["id"]))
 
             return _rpc_ok(rpc_id, {
                 "cancel_time": trx["cancel_time"],
                 "transaction": trx_id,
-                "state": state_out,
+                "state": trx["state"],
             })
 
         except Exception:
