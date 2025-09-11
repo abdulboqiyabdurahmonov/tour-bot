@@ -2412,13 +2412,6 @@ def _order_amount_tiyin(o: dict) -> int | None:
 
 @app.post("/payme/merchant")
 async def payme_merchant(request: Request):
-    """
-    JSON-RPC обработчик Merchant API Payme.
-    ⚙️ ВАЖНО:
-      • Всегда отвечаем HTTP 200; ошибки — только в JSON (поле error).
-      • Sandbox «неверная сумма» ждёт код -31001.
-    """
-    # --- 0) Парсинг JSON-RPC (даже при ошибках вернём 200 с error) ---
     try:
         body = await request.json()
     except Exception:
@@ -2430,20 +2423,17 @@ async def payme_merchant(request: Request):
     params  = body.get("params") or {}
     account = params.get("account") or {}
     amount_in = params.get("amount")
-    payme_tr  = params.get("id")             # идентификатор транзакции Payme
-    order_id  = account.get("order_id")      # наше поле счёта
+    payme_tr  = params.get("id")
+    order_id  = account.get("order_id")
 
     logging.info(
         f"[Payme] method={method} order_id={order_id} amount_in={amount_in} "
         f"auth_ok={_payme_auth_check(headers)}"
     )
 
-    # --- 1) Авторизация (по спецификации — только JSON-ошибка, не 401) ---
-    # --- внутри payme_merchant после разбора body/headers ---
-
-# 1) Авторизация
-if not _payme_auth_check(headers):
-    return _rpc_err(rpc_id, -32504, "Недопустимая авторизация", data="auth")
+    # 1) Авторизация — ДОЛЖНА быть внутри функции
+    if not _payme_auth_check(headers):
+        return _rpc_err(rpc_id, -32504, "Недопустимая авторизация", data="auth")
 
 # 2) Подгружаем заказ, если передан order_id в account
 order = None
