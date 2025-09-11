@@ -2658,6 +2658,48 @@ async def click_cb(request: Request):
             pass
     return JSONResponse({"status": "ok" if ok else "error", "message": msg})
 
+# ---------------- GetStatement ----------------
+elif method == "GetStatement":
+    try:
+        from_ms = int(params.get("from"))
+        to_ms = int(params.get("to"))
+
+        with _pay_db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT provider_trx_id, created_at, amount, order_id,
+                       status, perform_time, cancel_time, reason
+                FROM orders
+                WHERE EXTRACT(EPOCH FROM created_at)*1000 BETWEEN %s AND %s;
+            """, (from_ms, to_ms))
+            rows = cur.fetchall()
+
+        txs = []
+        for r in rows:
+            state_map = {
+                "created": 0,
+                "pending": 1,
+                "paid": 2,
+                "canceled": -1,
+                "canceled_after_perform": -2,
+            }
+            txs.append({
+                "id": str(r["provider_trx_id"]),
+                "time": int(r["created_at"].timestamp() * 1000),
+                "amount": int(r["amount"]),
+                "account": {"order_id": str(r["order_id"])},
+                "create_time": int(r["created_at"].timestamp() * 1000),
+                "perform_time": int(r["perform_time"].timestamp() * 1000) if r["perform_time"] else 0,
+                "cancel_time": int(r["cancel_time"].timestamp() * 1000) if r["cancel_time"] else 0,
+                "transaction": str(r["provider_trx_id"]),
+                "state": state_map.get(r["status"], 0),
+                "reason": r["reason"] or None,
+            })
+
+        return _rpc_ok(rpc_id, {"transactions": txs})
+
+    except Exception:
+        logging.exception("[Payme] DB error in GetStatement")
+        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (get_statement)")
 
 @app.post("/payme/callback")
 async def payme_cb(request: Request):
