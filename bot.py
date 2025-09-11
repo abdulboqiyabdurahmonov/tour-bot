@@ -2597,12 +2597,12 @@ async def payme_merchant(request: Request):
                     state_out = -2
                 else:
                     # created/new/прочее — отмена до завершения -> -1
-                    new_status = "canceled"
-                    state_out = -1
+                    new_status = row["status"]
+                    state_out = -2 if new_status == "canceled_after_perform" else -1
 
                 cur.execute(
-                    "UPDATE orders SET status=%s WHERE id=%s;",
-                    (new_status, row["id"]),
+                    "UPDATE orders SET status='paid', provider_trx_id=%s WHERE id=%s;",
+                    (trx_id, row["id"]),
                 )
 
             return _rpc_ok(rpc_id, {
