@@ -2486,7 +2486,7 @@ async def payme_merchant(request: Request):
                 "vat_percent": int(os.getenv("FISCAL_VAT_PERCENT", "12")),
             }]
         }
-        return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
+        return _rpc_ok(rpc_id, {"allow": True})
 
     # -------- CreateTransaction --------
     elif method == "CreateTransaction":
