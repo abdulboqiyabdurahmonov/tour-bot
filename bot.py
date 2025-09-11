@@ -2561,25 +2561,42 @@ async def payme_merchant(request: Request):
         return _rpc_ok(rpc_id, {"perform_time": trx["perform_time"], "transaction": trx_id, "state": 2})
 
     # -------- CancelTransaction --------
+    # ---------------- CancelTransaction ----------------
     elif method == "CancelTransaction":
-        trx_id = str(payme_tr or "")
-        trx = TRX_STORE.get(trx_id) or _trx_from_db(trx_id)
-        if not trx:
-            # По спецификации допускается idempotent cancel: если не знаем — ошибка «не найдена»
-            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-
-        trx["state"] = -1
-        trx["cancel_time"] = _now_ms()
-        TRX_STORE[trx_id] = trx
-
+        trx_id = str(payme_tr)
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute("UPDATE orders SET status=%s WHERE provider_trx_id=%s;", ("canceled", trx_id))
+                # ищем транзакцию по id, который прислал Payme (мы кладём его в orders.provider_trx_id в CreateTransaction)
+                cur.execute(
+                    "SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;",
+                    (trx_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+
+                # По спецификации Payme:
+                #   state -1  — отмена до PerformTransaction
+                #   state -2  — отмена после PerformTransaction (когда уже был state=2)
+                cancel_state = -2 if row["status"] == "paid" else -1
+
+                # фиксируем отмену у себя
+                cur.execute(
+                    "UPDATE orders SET status=%s, canceled_at=now() WHERE id=%s;",
+                    ("canceled", row["id"]),
+                )
         except Exception:
             logging.exception("[Payme] DB error in CancelTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
 
-        return _rpc_ok(rpc_id, {"cancel_time": trx["cancel_time"], "transaction": trx_id, "state": -1})
+        return _rpc_ok(
+            rpc_id,
+            {
+                "cancel_time": _now_ms(),
+                "transaction": trx_id,
+                "state": cancel_state,
+            },
+        )
 
     # -------- CheckTransaction --------
     elif method == "CheckTransaction":
