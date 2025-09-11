@@ -2380,7 +2380,6 @@ def _order_amount_tiyin(o: dict) -> int | None:
         except Exception:
             return None
 
-
 @app.post("/payme/merchant")
 async def payme_merchant(request: Request):
     # 0) Парсим JSON-RPC. Даже на ошибках всегда отвечаем 200 JSON-ом.
@@ -2452,17 +2451,37 @@ async def payme_merchant(request: Request):
         return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
 
     if method == "CreateTransaction":
-        if not order:
-            return _rpc_err(rpc_id, -31050, "Заказ не найден")
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
-                    (str(payme_tr), "created", int(order_id)),
-                )
-        except Exception:
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
-        return _rpc_ok(rpc_id, {"create_time": _now_ms(), "transaction": str(payme_tr), "state": 1})
+    # 0) заказ должен существовать
+    if not order:
+        return _rpc_err(rpc_id, -31050, "Заказ не найден")
+
+    # 1) ожидания по сумме из заказа (тийины)
+    expected = _order_amount_tiyin(order)
+    if expected is None:
+        return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
+
+    # 2) присланную сумму аккуратно приводим
+    try:
+        sent = int(amount_in)
+    except Exception:
+        return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+    # 3) если не совпало — тот же код ошибки, что и в CheckPerformTransaction
+    if sent != expected:
+        logging.warning(f"[Payme] CreateTransaction amount mismatch: sent={sent} expected={expected} order_id={order_id}")
+        return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+    # 4) всё ок — фиксируем транзакцию
+    try:
+        with _pay_db() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
+                (str(payme_tr), "created", int(order_id)),
+            )
+    except Exception:
+        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+
+    return _rpc_ok(rpc_id, {"create_time": _now_ms(), "transaction": str(payme_tr), "state": 1})
 
     if method == "PerformTransaction":
         try:
