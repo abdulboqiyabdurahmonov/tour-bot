@@ -2480,7 +2480,8 @@ async def payme_merchant(request: Request):
                 "vat_percent": int(os.getenv("FISCAL_VAT_PERCENT", "12")),
             }]
         }
-        return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
+        # стало — строго по спеке песочницы
+        return _rpc_ok(rpc_id, {"allow": True})
 
     # 2.2 CreateTransaction — фиксация/резервирование
     elif method == "CreateTransaction":
