@@ -2658,48 +2658,60 @@ async def click_cb(request: Request):
             pass
     return JSONResponse({"status": "ok" if ok else "error", "message": msg})
 
-# ---------------- GetStatement ----------------
-elif method == "GetStatement":
-    try:
-        from_ms = int(params.get("from"))
-        to_ms = int(params.get("to"))
+    # ---------------- GetStatement ----------------
+    elif method == "GetStatement":
+        # ожидаем params.from и params.to в миллисекундах Unix
+        try:
+            from_ms = int(params.get("from"))
+            to_ms = int(params.get("to"))
+        except Exception:
+            return _rpc_err(rpc_id, -32602, "Параметры from/to некорректны")
 
-        with _pay_db() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT provider_trx_id, created_at, amount, order_id,
-                       status, perform_time, cancel_time, reason
-                FROM orders
-                WHERE EXTRACT(EPOCH FROM created_at)*1000 BETWEEN %s AND %s;
-            """, (from_ms, to_ms))
-            rows = cur.fetchall()
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                # Берём заказы, созданные в указанном интервале
+                cur.execute("""
+                    SELECT id, provider_trx_id, amount, status, created_at
+                    FROM orders
+                    WHERE (EXTRACT(EPOCH FROM created_at) * 1000) BETWEEN %s AND %s
+                    ORDER BY created_at ASC
+                """, (from_ms, to_ms))
+                rows = cur.fetchall()
 
-        txs = []
-        for r in rows:
             state_map = {
-                "created": 0,
-                "pending": 1,
+                "new": 0,
+                "created": 1,
                 "paid": 2,
                 "canceled": -1,
                 "canceled_after_perform": -2,
             }
-            txs.append({
-                "id": str(r["provider_trx_id"]),
-                "time": int(r["created_at"].timestamp() * 1000),
-                "amount": int(r["amount"]),
-                "account": {"order_id": str(r["order_id"])},
-                "create_time": int(r["created_at"].timestamp() * 1000),
-                "perform_time": int(r["perform_time"].timestamp() * 1000) if r["perform_time"] else 0,
-                "cancel_time": int(r["cancel_time"].timestamp() * 1000) if r["cancel_time"] else 0,
-                "transaction": str(r["provider_trx_id"]),
-                "state": state_map.get(r["status"], 0),
-                "reason": r["reason"] or None,
-            })
 
-        return _rpc_ok(rpc_id, {"transactions": txs})
+            txs = []
+            for r in rows:
+                trx_id = str(r.get("provider_trx_id") or "")
+                created_at = r.get("created_at")
+                created_ms = int(created_at.timestamp() * 1000) if created_at else 0
+                state = state_map.get((r.get("status") or "").strip(), 0)
 
-    except Exception:
-        logging.exception("[Payme] DB error in GetStatement")
-        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (get_statement)")
+                # Нужные поля по спецификации Payme
+                txs.append({
+                    "id": trx_id,                               # внутренний/Payme id
+                    "time": created_ms,                         # время создания (ms)
+                    "amount": int(r.get("amount") or 0),        # сумма в тийинах
+                    "account": {PAYME_ACCOUNT_FIELD: r["id"]},  # например {"order_id": 123}
+                    "create_time": created_ms if state >= 0 else 0,
+                    "perform_time": created_ms if state == 2 else 0,
+                    "cancel_time": created_ms if state in (-1, -2) else 0,
+                    "transaction": trx_id,                      # Payme transaction id
+                    "state": state,                             # -2/-1/0/1/2
+                    "reason": (5 if state in (-1, -2) else None),
+                })
+
+            return _rpc_ok(rpc_id, {"transactions": txs})
+
+        except Exception:
+            logging.exception("[Payme] DB error in GetStatement")
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (get_statement)")
 
 @app.post("/payme/callback")
 async def payme_cb(request: Request):
