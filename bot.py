@@ -2327,20 +2327,50 @@ def _rpc_err(rpc_id, code: int, ru: str, uz: str | None = None, en: str | None =
     }
 
 # ====== Авторизация Payme ======
-def _payme_auth_ok_from_header(header_val: str | None, *, mid: str, test_key: str, prod_key: str) -> bool:
+def _payme_auth_ok_from_header(header_val: str | None) -> bool:
+    """
+    Принимаем Basic <base64(login:password)>, где login может быть:
+      • 'Paycom'  (официально для Merchant API)
+      • PAYME_MERCHANT_ID (допустим, если вдруг так настроят)
+    password должен совпадать с одним из ключей: тестовым или боевым.
+    """
     if not header_val or not header_val.startswith("Basic "):
         return False
+
+    # Быстрый обходной путь: точное совпадение с XAUTH из ENV
+    xauth_raw = (os.getenv("PAYME_MERCHANT_XAUTH") or "").strip()
+    if xauth_raw and header_val.strip() == xauth_raw:
+        return True
+
     try:
         raw = base64.b64decode(header_val.split(" ", 1)[1]).decode("utf-8")
-        login, _, pwd = raw.partition(":")
-        return login == mid and pwd in {test_key, prod_key}
     except Exception:
         return False
 
-def _payme_auth_check(headers: dict) -> bool:
+    login, _, pwd = raw.partition(":")
+    if not pwd:
+        return False
+
+    allowed_logins = {"Paycom"}
     mid = (os.getenv("PAYME_MERCHANT_ID") or "").strip()
-    test_key = (os.getenv("PAYME_MERCHANT_TEST_KEY") or "").strip()
-    prod_key = (os.getenv("PAYME_MERCHANT_KEY") or "").strip()
+    if mid:
+        allowed_logins.add(mid)
+
+    keys = {
+        (os.getenv("PAYME_MERCHANT_TEST_KEY") or "").strip(),
+        (os.getenv("PAYME_MERCHANT_KEY") or "").strip(),
+    }
+    keys.discard("")  # убираем пустые
+
+    return (login in allowed_logins) and (pwd in keys)
+
+
+def _payme_auth_check(headers: dict) -> bool:
+    # Берём оба варианта заголовков (песочница чаще шлёт Authorization)
+    auth = headers.get("Authorization") or headers.get("authorization")
+    xauth = headers.get("X-Auth") or headers.get("x-auth")
+
+    return _payme_auth_ok_from_header(auth) or _payme_auth_ok_from_header(xauth)
 
     # Берём оба варианта заголовков
     auth = headers.get("Authorization") or headers.get("authorization")
