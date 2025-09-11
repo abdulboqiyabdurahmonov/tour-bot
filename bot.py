@@ -2450,7 +2450,7 @@ async def payme_merchant(request: Request):
         }
         return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
 
-    if method == "CreateTransaction":
+    elif method == "CreateTransaction":
     # 0) заказ должен существовать
     if not order:
         return _rpc_err(rpc_id, -31050, "Заказ не найден")
@@ -2466,7 +2466,7 @@ async def payme_merchant(request: Request):
     except Exception:
         return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-    # 3) проверка «неверная сумма» (песочница этого требует и здесь тоже)
+    # 3) проверка «неверная сумма» — песочница ждёт -31001
     if sent != expected:
         logging.warning(
             f"[Payme] CreateTransaction amount mismatch: sent={sent} expected={expected} order_id={order_id}"
@@ -2482,6 +2482,12 @@ async def payme_merchant(request: Request):
             )
     except Exception:
         return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+
+    return _rpc_ok(rpc_id, {
+        "create_time": _now_ms(),
+        "transaction": str(payme_tr),
+        "state": 1,
+    })
 
     return _rpc_ok(rpc_id, {
         "create_time": _now_ms(),
