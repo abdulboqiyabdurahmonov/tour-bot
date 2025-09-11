@@ -2460,15 +2460,17 @@ async def payme_merchant(request: Request):
     if expected is None:
         return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
 
-    # 2) присланную сумму аккуратно приводим
+    # 2) присланную сумму приводим к int
     try:
         sent = int(amount_in)
     except Exception:
         return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-    # 3) если не совпало — тот же код ошибки, что и в CheckPerformTransaction
+    # 3) проверка «неверная сумма» (песочница этого требует и здесь тоже)
     if sent != expected:
-        logging.warning(f"[Payme] CreateTransaction amount mismatch: sent={sent} expected={expected} order_id={order_id}")
+        logging.warning(
+            f"[Payme] CreateTransaction amount mismatch: sent={sent} expected={expected} order_id={order_id}"
+        )
         return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
     # 4) всё ок — фиксируем транзакцию
@@ -2481,7 +2483,11 @@ async def payme_merchant(request: Request):
     except Exception:
         return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
 
-    return _rpc_ok(rpc_id, {"create_time": _now_ms(), "transaction": str(payme_tr), "state": 1})
+    return _rpc_ok(rpc_id, {
+        "create_time": _now_ms(),
+        "transaction": str(payme_tr),
+        "state": 1
+    })
 
     if method == "PerformTransaction":
         try:
