@@ -2566,7 +2566,7 @@ async def payme_merchant(request: Request):
 
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                # Берём текущий статус, чтобы понять — была ли транзакция уже выполнена
+                # Узнаём текущий статус заказа по транзакции
                 cur.execute(
                     "SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;",
                     (trx_id,),
@@ -2575,17 +2575,31 @@ async def payme_merchant(request: Request):
                 if not row:
                     return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-                prev_status = (row["status"] or "").strip()
+                prev = (row["status"] or "").strip()
 
-                # Если уже paid (perform был), то по спецификации: state = -2
-                if prev_status == "paid":
+                # Идемпотентность: если уже отменена — возвращаем соответствующий state
+                if prev == "canceled":
+                    return _rpc_ok(rpc_id, {
+                        "cancel_time": _now_ms(),
+                        "transaction": trx_id,
+                        "state": -1,   # отменена до завершения
+                    })
+                if prev == "canceled_after_perform":
+                    return _rpc_ok(rpc_id, {
+                        "cancel_time": _now_ms(),
+                        "transaction": trx_id,
+                        "state": -2,   # отменена после завершения
+                    })
+
+                # Если была завершена (paid) — отмена после завершения -> -2
+                if prev == "paid":
                     new_status = "canceled_after_perform"
                     state_out = -2
                 else:
+                    # created/new/прочее — отмена до завершения -> -1
                     new_status = "canceled"
                     state_out = -1
 
-                # Сохраняем новый статус (idempotent: если уже такой — просто перепишем)
                 cur.execute(
                     "UPDATE orders SET status=%s WHERE id=%s;",
                     (new_status, row["id"]),
@@ -2606,33 +2620,23 @@ async def payme_merchant(request: Request):
         trx_id = str(payme_tr)
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute(
-                    "SELECT status FROM orders WHERE provider_trx_id=%s LIMIT 1;",
-                    (trx_id,),
-                )
+                cur.execute("SELECT status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (trx_id,))
                 row = cur.fetchone()
-
             if not row:
                 return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-            status = (row["status"] or "").strip()
-            # учли -2 для случая отмены после perform
             st_map = {
                 "new": 0,
                 "created": 1,
                 "paid": 2,
                 "canceled": -1,
-                "canceled_after_perform": -2,
+                "canceled_after_perform": -2,  # <-- обязательно!
             }
-
             return _rpc_ok(rpc_id, {
-                "create_time": 0,
-                "perform_time": 0,
-                "cancel_time": 0,
+                "create_time": 0, "perform_time": 0, "cancel_time": 0,
                 "transaction": trx_id,
-                "state": st_map.get(status, 0),
+                "state": st_map.get((row["status"] or "").strip(), 0),
             })
-
         except Exception:
             logging.exception("[Payme] DB error in CheckTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (check)")
