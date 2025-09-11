@@ -2629,6 +2629,24 @@ async def payme_merchant(request: Request):
 
         return _rpc_ok(rpc_id, {"transactions": []})
 
+    from fastapi.responses import JSONResponse
+
+@app.api_route("/payme/mock/new", methods=["GET"])
+@app.api_route("/payme/mock/new/{amount}", methods=["GET"])
+async def payme_mock_new(amount: int = 4900000):
+    """
+    Создаёт тестовый заказ под Payme Merchant (сумма в тийинах).
+    Пример: GET /payme/mock/new?amount=4900000
+            GET /payme/mock/new/4900000
+    """
+    oid = create_order(ADMIN_USER_ID or 0, provider="payme", plan_code="basic_m", kind="merchant")
+    with _pay_db() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("UPDATE orders SET amount=%s WHERE id=%s", (amount, oid))
+        except Exception:
+            logging.exception("mock new: set amount failed")
+    return JSONResponse({"order_id": oid, "amount": amount})
+
     # -------- Неизвестный метод --------
     else:
         return _rpc_err(rpc_id, -32601, "Метод не найден")
