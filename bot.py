@@ -2612,6 +2612,17 @@ async def payme_merchant(request: Request):
             logging.exception("[Payme] DB error in CheckTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (check)")
 
+    # Шорткат: быстро создать тестовый заказ под Merchant API (тийины)
+@app.get("/payme/mock/new")
+async def payme_mock_new(amount: int = 4900000):
+    oid = create_order(ADMIN_USER_ID or 0, provider="payme", plan_code="basic_m", kind="merchant")
+    with _pay_db() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("UPDATE orders SET amount=%s WHERE id=%s", (int(amount), oid))
+        except Exception:
+            logging.exception("set mock amount failed")
+    return {"order_id": oid, "amount": int(amount)}
+
     # -------- GetStatement --------
     elif method == "GetStatement":
         # ожидаем params.from и params.to в миллисекундах Unix
