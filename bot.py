@@ -2363,10 +2363,11 @@ def _get_order(order_id: int) -> dict | None:
         cur.execute("SELECT * FROM orders WHERE id=%s;", (order_id,))
         return cur.fetchone()
 
+# === безопаснее трактуем сумму из заказа (храним тийины!) ===
 def _order_amount_tiyin(o: dict) -> int | None:
     """
-    Ожидаем, что в orders.amount уже лежат тийины (UZS*100).
-    Если там оказалась дробь/строка — аккуратно конвертим.
+    Ожидаем, что orders.amount уже в тийинах (UZS*100).
+    Аккуратно приводим к int, поддерживая str/Decimal/float.
     """
     val = o.get("amount")
     if val is None:
@@ -2379,30 +2380,35 @@ def _order_amount_tiyin(o: dict) -> int | None:
         except Exception:
             return None
 
-# ====== Сам эндпоинт Payme Merchant API (песочница) ======
+
 @app.post("/payme/merchant")
 async def payme_merchant(request: Request):
-    # 0) JSON-RPC парсинг
+    # 0) Парсим JSON-RPC. Даже на ошибках всегда отвечаем 200 JSON-ом.
     try:
         body = await request.json()
     except Exception:
-        # Некорректный JSON — спецификация советует -32700
         return _rpc_err(None, -32700, "Некорректный JSON")
 
-    logging.info(f"[Payme] method={method} order_id={order_id} amount_in={amount_in} headers-ok={_payme_auth_check(dict(request.headers))}")
+    headers = dict(request.headers)
     rpc_id = body.get("id")
     method = (body.get("method") or "").strip()
-    params = body.get("params") or {}  
+    params = body.get("params") or {}
     account = params.get("account") or {}
     amount_in = params.get("amount")
     payme_tr  = params.get("id")
     order_id  = account.get("order_id")
 
-    # 1) Авторизация: НЕЛЬЗЯ отдавать HTTP 401 — только JSON-ошибка -32504
-    if not _payme_auth_check(dict(request.headers)):
+    # — теперь ЛОГИ можно писать: переменные уже объявлены —
+    logging.info(
+        f"[Payme] method={method} order_id={order_id} amount_in={amount_in} "
+        f"auth_ok={_payme_auth_check(headers)}"
+    )
+
+    # 1) Авторизация (важно: не отдаём HTTP 401; только JSON-ошибка)
+    if not _payme_auth_check(headers):
         return _rpc_err(rpc_id, -32504, "Недопустимая авторизация", data="auth")
 
-    # 2) Достаём наш заказ (для «несуществующего счёта» песочница ждёт -31050)
+    # 2) Достаём заказ
     order = None
     try:
         if order_id is not None:
@@ -2410,32 +2416,34 @@ async def payme_merchant(request: Request):
     except Exception:
         order = None
 
-    # 3) Обработка методов
+    # 3) Переключатель методов
     if method == "CheckPerformTransaction":
-        # счёт не найден
+        # 2.1) нет счёта
         if not order:
             return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
+        # 2.2) ожидаемая сумма
         expected = _order_amount_tiyin(order)
         if expected is None:
-            return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")  # необязательно, но полезно
+            return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
 
-        # amount_in из Payme ДОЛЖЕН быть int-тиийины, сравниваем строго
+        # 2.3) приводим присланную сумму
         try:
             sent = int(amount_in)
         except Exception:
-            return _rpc_err(rpc_id, -31001, "Неверная сумма")  # формат/тип не тот — тоже считаем как неверную сумму
-
-        if sent != int(expected):
-            logging.warning(f"[Payme] amount mismatch: sent={sent} expected={expected} for order={order_id}")
+            # формат/тип не тот — считаем как неверную сумму
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-        # разрешаем создание транзакции + фискальные реквизиты (минимум)
+        if sent != expected:
+            logging.warning(f"[Payme] amount mismatch: sent={sent} expected={expected} order_id={order_id}")
+            return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+        # 2.4) разрешаем транзакцию + фискальные реквизиты
         detail = {
             "receipt_type": 0,
             "items": [{
                 "title": f"Подписка {order.get('plan_code', 'TripleA')}",
-                "price": int(amount_in or (expected or 0)),
+                "price": sent,  # присланная (и совпавшая) сумма в тийинах
                 "count": 1,
                 "code": os.getenv("FISCAL_IKPU", "00702001001000001"),
                 "vat_percent": int(os.getenv("FISCAL_VAT_PERCENT", "12")),
@@ -2464,7 +2472,6 @@ async def payme_merchant(request: Request):
                 if not row:
                     return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
                 cur.execute("UPDATE orders SET status=%s WHERE id=%s", ("paid", row["id"]))
-            # побочные действия можно не делать в песочнице
         except Exception:
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (perform)")
         return _rpc_ok(rpc_id, {"perform_time": _now_ms(), "transaction": str(payme_tr), "state": 2})
