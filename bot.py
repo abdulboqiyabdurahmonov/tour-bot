@@ -2627,14 +2627,50 @@ async def payme_merchant(request: Request):
             logging.exception("[Payme] DB error in CheckTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (check)")
 
-    # -------- (опционально) GetStatement --------
+        # ---------------- GetStatement ----------------
     elif method == "GetStatement":
-        # Если пока не реализуешь — верни «не поддерживается»
-        return _rpc_err(rpc_id, -32601, "Метод не поддерживается")
+        try:
+            frm = params.get("from")
+            to = params.get("to")
+            if not frm or not to:
+                return _rpc_err(rpc_id, -32602, "Не переданы параметры 'from' и 'to'")
 
-    # -------- default: method not found --------
-    else:
-        return _rpc_err(rpc_id, -32601, "Метод не найден")
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, provider_trx_id, amount, account, 
+                           created_at, perform_time, cancel_time, status, reason
+                    FROM orders
+                    WHERE created_at >= to_timestamp(%s/1000.0)
+                      AND created_at <= to_timestamp(%s/1000.0);
+                """, (frm, to))
+                rows = cur.fetchall()
+
+            txns = []
+            for r in rows:
+                txns.append({
+                    "id": str(r["provider_trx_id"]),         # внешний trx_id
+                    "time": int(r["created_at"].timestamp() * 1000),
+                    "amount": int(r["amount"]),
+                    "account": {"order_id": str(r["account"])},
+                    "create_time": int(r["created_at"].timestamp() * 1000),
+                    "perform_time": int(r["perform_time"].timestamp() * 1000) if r["perform_time"] else 0,
+                    "cancel_time": int(r["cancel_time"].timestamp() * 1000) if r["cancel_time"] else 0,
+                    "transaction": str(r["provider_trx_id"]),
+                    "state": (
+                        1 if r["status"] == "created"
+                        else 2 if r["status"] == "paid"
+                        else -1 if r["status"] == "canceled"
+                        else -2 if r["status"] == "canceled_after_perform"
+                        else 0
+                    ),
+                    "reason": int(r["reason"]) if r.get("reason") else None,
+                })
+
+            return _rpc_ok(rpc_id, {"transactions": txns})
+
+        except Exception:
+            logging.exception("[Payme] DB error in GetStatement")
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (statement)")
 
 @app.post("/payme/callback")
 async def payme_cb(request: Request):
