@@ -2388,24 +2388,23 @@ def _order_amount_tiyin(o: dict) -> int | None:
         except Exception:
             return None
 
-# --- Простой in-memory реестр транзакций (для стабильности песочницы) ---
+# --- Простой in-memory реестр транзакций ---
 # Ключ: payme_transaction_id (str)
-# Значение: {
-#   "order_id": int, "amount": int, "state": int,
-#   "create_time": int, "perform_time": int, "cancel_time": int
-# }
+# Значение:
+# { "order_id": int, "amount": int, "state": int,
+#   "create_time": int, "perform_time": int, "cancel_time": int,
+#   "reason": int }
 TRX_STORE: dict[str, dict] = {}
 
 def _trx_from_db(trx_id: str) -> dict | None:
-    """Попытка восстановить состояние по БД, если в памяти нет (после рестарта/деплоя)."""
     try:
         with _pay_db() as conn, conn.cursor() as cur:
             cur.execute("SELECT id, amount, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (trx_id,))
             row = cur.fetchone()
             if not row:
                 return None
-            st_map = {"new": 0, "created": 1, "paid": 2, "canceled": -1}
-            state = st_map.get(row["status"], 0)
+            st_map = {"new": 0, "created": 1, "paid": 2, "canceled": -1, "canceled_after_perform": -2}
+            state = st_map.get((row["status"] or "").strip(), 0)
             data = {
                 "order_id": row["id"],
                 "amount": _order_amount_tiyin(row) or 0,
@@ -2413,6 +2412,7 @@ def _trx_from_db(trx_id: str) -> dict | None:
                 "create_time": 0,
                 "perform_time": 0,
                 "cancel_time": 0,
+                "reason": 0,           # <— по БД восстановить нечем, оставим 0
             }
             TRX_STORE[trx_id] = data
             return data
@@ -2567,12 +2567,17 @@ async def payme_merchant(request: Request):
         if not trx_id:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        # восстановить состояние (из памяти или по БД)
+        # причина отмены от песочницы (в тестах = 5)
+        try:
+            cancel_reason = int(params.get("reason", 0))
+        except Exception:
+            cancel_reason = 0
+
         trx = TRX_STORE.get(trx_id) or _trx_from_db(trx_id)
         if not trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        # Если уже отменена ранее — отвечаем идемпотентно теми же данными
+        # уже отменена ранее — отдать те же значения (идемпотентность!)
         if trx["state"] in (-1, -2):
             return _rpc_ok(rpc_id, {
                 "cancel_time": trx.get("cancel_time", 0),
@@ -2582,22 +2587,15 @@ async def payme_merchant(request: Request):
 
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                # Отмена выполненной транзакции (после Perform) -> state = -2
                 if trx["state"] == 2:
-                    cur.execute(
-                        "UPDATE orders SET status=%s WHERE id=%s;",
-                        ("canceled_after_perform", trx["order_id"])
-                    )
+                    cur.execute("UPDATE orders SET status=%s WHERE id=%s;", ("canceled_after_perform", trx["order_id"]))
                     trx["state"] = -2
                 else:
-                    # Отмена до Perform (state 0/1) -> state = -1
-                    cur.execute(
-                        "UPDATE orders SET status=%s WHERE id=%s;",
-                        ("canceled", trx["order_id"])
-                    )
+                    cur.execute("UPDATE orders SET status=%s WHERE id=%s;", ("canceled", trx["order_id"]))
                     trx["state"] = -1
 
                 trx["cancel_time"] = _now_ms()
+                trx["reason"] = cancel_reason          # <— запомнили
                 TRX_STORE[trx_id] = trx
 
             return _rpc_ok(rpc_id, {
