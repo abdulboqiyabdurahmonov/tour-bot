@@ -2382,32 +2382,37 @@ def _order_amount_tiyin(o: dict) -> int | None:
 
 @app.post("/payme/merchant")
 async def payme_merchant(request: Request):
-    # 0) Парсим JSON-RPC. Даже на ошибках всегда отвечаем 200 JSON-ом.
+    """
+    JSON-RPC обработчик Merchant API Payme.
+    ⚙️ ВАЖНО:
+      • Всегда отвечаем HTTP 200; ошибки — только в JSON (поле error).
+      • Sandbox «неверная сумма» ждёт код -31001.
+    """
+    # --- 0) Парсинг JSON-RPC (даже при ошибках вернём 200 с error) ---
     try:
         body = await request.json()
     except Exception:
         return _rpc_err(None, -32700, "Некорректный JSON")
 
     headers = dict(request.headers)
-    rpc_id = body.get("id")
-    method = (body.get("method") or "").strip()
-    params = body.get("params") or {}
+    rpc_id  = body.get("id")
+    method  = (body.get("method") or "").strip()
+    params  = body.get("params") or {}
     account = params.get("account") or {}
     amount_in = params.get("amount")
-    payme_tr  = params.get("id")
-    order_id  = account.get("order_id")
+    payme_tr  = params.get("id")             # идентификатор транзакции Payme
+    order_id  = account.get("order_id")      # наше поле счёта
 
-    # — теперь ЛОГИ можно писать: переменные уже объявлены —
     logging.info(
         f"[Payme] method={method} order_id={order_id} amount_in={amount_in} "
         f"auth_ok={_payme_auth_check(headers)}"
     )
 
-    # 1) Авторизация (важно: не отдаём HTTP 401; только JSON-ошибка)
+    # --- 1) Авторизация (по спецификации — только JSON-ошибка, не 401) ---
     if not _payme_auth_check(headers):
         return _rpc_err(rpc_id, -32504, "Недопустимая авторизация", data="auth")
 
-    # 2) Достаём заказ
+    # --- 2) Достаём заказ (если требуется методом) ---
     order = None
     try:
         if order_id is not None:
@@ -2415,34 +2420,31 @@ async def payme_merchant(request: Request):
     except Exception:
         order = None
 
-    # 3) Переключатель методов
+    # ===================== МЕТОДЫ =====================
+
+    # 2.1 CheckPerformTransaction — валидация возможности платежа
     if method == "CheckPerformTransaction":
-        # 2.1) нет счёта
         if not order:
             return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
-        # 2.2) ожидаемая сумма
         expected = _order_amount_tiyin(order)
         if expected is None:
             return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
 
-        # 2.3) приводим присланную сумму
         try:
             sent = int(amount_in)
         except Exception:
-            # формат/тип не тот — считаем как неверную сумму
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
         if sent != expected:
             logging.warning(f"[Payme] amount mismatch: sent={sent} expected={expected} order_id={order_id}")
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-        # 2.4) разрешаем транзакцию + фискальные реквизиты
         detail = {
             "receipt_type": 0,
             "items": [{
                 "title": f"Подписка {order.get('plan_code', 'TripleA')}",
-                "price": sent,  # присланная (и совпавшая) сумма в тийинах
+                "price": sent,  # сумма в тийинах
                 "count": 1,
                 "code": os.getenv("FISCAL_IKPU", "00702001001000001"),
                 "vat_percent": int(os.getenv("FISCAL_VAT_PERCENT", "12")),
@@ -2450,52 +2452,43 @@ async def payme_merchant(request: Request):
         }
         return _rpc_ok(rpc_id, {"allow": True, "detail": detail})
 
+    # 2.2 CreateTransaction — фиксация/резервирование
     elif method == "CreateTransaction":
-    # 0) заказ должен существовать
-    if not order:
-        return _rpc_err(rpc_id, -31050, "Заказ не найден")
+        if not order:
+            return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
-    # 1) ожидания по сумме из заказа (тийины)
-    expected = _order_amount_tiyin(order)
-    if expected is None:
-        return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
+        expected = _order_amount_tiyin(order)
+        if expected is None:
+            return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
 
-    # 2) присланную сумму приводим к int
-    try:
-        sent = int(amount_in)
-    except Exception:
-        return _rpc_err(rpc_id, -31001, "Неверная сумма")
+        try:
+            sent = int(amount_in)
+        except Exception:
+            return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-    # 3) проверка «неверная сумма» — песочница ждёт -31001
-    if sent != expected:
-        logging.warning(
-            f"[Payme] CreateTransaction amount mismatch: sent={sent} expected={expected} order_id={order_id}"
-        )
-        return _rpc_err(rpc_id, -31001, "Неверная сумма")
-
-    # 4) всё ок — фиксируем транзакцию
-    try:
-        with _pay_db() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
-                (str(payme_tr), "created", int(order_id)),
+        if sent != expected:
+            logging.warning(
+                f"[Payme] CreateTransaction amount mismatch: sent={sent} expected={expected} order_id={order_id}"
             )
-    except Exception:
-        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+            return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-    return _rpc_ok(rpc_id, {
-        "create_time": _now_ms(),
-        "transaction": str(payme_tr),
-        "state": 1,
-    })
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
+                    (str(payme_tr), "created", int(order_id)),
+                )
+        except Exception:
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
 
-    return _rpc_ok(rpc_id, {
-        "create_time": _now_ms(),
-        "transaction": str(payme_tr),
-        "state": 1
-    })
+        return _rpc_ok(rpc_id, {
+            "create_time": _now_ms(),
+            "transaction": str(payme_tr),
+            "state": 1,
+        })
 
-    if method == "PerformTransaction":
+    # 2.3 PerformTransaction — подтверждение
+    elif method == "PerformTransaction":
         try:
             with _pay_db() as conn, conn.cursor() as cur:
                 cur.execute("SELECT * FROM orders WHERE provider_trx_id=%s LIMIT 1;", (str(payme_tr),))
@@ -2505,32 +2498,50 @@ async def payme_merchant(request: Request):
                 cur.execute("UPDATE orders SET status=%s WHERE id=%s", ("paid", row["id"]))
         except Exception:
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (perform)")
-        return _rpc_ok(rpc_id, {"perform_time": _now_ms(), "transaction": str(payme_tr), "state": 2})
 
-    if method == "CancelTransaction":
+        return _rpc_ok(rpc_id, {
+            "perform_time": _now_ms(),
+            "transaction": str(payme_tr),
+            "state": 2,
+        })
+
+    # 2.4 CancelTransaction — отмена
+    elif method == "CancelTransaction":
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute("UPDATE orders SET status=%s WHERE provider_trx_id=%s", ("canceled", str(payme_tr)))
+                cur.execute(
+                    "UPDATE orders SET status=%s WHERE provider_trx_id=%s",
+                    ("canceled", str(payme_tr)),
+                )
         except Exception:
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
-        return _rpc_ok(rpc_id, {"cancel_time": _now_ms(), "transaction": str(payme_tr), "state": -1})
 
-    if method == "CheckTransaction":
+        return _rpc_ok(rpc_id, {
+            "cancel_time": _now_ms(),
+            "transaction": str(payme_tr),
+            "state": -1,
+        })
+
+    # 2.5 CheckTransaction — статус по транзакции
+    elif method == "CheckTransaction":
         try:
             with _pay_db() as conn, conn.cursor() as cur:
                 cur.execute("SELECT status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (str(payme_tr),))
                 row = cur.fetchone()
             if not row:
                 return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-            st = {"new": 0, "created": 1, "paid": 2, "canceled": -1}.get(row["status"], 0)
+            state = {"new": 0, "created": 1, "paid": 2, "canceled": -1}.get(row["status"], 0)
             return _rpc_ok(rpc_id, {
-                "create_time": 0, "perform_time": 0, "cancel_time": 0,
-                "transaction": str(payme_tr), "state": st
+                "create_time": 0,
+                "perform_time": 0,
+                "cancel_time": 0,
+                "transaction": str(payme_tr),
+                "state": state,
             })
         except Exception:
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (check)")
 
-    # Неподдерживаемый метод
+    # 2.6 Прочее — метод не поддерживается
     return _rpc_err(rpc_id, -32601, f"Метод {method or '—'} не поддерживается")
 
 # (опционально) Шорткат, чтобы быстро создать тестовый заказ под Merchant API
