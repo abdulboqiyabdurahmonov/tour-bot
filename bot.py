@@ -2610,38 +2610,25 @@ async def payme_merchant(request: Request):
 
     # ---------------- CheckTransaction ----------------
     elif method == "CheckTransaction":
-        trx_id = str(payme_tr or "").strip()
+        trx_id = str(payme_tr or "")
         trx = TRX_STORE.get(trx_id) or _trx_from_db(trx_id)
-
-        # попытка получить статус из БД, если нет в памяти
-        db_status = None
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute("SELECT status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (trx_id,))
-                row = cur.fetchone()
-                db_status = (row["status"] or "").strip() if row else None
-        except Exception:
-            db_status = None
-
-        if not trx and not db_status:
+        if not trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        st_map = {
-            "new": 0,
-            "created": 1,
-            "paid": 2,
-            "canceled": -1,
-            "canceled_after_perform": -2,
-        }
-        state = st_map.get(db_status, (trx or {}).get("state", 0))
-
-        return _rpc_ok(rpc_id, {
-            "create_time": (trx or {}).get("create_time", 0),
-            "perform_time": (trx or {}).get("perform_time", 0),
-            "cancel_time": (trx or {}).get("cancel_time", 0),
+        # базовый ответ
+        resp = {
+            "create_time": trx.get("create_time", 0),
+            "perform_time": trx.get("perform_time", 0),
+            "cancel_time": trx.get("cancel_time", 0),
             "transaction": trx_id,
-            "state": state,
-        })
+            "state": trx.get("state", 0),
+        }
+
+        # песочница требует reason, если транзакция отменена
+        if resp["state"] < 0:
+            resp["reason"] = int(trx.get("reason", 0))  # в тесте ожидается 5
+
+        return _rpc_ok(rpc_id, resp)
 
 # Шорткат: быстро создать тестовый заказ под Merchant API (тийины)
 @app.get("/payme/mock/new")
