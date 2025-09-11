@@ -1141,12 +1141,10 @@ async def fetch_tours_page(
 # ================= GPT =================
 last_gpt_call = defaultdict(float)
 
-
 def get_order_safe(order_id: int) -> dict | None:
     with _pay_db() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM orders WHERE id=%s;", (order_id,))
         return cur.fetchone()
-
 
 def fmt_sub_until(user_id: int) -> str:
     with _pay_db() as conn, conn.cursor() as cur:
@@ -1155,7 +1153,6 @@ def fmt_sub_until(user_id: int) -> str:
         if not row or not row["current_period_end"]:
             return "—"
         return row["current_period_end"].astimezone(TZ).strftime("%d.%m.%Y")
-
 
 async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[str]:
     now = time.monotonic()
@@ -1627,11 +1624,9 @@ async def cb_sub(call: CallbackQuery):
     # создаём заказ как и раньше
     order_id = create_order(call.from_user.id, provider=provider, plan_code=plan_code, kind=kind)
 
-    # достанем сумму из заказа (в тийинах), если create_order её записывает
     order = get_order_safe(order_id) or {}
-    amount_tiyin = int(order.get("amount") or 4900000)  # fallback: 49 000 сум = 4 900 000 тийин
-
-    amount_tiyin = 4900000  # или рассчитывай динамически
+    # ожидаем, что в orders.amount хранится сумма В ТИЙИНАХ
+    amount_tiyin = int(order.get("amount") or 4900000)  # fallback на 49 000 UZS
 
     if provider == "payme":
         mid = PAYME_MERCHANT_ID
@@ -2369,16 +2364,18 @@ def _get_order(order_id: int) -> dict | None:
         return cur.fetchone()
 
 def _order_amount_tiyin(o: dict) -> int | None:
-    # Берём amount/total/price; если похоже на суммы — умножаем на 100
-    val = o.get("amount") or o.get("total") or o.get("price")
+    """
+    Ожидаем, что в orders.amount уже лежат тийины (UZS*100).
+    Если там оказалась дробь/строка — аккуратно конвертим.
+    """
+    val = o.get("amount")
     if val is None:
         return None
     try:
-        v = int(val)
-        return v if v > 10_000 else v * 100
+        return int(val)
     except Exception:
         try:
-            return int(float(val) * 100)
+            return int(float(val))
         except Exception:
             return None
 
@@ -2392,9 +2389,10 @@ async def payme_merchant(request: Request):
         # Некорректный JSON — спецификация советует -32700
         return _rpc_err(None, -32700, "Некорректный JSON")
 
+    logging.info(f"[Payme] method={method} order_id={order_id} amount_in={amount_in} headers-ok={_payme_auth_check(dict(request.headers))}")
     rpc_id = body.get("id")
     method = (body.get("method") or "").strip()
-    params = body.get("params") or {}
+    params = body.get("params") or {}  
     account = params.get("account") or {}
     amount_in = params.get("amount")
     payme_tr  = params.get("id")
@@ -2418,9 +2416,18 @@ async def payme_merchant(request: Request):
         if not order:
             return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
-        # неверная сумма
         expected = _order_amount_tiyin(order)
-        if expected is not None and amount_in is not None and int(amount_in) != int(expected):
+        if expected is None:
+            return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")  # необязательно, но полезно
+
+        # amount_in из Payme ДОЛЖЕН быть int-тиийины, сравниваем строго
+        try:
+            sent = int(amount_in)
+        except Exception:
+            return _rpc_err(rpc_id, -31001, "Неверная сумма")  # формат/тип не тот — тоже считаем как неверную сумму
+
+        if sent != int(expected):
+            logging.warning(f"[Payme] amount mismatch: sent={sent} expected={expected} for order={order_id}")
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
         # разрешаем создание транзакции + фискальные реквизиты (минимум)
