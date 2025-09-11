@@ -2562,11 +2562,14 @@ async def payme_merchant(request: Request):
 
     # ---------------- CancelTransaction ----------------
     elif method == "CancelTransaction":
-        trx_id = str(payme_tr)
+        # ВАЖНО: для CancelTransaction ID приходит в params["id"]
+        trx_id = str(params.get("id") or "").strip()
+        if not trx_id:
+            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                # Узнаём текущий статус заказа по транзакции
+                # ищем по тому же полю, куда вы сохраняете ID из CreateTransaction
                 cur.execute(
                     "SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;",
                     (trx_id,),
@@ -2575,34 +2578,18 @@ async def payme_merchant(request: Request):
                 if not row:
                     return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-                prev = (row["status"] or "").strip()
+                prev_status = (row["status"] or "").strip()
 
-                # Идемпотентность: если уже отменена — возвращаем соответствующий state
-                if prev == "canceled":
-                    return _rpc_ok(rpc_id, {
-                        "cancel_time": _now_ms(),
-                        "transaction": trx_id,
-                        "state": -1,   # отменена до завершения
-                    })
-                if prev == "canceled_after_perform":
-                    return _rpc_ok(rpc_id, {
-                        "cancel_time": _now_ms(),
-                        "transaction": trx_id,
-                        "state": -2,   # отменена после завершения
-                    })
-
-                # Если была завершена (paid) — отмена после завершения -> -2
-                if prev == "paid":
+                if prev_status == "paid":
                     new_status = "canceled_after_perform"
-                    state_out = -2
+                    state_out = -2   # уже выполнена, отмена после perform
                 else:
-                    # created/new/прочее — отмена до завершения -> -1
-                    new_status = row["status"]
-                    state_out = -2 if new_status == "canceled_after_perform" else -1
+                    new_status = "canceled"
+                    state_out = -1   # отмена до perform
 
                 cur.execute(
-                    "UPDATE orders SET status='paid', provider_trx_id=%s WHERE id=%s;",
-                    (trx_id, row["id"]),
+                    "UPDATE orders SET status=%s WHERE id=%s;",
+                    (new_status, row["id"]),
                 )
 
             return _rpc_ok(rpc_id, {
