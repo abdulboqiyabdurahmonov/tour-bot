@@ -2600,6 +2600,7 @@ async def payme_merchant(request: Request):
                     "UPDATE orders SET status=%s, perform_time=NOW() WHERE provider_trx_id=%s;",
                     ("paid", payme_trx)
                 )
+
         except Exception:
             logging.exception("[Payme] DB error in PerformTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (perform)")
