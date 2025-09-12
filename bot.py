@@ -2570,7 +2570,7 @@ async def payme_merchant(request: Request):
             "create_time": create_time,
             "perform_time": 0,
             "cancel_time": 0,
-            "reason": 0,
+            "reason": None,
         }
         logging.info(f"[Payme] CreateTransaction saved trx_id={payme_trx} for order_id={order_id}")
 
@@ -2613,6 +2613,12 @@ async def payme_merchant(request: Request):
         if not payme_trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
+        cancel_reason = params.get("reason")  # Payme присылает код причины
+            try:
+                cancel_reason = int(cancel_reason) if cancel_reason is not None else None
+            except Exception:
+                cancel_reason = None
+
         try:
             with _pay_db() as conn, conn.cursor() as cur:
                 cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
@@ -2628,19 +2634,23 @@ async def payme_merchant(request: Request):
                     new_status = "canceled"
                     state_out = -1
 
-                cur.execute(
-                    "UPDATE orders SET status=%s, cancel_time=NOW() WHERE id=%s;",
-                    (new_status, row["id"])
-                )
+                cur.execute("UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
+                            (new_status, cancel_reason, row["id"]))
+                
         except Exception:
             logging.exception("[Payme] DB error in CancelTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
 
         trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
-        trx.update({"state": state_out, "cancel_time": _now_ms()})
+        trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
         TRX_STORE[payme_trx] = trx
 
-        return _rpc_ok(rpc_id, {"cancel_time": trx["cancel_time"], "transaction": payme_trx, "state": state_out})
+        return _rpc_ok(rpc_id, {
+        "cancel_time": trx["cancel_time"],
+        "transaction": payme_trx,
+        "state": state_out,
+        "reason": trx["reason"],     # <-- можно вернуть и здесь, не помешает
+    })
 
     # -------- CheckTransaction --------
     elif method == "CheckTransaction":
@@ -2648,6 +2658,9 @@ async def payme_merchant(request: Request):
         trx = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
         if not trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+        reason = trx.get("reason")
+        if trx.get("state") in (1, 2):
+            reason = None
 
         return _rpc_ok(rpc_id, {
             "create_time": trx.get("create_time", 0),
@@ -2655,6 +2668,7 @@ async def payme_merchant(request: Request):
             "cancel_time": trx.get("cancel_time", 0),
             "transaction": payme_trx,
             "state": trx.get("state", 0),
+            "reason": reason,
         })
 
     # -------- GetStatement --------
