@@ -2505,9 +2505,10 @@ async def payme_merchant(request: Request):
         if not payme_trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        # ✅ 1) Идемпотентность: если такую trx уже создавали — вернуть тот же ответ
+        # 1) Идемпотентность по trx-id
         snap = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
         if snap:
+            # сумма в повторном вызове должна совпасть
             try:
                 sent = int(amount_in)
             except Exception:
@@ -2515,13 +2516,14 @@ async def payme_merchant(request: Request):
             if snap.get("amount") not in (None, sent):
                 return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
+            # вернуть РОВНО то же состояние
             return _rpc_ok(rpc_id, {
                 "create_time": snap.get("create_time", 0),
                 "transaction": payme_trx,
                 "state": 2 if snap.get("state") == 2 else 1
             })
 
-        # ✅ 2) Валидация заказа и суммы
+        # 2) Валидация заказа/суммы
         if not order:
             return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
@@ -2542,24 +2544,25 @@ async def payme_merchant(request: Request):
             logging.warning(f"[Payme] Create mismatch: sent={sent} expected={expected} order_id={order_id}")
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-        # ✅ 3) Создание новой trx
+        # 3) Создание trx: в заказе может уже быть ДРУГОЙ provider_trx_id -> ошибка -31099
         create_time = _now_ms()
         try:
             with _pay_db() as conn, conn.cursor() as cur:
-                # если уже привязан другой provider_trx_id — запретить
                 cur.execute("SELECT provider_trx_id FROM orders WHERE id=%s;", (int(order_id),))
                 row = cur.fetchone()
                 if row and row.get("provider_trx_id") and row["provider_trx_id"] != payme_trx:
                     return _rpc_err(rpc_id, -31099, "Транзакция уже существует для этого заказа")
 
                 cur.execute(
-                    "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
+                    "UPDATE orders SET provider_trx_id=%s, status=%s, created_at=COALESCE(created_at, NOW()) "
+                    "WHERE id=%s",
                     (payme_trx, "created", int(order_id)),
                 )
         except Exception:
             logging.exception("[Payme] DB error in CreateTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
 
+        # Снимок для последующих повторов
         TRX_STORE[payme_trx] = {
             "order_id": int(order_id),
             "amount": sent,
@@ -2645,6 +2648,7 @@ async def payme_merchant(request: Request):
         trx = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
         if not trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+
         return _rpc_ok(rpc_id, {
             "create_time": trx.get("create_time", 0),
             "perform_time": trx.get("perform_time", 0),
@@ -2693,12 +2697,11 @@ async def payme_merchant(request: Request):
                 })
 
             return _rpc_ok(rpc_id, {"transactions": txns})
-
         except Exception:
             logging.exception("[Payme] DB error in GetStatement")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (statement)")
 
-    # -------- Unknown method --------
+    # -------- unknown --------
     else:
         return _rpc_err(rpc_id, -32601, f"Метод {method} не найден")
 
