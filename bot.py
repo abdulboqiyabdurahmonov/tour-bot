@@ -2500,63 +2500,86 @@ async def payme_merchant(request: Request):
         return _rpc_ok(rpc_id, {"allow": True})
 
     # -------- CreateTransaction --------
-    elif method == "CreateTransaction":
-        if not order:
-            return _rpc_err(rpc_id, -31050, "Заказ не найден")
+elif method == "CreateTransaction":
+    payme_trx = str(trx_id_in or "").strip()
+    if not payme_trx:
+        return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        expected = _order_amount_tiyin(order)
-        if expected is None:
-            return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
-
+    # ✅ 1) ИДЕМПОТЕНТНОСТЬ: если уже создавали эту trx — возвращаем РОВНО то же
+    snap = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
+    if snap:
+        # сумма должна совпасть
         try:
             sent = int(amount_in)
         except Exception:
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
-
-        if sent != expected:
-            logging.warning(f"[Payme] Create mismatch: sent={sent} expected={expected} order_id={order_id}")
+        if snap.get("amount") not in (None, sent):
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-        payme_trx = str(trx_id_in or "").strip()
-        if not payme_trx:
-            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+        # возвращаем те же поля, что были выданы в первый раз
+        return _rpc_ok(rpc_id, {
+            "create_time": snap.get("create_time", 0),
+            "transaction": payme_trx,
+            "state": 2 if snap.get("state") == 2 else 1
+        })
 
-        # идемпотентность: если транзакция уже есть — вернуть её же, без новых времён
-        existing = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
-        if existing:
-            # проверим, что аккаунт/сумма совпадают
-            if existing["amount"] != sent:
-                return _rpc_err(rpc_id, -31001, "Неверная сумма")
-            return _rpc_ok(rpc_id, {
-                "create_time": existing["create_time"],
-                "transaction": payme_trx,
-                "state": existing["state"] if existing["state"] in (1,2) else 1
-            })
+    # ✅ 2) Валидация заказа и суммы
+    if not order:
+        return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
-        # создаём новую
-        create_time = _now_ms()
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE orders SET provider_trx_id=%s, status=%s, created_at=NOW() WHERE id=%s",
-                    (payme_trx, "created", int(order_id)),
-                )
-        except Exception:
-            logging.exception("[Payme] DB error in CreateTransaction")
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+    # если заказ уже завершён/отменён — новую транзакцию создавать нельзя
+    order_status = (order.get("status") or "").strip()
+    if order_status in {"paid", "canceled", "canceled_after_perform"}:
+        return _rpc_err(rpc_id, -31099, "Невозможно создать транзакцию для данного заказа")
 
-        TRX_STORE[payme_trx] = {
-            "order_id": int(order_id),
-            "amount": sent,
-            "state": 1,
-            "create_time": create_time,
-            "perform_time": 0,
-            "cancel_time": 0,
-            "reason": 0,
-        }
-        logging.info(f"[Payme] CreateTransaction saved trx_id={payme_trx} for order_id={order_id}")
+    expected = _order_amount_tiyin(order)
+    if expected is None:
+        return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
 
-        return _rpc_ok(rpc_id, {"create_time": create_time, "transaction": payme_trx, "state": 1})
+    try:
+        sent = int(amount_in)
+    except Exception:
+        return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+    if sent != expected:
+        logging.warning(f"[Payme] Create mismatch: sent={sent} expected={expected} order_id={order_id}")
+        return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+    # ✅ 3) Создаём новую trx (в БД помечаем created, привязываем внешний id)
+    create_time = _now_ms()
+    try:
+        with _pay_db() as conn, conn.cursor() as cur:
+            # если в заказ уже привязан другой provider_trx_id — запрещаем (повторная попытка с другим id)
+            cur.execute("SELECT provider_trx_id FROM orders WHERE id=%s;", (int(order_id),))
+            row = cur.fetchone()
+            if row and row.get("provider_trx_id") and row["provider_trx_id"] != payme_trx:
+                return _rpc_err(rpc_id, -31099, "Транзакция уже существует для этого заказа")
+
+            cur.execute(
+                "UPDATE orders SET provider_trx_id=%s, status=%s WHERE id=%s",
+                (payme_trx, "created", int(order_id)),
+            )
+    except Exception:
+        logging.exception("[Payme] DB error in CreateTransaction")
+        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+
+    # снапшот для идемпотентных повторов
+    TRX_STORE[payme_trx] = {
+        "order_id": int(order_id),
+        "amount": sent,
+        "state": 1,
+        "create_time": create_time,
+        "perform_time": 0,
+        "cancel_time": 0,
+        "reason": 0,
+    }
+    logging.info(f"[Payme] CreateTransaction saved trx_id={payme_trx} for order_id={order_id}")
+
+    return _rpc_ok(rpc_id, {
+        "create_time": create_time,
+        "transaction": payme_trx,
+        "state": 1
+    })
 
     # -------- PerformTransaction --------
     elif method == "PerformTransaction":
