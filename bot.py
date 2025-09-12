@@ -321,6 +321,18 @@ def ensure_questions_schema():
         )
         cur.execute("CREATE INDEX IF NOT EXISTS questions_user_id_idx ON questions(user_id);")
 
+def ensure_orders_columns():
+    try:
+        with _pay_db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE IF EXISTS orders
+                  ADD COLUMN IF NOT EXISTS provider_trx_id TEXT,
+                  ADD COLUMN IF NOT EXISTS perform_time     TIMESTAMPTZ,
+                  ADD COLUMN IF NOT EXISTS cancel_time      TIMESTAMPTZ,
+                  ADD COLUMN IF NOT EXISTS reason           INTEGER
+            """)
+    except Exception:
+        logging.exception("Ensure orders columns failed")
 
 # ================== ПРОВЕРКА ЛИДОВ / ПОДПИСКИ ==================
 
@@ -2505,42 +2517,27 @@ async def payme_merchant(request: Request):
         return _rpc_ok(rpc_id, {"allow": True})
 
     # -------- CreateTransaction --------
-    def ensure_orders_columns():
-    try:
-        with _pay_db() as conn, conn.cursor() as cur:
-            cur.execute("""
-                ALTER TABLE IF EXISTS orders
-                  ADD COLUMN IF NOT EXISTS perform_time TIMESTAMPTZ,
-                  ADD COLUMN IF NOT EXISTS cancel_time  TIMESTAMPTZ,
-                  ADD COLUMN IF NOT EXISTS reason       INTEGER;
-            """)
-    except Exception:
-        logging.exception("Ensure orders columns failed")
-
     elif method == "CreateTransaction":
         payme_trx = str(trx_id_in or "").strip()
         if not payme_trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        # 1) Идемпотентность по trx-id
+        # идемпотентность
         snap = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
         if snap:
-            # сумма в повторном вызове должна совпасть
             try:
                 sent = int(amount_in)
             except Exception:
                 return _rpc_err(rpc_id, -31001, "Неверная сумма")
             if snap.get("amount") not in (None, sent):
                 return _rpc_err(rpc_id, -31001, "Неверная сумма")
-
-            # вернуть РОВНО то же состояние
             return _rpc_ok(rpc_id, {
                 "create_time": snap.get("create_time", 0),
                 "transaction": payme_trx,
                 "state": 2 if snap.get("state") == 2 else 1
             })
 
-        # 2) Валидация заказа/суммы
+        # валидируем заказ/сумму
         if not order:
             return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
@@ -2561,7 +2558,6 @@ async def payme_merchant(request: Request):
             logging.warning(f"[Payme] Create mismatch: sent={sent} expected={expected} order_id={order_id}")
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
 
-        # 3) Создание trx: в заказе может уже быть ДРУГОЙ provider_trx_id -> ошибка -31099
         create_time = _now_ms()
         try:
             with _pay_db() as conn, conn.cursor() as cur:
@@ -2579,7 +2575,6 @@ async def payme_merchant(request: Request):
             logging.exception("[Payme] DB error in CreateTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
 
-        # Снимок для последующих повторов
         TRX_STORE[payme_trx] = {
             "order_id": int(order_id),
             "amount": sent,
@@ -2589,8 +2584,6 @@ async def payme_merchant(request: Request):
             "cancel_time": 0,
             "reason": None,
         }
-        logging.info(f"[Payme] CreateTransaction saved trx_id={payme_trx} for order_id={order_id}")
-
         return _rpc_ok(rpc_id, {
             "create_time": create_time,
             "transaction": payme_trx,
