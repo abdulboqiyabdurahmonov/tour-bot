@@ -2209,7 +2209,6 @@ async def on_admin_group_answer(message: Message):
 async def root():
     return {"status": "ok", "message": "TripleA Travel Bot is running!"}
 
-
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
     try:
@@ -2494,7 +2493,7 @@ async def payme_merchant(request: Request):
         except Exception:
             order = None
 
-        # ================== METHOD SWITCH ==================
+    # ================== METHOD SWITCH ==================
 
     # -------- CheckPerformTransaction --------
     if method == "CheckPerformTransaction":
@@ -2517,78 +2516,85 @@ async def payme_merchant(request: Request):
         return _rpc_ok(rpc_id, {"allow": True})
 
     # -------- CreateTransaction --------
-elif method == "CreateTransaction":
-    payme_trx = str(trx_id_in or "").strip()
-    if not payme_trx:
-        return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+    elif method == "CreateTransaction":
+        payme_trx = str(trx_id_in or "").strip()
+        if not payme_trx:
+            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-    # идемпотентность
-    snap = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
-    if snap:
+        # 1) Идемпотентность по trx-id
+        snap = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
+        if snap:
+            # сумма в повторном вызове должна совпасть
+            try:
+                sent = int(amount_in)
+            except Exception:
+                return _rpc_err(rpc_id, -31001, "Неверная сумма")
+            if snap.get("amount") not in (None, sent):
+                return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+            # вернуть РОВНО то же состояние
+            return _rpc_ok(rpc_id, {
+                "create_time": snap.get("create_time", 0),
+                "transaction": payme_trx,
+                "state": 2 if snap.get("state") == 2 else 1
+            })
+
+        # 2) Валидация заказа/суммы
+        if not order:
+            return _rpc_err(rpc_id, -31050, "Заказ не найден")
+
+        order_status = (order.get("status") or "").strip()
+        if order_status in {"paid", "canceled", "canceled_after_perform"}:
+            return _rpc_err(rpc_id, -31099, "Невозможно создать транзакцию для данного заказа")
+
+        expected = _order_amount_tiyin(order)
+        if expected is None:
+            return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
+
         try:
             sent = int(amount_in)
         except Exception:
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
-        if snap.get("amount") not in (None, sent):
+
+        if sent != expected:
+            logging.warning(f"[Payme] Create mismatch: sent={sent} expected={expected} order_id={order_id}")
             return _rpc_err(rpc_id, -31001, "Неверная сумма")
+
+        # 3) Создание trx: в заказе может уже быть ДРУГОЙ provider_trx_id -> ошибка -31099
+        create_time = _now_ms()
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute("SELECT provider_trx_id FROM orders WHERE id=%s;", (int(order_id),))
+                row = cur.fetchone()
+                if row and row.get("provider_trx_id") and row["provider_trx_id"] != payme_trx:
+                    return _rpc_err(rpc_id, -31099, "Транзакция уже существует для этого заказа")
+
+                cur.execute(
+                    "UPDATE orders SET provider_trx_id=%s, status=%s, created_at=COALESCE(created_at, NOW()) "
+                    "WHERE id=%s",
+                    (payme_trx, "created", int(order_id)),
+                )
+        except Exception:
+            logging.exception("[Payme] DB error in CreateTransaction")
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
+
+        # Снимок для последующих повторов
+        TRX_STORE[payme_trx] = {
+            "order_id": int(order_id),
+            "amount": sent,
+            "state": 1,
+            "create_time": create_time,
+            "perform_time": 0,
+            "cancel_time": 0,
+            "reason": None,
+        }
+        logging.info(f"[Payme] CreateTransaction saved trx_id={payme_trx} for order_id={order_id}")
+
         return _rpc_ok(rpc_id, {
-            "create_time": snap.get("create_time", 0),
+            "create_time": create_time,
             "transaction": payme_trx,
-            "state": 2 if snap.get("state") == 2 else 1
+            "state": 1
         })
-
-    # валидируем заказ/сумму
-    if not order:
-        return _rpc_err(rpc_id, -31050, "Заказ не найден")
-
-    order_status = (order.get("status") or "").strip()
-    if order_status in {"paid", "canceled", "canceled_after_perform"}:
-        return _rpc_err(rpc_id, -31099, "Невозможно создать транзакцию для данного заказа")
-
-    expected = _order_amount_tiyin(order)
-    if expected is None:
-        return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
-
-    try:
-        sent = int(amount_in)
-    except Exception:
-        return _rpc_err(rpc_id, -31001, "Неверная сумма")
-
-    if sent != expected:
-        logging.warning(f"[Payme] Create mismatch: sent={sent} expected={expected} order_id={order_id}")
-        return _rpc_err(rpc_id, -31001, "Неверная сумма")
-
-    create_time = _now_ms()
-    try:
-        with _pay_db() as conn, conn.cursor() as cur:
-            cur.execute("SELECT provider_trx_id FROM orders WHERE id=%s;", (int(order_id),))
-            row = cur.fetchone()
-            if row and row.get("provider_trx_id") and row["provider_trx_id"] != payme_trx:
-                return _rpc_err(rpc_id, -31099, "Транзакция уже существует для этого заказа")
-
-            cur.execute(
-                "UPDATE orders SET provider_trx_id=%s, status=%s, created_at=COALESCE(created_at, NOW()) "
-                "WHERE id=%s",
-                (payme_trx, "created", int(order_id)),
-            )
-    except Exception:
-        logging.exception("[Payme] DB error in CreateTransaction")
-        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (create)")
-
-    TRX_STORE[payme_trx] = {
-        "order_id": int(order_id),
-        "amount": sent,
-        "state": 1,
-        "create_time": create_time,
-        "perform_time": 0,
-        "cancel_time": 0,
-        "reason": None,
-    }
-    return _rpc_ok(rpc_id, {
-        "create_time": create_time,
-        "transaction": payme_trx,
-        "state": 1
-    })
 
     # -------- PerformTransaction --------
     elif method == "PerformTransaction":
@@ -2610,7 +2616,6 @@ elif method == "CreateTransaction":
                     "UPDATE orders SET status=%s, perform_time=NOW() WHERE provider_trx_id=%s;",
                     ("paid", payme_trx)
                 )
-
         except Exception:
             logging.exception("[Payme] DB error in PerformTransaction")
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (perform)")
@@ -2618,50 +2623,51 @@ elif method == "CreateTransaction":
         logging.info(f"[Payme] PerformTransaction OK trx_id={payme_trx}")
         return _rpc_ok(rpc_id, {"perform_time": trx["perform_time"], "transaction": payme_trx, "state": 2})
 
+    # -------- CancelTransaction --------
     elif method == "CancelTransaction":
-    payme_trx = str(trx_id_in or "").strip()
-    if not payme_trx:
-        return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+        payme_trx = str(trx_id_in or "").strip()
+        if not payme_trx:
+            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-    cancel_reason = params.get("reason")
-    try:
-        cancel_reason = int(cancel_reason) if cancel_reason is not None else None
-    except Exception:
-        cancel_reason = None
+        cancel_reason = params.get("reason")  # Payme даёт код причины
+        try:
+            cancel_reason = int(cancel_reason) if cancel_reason is not None else None
+        except Exception:
+            cancel_reason = None
 
-    try:
-        with _pay_db() as conn, conn.cursor() as cur:
-            cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
-            row = cur.fetchone()
-            if not row:
-                return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+        try:
+            with _pay_db() as conn, conn.cursor() as cur:
+                cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
+                row = cur.fetchone()
+                if not row:
+                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-            prev = (row["status"] or "").strip()
-            if prev == "paid":
-                new_status = "canceled_after_perform"
-                state_out = -2
-            else:
-                new_status = "canceled"
-                state_out = -1
+                prev = (row["status"] or "").strip()
+                if prev == "paid":
+                    new_status = "canceled_after_perform"
+                    state_out = -2
+                else:
+                    new_status = "canceled"
+                    state_out = -1
 
-            cur.execute(
-                "UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
-                (new_status, cancel_reason, row["id"])
-            )
-    except Exception:
-        logging.exception("[Payme] DB error in CancelTransaction")
-        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
+                cur.execute(
+                    "UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
+                    (new_status, cancel_reason, row["id"])
+                )
+        except Exception:
+            logging.exception("[Payme] DB error in CancelTransaction")
+            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
 
-    trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
-    trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
-    TRX_STORE[payme_trx] = trx
+        trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
+        trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
+        TRX_STORE[payme_trx] = trx
 
-    return _rpc_ok(rpc_id, {
-        "cancel_time": trx["cancel_time"],
-        "transaction": payme_trx,
-        "state": state_out,
-        "reason": trx["reason"],
-    })
+        return _rpc_ok(rpc_id, {
+            "cancel_time": trx["cancel_time"],
+            "transaction": payme_trx,
+            "state": state_out,
+            "reason": trx["reason"],
+        })
 
     # -------- CheckTransaction --------
     elif method == "CheckTransaction":
