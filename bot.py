@@ -2618,127 +2618,50 @@ async def payme_merchant(request: Request):
         logging.info(f"[Payme] PerformTransaction OK trx_id={payme_trx}")
         return _rpc_ok(rpc_id, {"perform_time": trx["perform_time"], "transaction": payme_trx, "state": 2})
 
-    # -------- CancelTransaction --------
     elif method == "CancelTransaction":
-        payme_trx = str(trx_id_in or "").strip()
-        if not payme_trx:
-            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+    payme_trx = str(trx_id_in or "").strip()
+    if not payme_trx:
+        return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        cancel_reason = params.get("reason")  # Payme даёт код причины
-        try:
-            cancel_reason = int(cancel_reason) if cancel_reason is not None else None
-        except Exception:
-            cancel_reason = None
+    cancel_reason = params.get("reason")
+    try:
+        cancel_reason = int(cancel_reason) if cancel_reason is not None else None
+    except Exception:
+        cancel_reason = None
 
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
-                row = cur.fetchone()
-                if not row:
-                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+    try:
+        with _pay_db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
+            row = cur.fetchone()
+            if not row:
+                return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-                prev = (row["status"] or "").strip()
-                if prev == "paid":
-                    new_status = "canceled_after_perform"
-                    state_out = -2
-                else:
-                    new_status = "canceled"
-                    state_out = -1
+            prev = (row["status"] or "").strip()
+            if prev == "paid":
+                new_status = "canceled_after_perform"
+                state_out = -2
+            else:
+                new_status = "canceled"
+                state_out = -1
 
-                cur.execute(
-                    "UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
-                    (new_status, cancel_reason, row["id"])
-                )
-        except Exception:
-            logging.exception("[Payme] DB error in CancelTransaction")
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
+            cur.execute(
+                "UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
+                (new_status, cancel_reason, row["id"])
+            )
+    except Exception:
+        logging.exception("[Payme] DB error in CancelTransaction")
+        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
 
-        trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
-        trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
-        TRX_STORE[payme_trx] = trx
+    trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
+    trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
+    TRX_STORE[payme_trx] = trx
 
-        return _rpc_ok(rpc_id, {
-            "cancel_time": trx["cancel_time"],
-            "transaction": payme_trx,
-            "state": state_out,
-            "reason": trx["reason"],
-        })cancel_reason = params.get("reason")  # Payme даёт код причины
-        try:
-            cancel_reason = int(cancel_reason) if cancel_reason is not None else None
-        except Exception:
-            cancel_reason = None
-
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
-                row = cur.fetchone()
-                if not row:
-                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-
-                prev = (row["status"] or "").strip()
-                if prev == "paid":
-                    new_status = "canceled_after_perform"
-                    state_out = -2
-                else:
-                    new_status = "canceled"
-                    state_out = -1
-
-                cur.execute(
-                    "UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
-                    (new_status, cancel_reason, row["id"])
-                )
-        except Exception:
-            logging.exception("[Payme] DB error in CancelTransaction")
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
-
-        trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
-        trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
-        TRX_STORE[payme_trx] = trx
-
-        return _rpc_ok(rpc_id, {
-            "cancel_time": trx["cancel_time"],
-            "transaction": payme_trx,
-            "state": state_out,
-            "reason": trx["reason"],
-        })cancel_reason = params.get("reason")  # Payme даёт код причины
-        try:
-            cancel_reason = int(cancel_reason) if cancel_reason is not None else None
-        except Exception:
-            cancel_reason = None
-
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
-                row = cur.fetchone()
-                if not row:
-                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-
-                prev = (row["status"] or "").strip()
-                if prev == "paid":
-                    new_status = "canceled_after_perform"
-                    state_out = -2
-                else:
-                    new_status = "canceled"
-                    state_out = -1
-
-                cur.execute(
-                    "UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
-                    (new_status, cancel_reason, row["id"])
-                )
-        except Exception:
-            logging.exception("[Payme] DB error in CancelTransaction")
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
-
-        trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
-        trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
-        TRX_STORE[payme_trx] = trx
-
-        return _rpc_ok(rpc_id, {
-            "cancel_time": trx["cancel_time"],
-            "transaction": payme_trx,
-            "state": state_out,
-            "reason": trx["reason"],
-        })
+    return _rpc_ok(rpc_id, {
+        "cancel_time": trx["cancel_time"],
+        "transaction": payme_trx,
+        "state": state_out,
+        "reason": trx["reason"],
+    })
 
     # -------- CheckTransaction --------
     elif method == "CheckTransaction":
