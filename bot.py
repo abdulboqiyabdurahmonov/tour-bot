@@ -2628,7 +2628,7 @@ async def payme_merchant(request: Request):
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (check)")
 
         # ---------------- GetStatement ----------------
-        elif method == "GetStatement":
+        if method == "GetStatement":
             try:
                 frm = params.get("from")
                 to = params.get("to")
