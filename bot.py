@@ -2623,70 +2623,130 @@ async def payme_merchant(request: Request):
         logging.info(f"[Payme] PerformTransaction OK trx_id={payme_trx}")
         return _rpc_ok(rpc_id, {"perform_time": trx["perform_time"], "transaction": payme_trx, "state": 2})
 
-    # -------- CancelTransaction --------
-    elif method == "CancelTransaction":
-        payme_trx = str(trx_id_in or "").strip()
-        if not payme_trx:
-            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+# -------- CancelTransaction --------
+elif method == "CancelTransaction":
+    payme_trx = str(trx_id_in or "").strip()
+    if not payme_trx:
+        return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
 
-        cancel_reason = params.get("reason")  # Payme даёт код причины
-        try:
-            cancel_reason = int(cancel_reason) if cancel_reason is not None else None
-        except Exception:
-            cancel_reason = None
+    # reason из Payme (int | None)
+    cancel_reason = params.get("reason")
+    try:
+        cancel_reason = int(cancel_reason) if cancel_reason is not None else None
+    except Exception:
+        cancel_reason = None
 
-        try:
-            with _pay_db() as conn, conn.cursor() as cur:
-                cur.execute("SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;", (payme_trx,))
-                row = cur.fetchone()
-                if not row:
-                    return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-
-                prev = (row["status"] or "").strip()
-                if prev == "paid":
-                    new_status = "canceled_after_perform"
-                    state_out = -2
-                else:
-                    new_status = "canceled"
-                    state_out = -1
-
-                cur.execute(
-                    "UPDATE orders SET status=%s, cancel_time=NOW(), reason=%s WHERE id=%s;",
-                    (new_status, cancel_reason, row["id"])
-                )
-        except Exception:
-            logging.exception("[Payme] DB error in CancelTransaction")
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
-
-        trx = TRX_STORE.get(payme_trx) or {"create_time": 0, "perform_time": 0}
-        trx.update({"state": state_out, "cancel_time": _now_ms(), "reason": cancel_reason})
-        TRX_STORE[payme_trx] = trx
-
-        return _rpc_ok(rpc_id, {
-            "cancel_time": trx["cancel_time"],
-            "transaction": payme_trx,
-            "state": state_out,
-            "reason": trx["reason"],
-        })
-
-    # -------- CheckTransaction --------
-    elif method == "CheckTransaction":
-        payme_trx = str(trx_id_in or "").strip()
+    try:
+        # 1) Берём снимок из cache или БД
         trx = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
         if not trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-        reason = trx.get("reason")
-        if trx.get("state") in (1, 2):
-            reason = None
 
+        # Нормализуем поля
+        cur_state     = int(trx.get("state", 0))
+        create_time   = int(trx.get("create_time", 0)) or _now_ms()
+        perform_time  = int(trx.get("perform_time", 0))
+        cancel_time   = int(trx.get("cancel_time", 0))
+        stored_reason = trx.get("reason")
+
+        # 2) Идемпотентность: если уже отменена — вернуть как есть
+        if cur_state in (-1, -2):
+            return _rpc_ok(rpc_id, {
+                "cancel_time": cancel_time,
+                "transaction": payme_trx,
+                "state": cur_state,
+                "reason": stored_reason,
+            })
+
+        # 3) Решаем, какой state ставить
+        # Если транзакция была выполнена (state==2 или есть perform_time), то -2
+        if cur_state == 2 or perform_time > 0:
+            new_state = -2
+            new_status_db = "canceled_after_perform"
+        else:
+            new_state = -1
+            new_status_db = "canceled"
+
+        # выставляем cancel_time один раз
+        if not cancel_time:
+            cancel_time = _now_ms()
+
+        # 4) Сохраняем в БД
+        with _pay_db() as conn, conn.cursor() as cur:
+            # найдём заказ/строку по trx_id
+            cur.execute(
+                "SELECT id, status FROM orders WHERE provider_trx_id=%s LIMIT 1;",
+                (payme_trx,)
+            )
+            row = cur.fetchone()
+            if not row:
+                # нет привязки — но по спецификации лучше вернуть успех с нашим snapshot'ом
+                pass
+            else:
+                # Не понижаем статус, если уже был более «финальный»
+                # (например, если уже canceled_after_perform — оставляем)
+                prev_status = (row["status"] or "").strip()
+                if prev_status != new_status_db:
+                    cur.execute(
+                        """
+                        UPDATE orders
+                           SET status=%s,
+                               cancel_time=NOW(),
+                               reason=%s
+                         WHERE id=%s
+                        """,
+                        (new_status_db, cancel_reason, row["id"])
+                    )
+
+        # 5) Обновляем cache
+        trx = {
+            "create_time": create_time,
+            "perform_time": perform_time,
+            "cancel_time": cancel_time,
+            "state": new_state,
+            "reason": cancel_reason if cancel_reason is not None else stored_reason,
+        }
+        TRX_STORE[payme_trx] = trx
+
+        # 6) Возвращаем строго по спецификации
         return _rpc_ok(rpc_id, {
-            "create_time": trx.get("create_time", 0),
-            "perform_time": trx.get("perform_time", 0),
-            "cancel_time": trx.get("cancel_time", 0),
+            "cancel_time": trx["cancel_time"],
             "transaction": payme_trx,
-            "state": trx.get("state", 0),
-            "reason": reason,
+            "state": trx["state"],
+            "reason": trx["reason"],
         })
+
+    except Exception:
+        logging.exception("[Payme] CancelTransaction error")
+        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (cancel)")
+
+
+# -------- CheckTransaction --------
+elif method == "CheckTransaction":
+    payme_trx = str(trx_id_in or "").strip()
+    trx = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
+    if not trx:
+        return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+
+    # Нормализуем и ничего не «угадываем»
+    create_time  = int(trx.get("create_time", 0))
+    perform_time = int(trx.get("perform_time", 0))
+    cancel_time  = int(trx.get("cancel_time", 0))
+    state        = int(trx.get("state", 0))
+    reason       = trx.get("reason")
+
+    # По спецификации reason возвращается только для отрицательных состояний
+    if state in (1, 2):
+        reason = None
+
+    return _rpc_ok(rpc_id, {
+        "create_time": create_time,
+        "perform_time": perform_time,
+        "cancel_time": cancel_time,
+        "transaction": payme_trx,
+        "state": state,
+        "reason": reason,
+    })
 
     # -------- GetStatement --------
     elif method == "GetStatement":
