@@ -82,5 +82,17 @@ services:
   - key: ADMIN_USER_ID
     value: "557891018"     # твой user_id для админ-команд
 
+    services:
+  - type: web
+    name: tour-bot
+    env: python
+    buildCommand: |
+      pip install -r requirements.txt
+      pip install -r requirements-dev.txt
+    startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
+    # опционально: если тесты есть и они быстрые
+    preDeployCommand: pytest -m "not integration" -q
+
+
 
 
