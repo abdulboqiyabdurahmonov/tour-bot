@@ -2750,8 +2750,7 @@ async def payme_merchant(request: Request):
 
     # -------- GetStatement --------
     elif method == "GetStatement":
-    # обязательна авторизация
-    if not auth_ok:
+    if not auth_ok:     # ✅ теперь внутри блока
         return _rpc_err(rpc_id, -32504, "Insufficient privileges")
 
     try:
@@ -2759,7 +2758,6 @@ async def payme_merchant(request: Request):
         to  = int(params.get("to"))
     except Exception:
         return _rpc_err(rpc_id, -32602, "Неверные параметры (from/to)")
-
     if to < frm:
         frm, to = to, frm
 
