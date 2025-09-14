@@ -1,0 +1,32 @@
+[tool.black]
+line-length = 100
+target-version = ["py313"]  # если у тебя 3.12 — поставь "py312"
+skip-string-normalization = true
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_third_party = ["aiogram","fastapi","httpx","gspread","google","psycopg","telethon","uvicorn"]
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203","W503"]
+exclude = [".venv",".git","__pycache__","build","dist",".mypy_cache",".pytest_cache"]
+
+[tool.mypy]
+python_version = "3.13"            # или "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+no_implicit_optional = true
+disallow_any_generics = false
+disallow_untyped_defs = false       # постепенно можно ужесточать до true
+exclude = '(^\.venv/|^tests/fixtures/)'
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.bandit]
+skips = ["B101"]  # assert в тестах
