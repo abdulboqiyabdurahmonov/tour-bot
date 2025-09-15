@@ -112,6 +112,14 @@ LEADS_TOPIC_ID = int(os.getenv("LEADS_TOPIC_ID", "0") or 0)
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 # --- Payme Merchant API (JSON-RPC) настройки ---
 PAYME_MERCHANT_XAUTH = os.getenv("PAYME_MERCHANT_XAUTH", "").strip()
+PAYME_MERCHANT_KEY = os.getenv("PAYME_MERCHANT_KEY", "")
+def _payme_auth_ok(x_auth: str | None) -> bool:
+    return bool(x_auth) and secrets.compare_digest(x_auth, PAYME_MERCHANT_KEY)
+
+def _payme_sandbox_ok(req: Request) -> bool:
+    ip = req.client.host if req.client else ""
+    # IP-адреса песочницы, которые видим в логах
+    return ip in {"185.234.113.15", "213.230.116.57"}
 
 # ===== PAYME =====
 PAYME_ACCOUNT_FIELD = os.getenv("PAYME_ACCOUNT_FIELD", "order_id").strip()
@@ -2472,17 +2480,20 @@ async def payme_mock_new(amount: int = 4900000):
     return {"order_id": oid, "amount": amount}
 
 # ---- основной JSON-RPC обработчик ----
-@app.post("/payme/merchant")
-async def payme_merchant(request: Request):
-    """
-    JSON-RPC обработчик Merchant API Payme.
-    Всегда HTTP 200; ошибки — в JSON (поле "error").
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        return _rpc_err(None, -32700, "Некорректный JSON")
+from fastapi import Header
 
+@app.post("/payme/merchant")
+async def payme_merchant(request: Request, x_auth: str | None = Header(default=None)):
+    body = await request.json()
+    req_id = body.get("id")
+    method = body.get("method")
+    params = body.get("params", {}) or {}
+
+    auth_ok = _payme_auth_ok(x_auth)   # <— ВАЖНО: объявляем здесь
+    if not (auth_ok or _payme_sandbox_ok(request)):
+        return {"jsonrpc": "2.0", "id": req_id,
+                "error": {"code": -32504, "message": "Unauthorized"}}
+    
     headers   = dict(request.headers)
     rpc_id    = body.get("id")
     method    = (body.get("method") or "").strip()
