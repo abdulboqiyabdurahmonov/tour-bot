@@ -2866,20 +2866,23 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
     elif method == "CheckTransaction":
         payme_trx = str(trx_id_in or "").strip()
         trx = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
+    
+        if not isinstance(trx, dict):
+            logging.error(f"[Payme] CheckTransaction trx invalid type={type(trx)} value={trx}")
+            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+    
         if not trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
-
-        # Нормализуем и ничего не «угадываем»
-        create_time  = int(trx.get("create_time", 0))
-        perform_time = int(trx.get("perform_time", 0))
-        cancel_time  = int(trx.get("cancel_time", 0))
-        state        = int(trx.get("state", 0))
+    
+        create_time  = int(trx.get("create_time") or 0)
+        perform_time = int(trx.get("perform_time") or 0)
+        cancel_time  = int(trx.get("cancel_time") or 0)
+        state        = int(trx.get("state") or 0)
         reason       = trx.get("reason")
-
-        # По спецификации reason возвращается только для отрицательных состояний
+    
         if state in (1, 2):
             reason = None
-
+    
         return _rpc_ok(rpc_id, {
             "create_time": create_time,
             "perform_time": perform_time,
