@@ -256,12 +256,14 @@ def lang_inline_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Qaraqalpaqsha", callback_data="lang:kk")],
     ])
 
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-def main_kb_for(user_id: int) -> ReplyKeyboardMarkup:
+def main_kb_for(uid: int) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t(user_id, "menu_find")), KeyboardButton(text=t(user_id, "menu_gpt"))],
-            [KeyboardButton(text=t(user_id, "menu_sub")), KeyboardButton(text=t(user_id, "menu_settings"))],
+            [KeyboardButton(text=t(uid, "menu_find"))],
+            [KeyboardButton(text=t(uid, "menu_gpt"))],
+            [KeyboardButton(text=t(uid, "menu_sub")), KeyboardButton(text=t(uid, "menu_settings"))],
         ],
         resize_keyboard=True,
     )
@@ -1827,27 +1829,33 @@ async def cb_fav_rm(call: CallbackQuery):
         # после удаления показываем кнопку «добавить», т.е. is_fav=False
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False, call.from_user.id))
 
-
-from aiogram.types import CallbackQuery
-from aiogram import F
+from aiogram.types import CallbackQuery, ReplyKeyboardRemove
 
 @dp.callback_query(F.data.startswith("lang:"))
 async def cb_lang(callback: CallbackQuery):
     uid = callback.from_user.id
     lang = callback.data.split(":", 1)[1]
+
+    # 1) сохраняем язык
     set_lang(uid, lang)
 
-    # Подтверждаем и убираем инлайн-клавиатуру выбора языка
-    await callback.answer("✅ Язык сохранён")
+    # 2) отвечаем на клик и убираем инлайн-кнопки выбора языка
+    await callback.answer(t(uid, "lang_saved"))  # например: "Язык обновлён"
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        # перезаписываем сообщение с выбором языка без клавиатуры,
+        # чтобы не было повторных нажатий
+        await callback.message.edit_text(t(uid, "choose_lang_done"))
     except Exception:
+        # если нельзя отредактировать (старое/не моё сообщение) — просто игнор
         pass
 
-    # Приветствие + главное меню на выбранном языке
-    await callback.message.answer(
-        t(uid, "hello"),
-        reply_markup=main_kb_for(uid)
+    # 3) присылаем главное меню уже на новом языке
+    await bot.send_message(
+        uid,
+        t(uid, "hello") + "\n\n"
+        + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
+        + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n",
+        reply_markup=main_kb_for(uid),
     )
 
 @dp.callback_query(F.data.startswith("want:"))
