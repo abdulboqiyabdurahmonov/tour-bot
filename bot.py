@@ -222,45 +222,6 @@ TRANSLATIONS = {
     },
 }
 
-
-def get_user_lang(user_id: int) -> str:
-    try:
-        val = get_config(f"lang_{user_id}", None)
-        return val if val in SUPPORTED_LANGS else "ru"
-    except Exception:
-        return "ru"
-
-
-def set_user_lang(user_id: int, lang: str):
-    if lang not in SUPPORTED_LANGS:
-        lang = "ru"
-    set_config(f"lang_{user_id}", lang)
-
-
-def t(user_id: int, key: str) -> str:
-    lang = get_user_lang(user_id)
-    return TRANSLATIONS.get(lang, TRANSLATIONS["ru"]).get(key, TRANSLATIONS["ru"].get(key, key))
-
-
-def lang_inline_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Русский", callback_data="lang:ru")],
-        [InlineKeyboardButton(text="O‘zbekcha", callback_data="lang:uz")],
-        [InlineKeyboardButton(text="Qaraqalpaqsha", callback_data="lang:kk")],
-    ])
-
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-
-def main_kb_for(uid: int) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=t(uid, "menu_find"))],
-            [KeyboardButton(text=t(uid, "menu_gpt"))],
-            [KeyboardButton(text=t(uid, "menu_sub")), KeyboardButton(text=t(uid, "menu_settings"))],
-        ],
-        resize_keyboard=True,
-    )
-
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
