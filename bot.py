@@ -2860,7 +2860,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
                         status,
                         FLOOR(EXTRACT(EPOCH FROM create_time)*1000)::bigint AS create_ms,
                         FLOOR(EXTRACT(EPOCH FROM perform_time)*1000)::bigint AS perform_ms,
-                        FLOOR(EXTRACT(EPOCH FROM cancel_time)*1000)::bigint  AS cancel_ms,
+                        FLOOR(EXTRACT(EPOCH FROM cancel_time)*1000)::bigint  AS cancel_ms
                         COALESCE(reason,0) AS reason
                     FROM orders
                     WHERE provider = 'payme'
