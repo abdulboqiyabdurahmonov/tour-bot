@@ -35,6 +35,8 @@ from aiogram.types import (
 from aiogram.filters import Command  # aiogram v3.x
 from aiogram.client.default import DefaultBotProperties
 
+from keyboards import get_payme_kb
+
 from psycopg import connect
 from psycopg.rows import dict_row
 
@@ -598,6 +600,18 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# keyboards.py
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def get_payme_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="💳 Оплатить через Payme",
+                url="https://checkout.paycom.uz/YOUR_REAL_PAYME_LINK"  # подставь свой URL
+            )
+        ]]
+    )
 
 def filters_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -1997,28 +2011,33 @@ async def on_question_text(message: Message):
 
 
 # --- Кнопки меню (на любом языке)
+# --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
 async def on_menu_buttons(message: Message):
     uid = message.from_user.id
     txt = (message.text or "").strip()
 
-    if txt == t(uid, "menu_find"):
-        await entry_find_tours(message); return
+    if is_menu_label(txt, "menu_find"):
+        await entry_find_tours(message)
+        return
 
-    if txt == t(uid, "menu_gpt"):
+    if is_menu_label(txt, "menu_gpt"):
         if not user_has_subscription(uid):
             await message.answer(
                 "🤖 GPT доступен только по подписке.\nПодключи её здесь:",
-                reply_markup=get_payme_kb(),  # только Payme
+                reply_markup=get_payme_kb(),   # <-- только Payme
             )
             return
-        await entry_gpt(message); return
+        await entry_gpt(message)
+        return
 
-    if txt == t(uid, "menu_sub"):
-        await entry_sub(message); return
+    if is_menu_label(txt, "menu_sub"):
+        await entry_sub(message)
+        return
 
-    if txt == t(uid, "menu_settings"):
-        await entry_settings(message); return
+    if is_menu_label(txt, "menu_settings"):
+        await entry_settings(message)
+        return
 
 # --- Смарт-роутер текста
 @dp.message(F.chat.type == "private", F.text)
@@ -2172,25 +2191,11 @@ async def smart_router(message: Message):
                 await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
                 return
 
-        # --- Проверка GPT доступа ---
-        if not user_has_subscription(message.from_user.id):
-            await message.answer(
-                "✨ Персональные ответы GPT доступны только по подписке.\n"
-                "Подключи её здесь:",
-                reply_markup=get_pay_kb(),
-            )
-            return
-
-        # fallback → GPT консультация
-        _remember_query(message.from_user.id, user_text)
-        premium_users = {123456789}
-        is_premium = message.from_user.id in premium_users
-        replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
-        for part in replies:
-            await message.answer(part, parse_mode=None)
-
-    finally:
-        pulse.cancel()
+        # fallback → без GPT (предлагаем кнопки)
+                await message.answer(
+                    "Пока не понял запрос. Нажми «🎒 Найти туры» или «🤖 Спросить GPT» (нужна подписка)."
+                )
+                return
 
 # ---- helpers ----
 def _extract_answer_key_from_message(msg: Message) -> Optional[str]:
