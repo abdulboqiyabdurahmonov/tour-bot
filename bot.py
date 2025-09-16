@@ -122,36 +122,6 @@ PAYME_MERCHANT_KEY = os.getenv("PAYME_MERCHANT_KEY", "")
 def _payme_auth_ok(x_auth: str | None) -> bool:
     return bool(x_auth) and secrets.compare_digest(x_auth, PAYME_MERCHANT_KEY)
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-
-LANGS = {"ru": "🇷🇺 Русский", "uz": "🇺🇿 O‘zbekcha", "en": "🇬🇧 English"}
-
-def lang_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=title, callback_data=f"lang:{code}")]
-        for code, title in LANGS.items()
-    ])
-
-async def entry_settings(message: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌐 Выбрать язык", callback_data="open:lang")],
-        # добавьте другие пункты, если нужно
-    ])
-    await message.answer("⚙️ Настройки", reply_markup=kb)
-
-@dp.callback_query(F.data == "open:lang")
-async def open_lang(cb: CallbackQuery):
-    await cb.message.edit_text("Выберите язык:", reply_markup=lang_keyboard())
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("lang:"))
-async def set_lang(cb: CallbackQuery):
-    code = cb.data.split(":")[1]
-    # TODO: сохраните выбор в БД по user_id
-    # save_user_lang(cb.from_user.id, code)
-    await cb.answer("Язык сохранён ✅", show_alert=True)
-
-
 def _payme_sandbox_ok(req: Request) -> bool:
     ip = req.client.host if req.client else ""
     # IP-адреса песочницы, которые видим в логах
