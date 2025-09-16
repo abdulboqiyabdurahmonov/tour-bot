@@ -809,13 +809,13 @@ def clean_text_basic(s: Optional[str]) -> str:
 def strip_trailing_price_from_hotel(s: Optional[str]) -> Optional[str]:
     if not s:
         return s
+    # убираем только кусок с ценой и валютой в конце строки
     return re.sub(
-        r'[\s\u00A0–—-]*(?:от\s*)?\d[\d\s\u00A0.,]*\s*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€).*$',
+        r'\s*[–—-]?\s*\d[\d\s.,]*(?:USD|EUR|UZS|RUB|СУМ|сум|руб|\$|€)\s*$',
         '',
         s,
         flags=re.I,
     ).strip()
-
 
 def normalize_dates_for_display(s: Optional[str]) -> str:
     if not s:
@@ -1473,23 +1473,14 @@ async def _typing_pulse(chat_id: int):
         pass
 
 
-# ================= ХЕНДЛЕРЫ =================
-@dp.message(Command("start"), F.chat.type == "private")
+# ================= ХЕНДЛЕРЫ =================@dp.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
     uid = message.from_user.id
-    if get_config(f"lang_{uid}", None) is None:
-        await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
-        return
-    if not _should_greet_once(uid):
-        return
-    text = (
-        t(uid, "hello")
-        + "\n\n"
-        + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
-        + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
+    # сразу выбор языка
+    await message.answer(
+        t(uid, "choose_lang"),
+        reply_markup=lang_inline_kb()
     )
-    await message.answer(text, reply_markup=main_kb_for(uid))
-
 
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: Message):
@@ -1988,19 +1979,28 @@ async def on_question_text(message: Message):
 @dp.message(F.text.func(_is_menu_text))
 async def on_menu_buttons(message: Message):
     txt = message.text or ""
+
     if is_menu_label(txt, "menu_find"):
         await entry_find_tours(message)
         return
+
     if is_menu_label(txt, "menu_gpt"):
+        if not user_has_subscription(message.from_user.id):
+            await message.answer(
+                "🤖 GPT доступен только по подписке.\nПодключи её здесь:",
+                reply_markup=get_pay_kb(),
+            )
+            return
         await entry_gpt(message)
         return
+
     if is_menu_label(txt, "menu_sub"):
         await entry_sub(message)
         return
+
     if is_menu_label(txt, "menu_settings"):
         await entry_settings(message)
         return
-
 
 # --- Смарт-роутер текста
 @dp.message(F.chat.type == "private", F.text)
@@ -2054,6 +2054,21 @@ async def smart_router(message: Message):
                     "Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры."
                 )
             return
+
+        # --- Проверка GPT доступа ---
+        if not user_has_subscription(message.from_user.id):
+            await message.answer(
+                "✨ Персональные ответы GPT доступны только по подписке.\n"
+                "Подключи её здесь:",
+                reply_markup=get_pay_kb(),
+            )
+            return
+
+        # если подписка есть — отправляем текст в GPT
+        await entry_gpt(message)
+
+    finally:
+        pulse.cancel()  
 
         # погода
         if re.search(r"\bпогод", user_text, flags=re.I):
