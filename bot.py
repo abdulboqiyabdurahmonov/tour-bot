@@ -6,6 +6,19 @@ import asyncio
 import random
 import time
 import json, base64
+import os
+from dotenv import load_dotenv
+from aiogram.enums import ParseMode
+
+load_dotenv()  # подхватит .env локально
+
+TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN/TELEGRAM_BOT_TOKEN не задан. Укажи токен в переменных окружения."
+    )
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+
 from payments import (
     create_order, build_checkout_link, activate_after_payment,
     click_handle_callback, payme_handle_callback
