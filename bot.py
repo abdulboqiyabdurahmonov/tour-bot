@@ -2782,95 +2782,88 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
         })
 
     # -------- GetStatement --------
-    elif method == "GetStatement":
-        if not (auth_ok or _payme_sandbox_ok(request)):
-            return _rpc_err(rpc_id, -32504, "Insufficient privileges")
+elif method == "GetStatement":
+    if not (auth_ok or _payme_sandbox_ok(request)):
+        return _rpc_err(rpc_id, -32504, "Insufficient privileges")
 
-        # параметры в мс Unix
-        try:
-            frm = int(params.get("from"))
-            to  = int(params.get("to"))
-        except Exception:
-            return _rpc_err(rpc_id, -32602, "Неверные параметры (from/to)")
+    try:
+        frm = int(params.get("from"))
+        to  = int(params.get("to"))
+    except Exception:
+        return _rpc_err(rpc_id, -32602, "Неверные параметры (from/to)")
 
-        if to < frm:
-            frm, to = to, frm
+    if to < frm:
+        frm, to = to, frm
 
-        def _state_from_status(status: str) -> int:
-            s = (status or "").strip().lower()
-            if s in ("paid", "performed", "done"):
-                return 2
-            if s in ("canceled_after_perform", "refunded"):
-                return -2
-            if s in ("canceled", "rejected"):
-                return -1
-            return 1  # создана/заблокирована
+    def _state_from_status(status: str) -> int:
+        s = (status or "").strip().lower()
+        if s in ("paid", "performed", "done"): return 2
+        if s in ("canceled_after_perform", "refunded"): return -2
+        if s in ("canceled", "rejected"): return -1
+        return 1
 
-        txs = []
+    txs = []
+    for trx_id, t in (TRX_STORE or {}).items():
+        ctime = int(t.get("create_time") or 0)
+        if frm <= ctime <= to:
+            state = int(t.get("state") or 1)
+            item = {
+                "id": trx_id,
+                "time": ctime,
+                "amount": int(t.get("amount") or 0),
+                "account": {"order_id": str(t.get("order_id", ""))},
+                "create_time": ctime,
+                "perform_time": int(t.get("perform_time") or 0),
+                "cancel_time": int(t.get("cancel_time") or 0),
+                "transaction": trx_id,
+                "state": state,
+            }
+            if state in (-1, -2):
+                item["reason"] = int(t.get("reason") or 0)
+            txs.append(item)
 
-        # память (если вы что-то складываете туда во время sandbox-тестов)
-        for trx_id, t in (TRX_STORE or {}).items():
-            ctime = int(t.get("create_time") or 0)
-            if frm <= ctime <= to:
-                state = int(t.get("state") or 1)
+    try:
+        with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT provider_trx_id, order_id, amount, status,
+                       EXTRACT(EPOCH FROM create_time)*1000 AS create_ms,
+                       EXTRACT(EPOCH FROM perform_time)*1000 AS perform_ms,
+                       EXTRACT(EPOCH FROM cancel_time)*1000  AS cancel_ms,
+                       COALESCE(reason,0) AS reason
+                  FROM orders
+                 WHERE provider='payme'
+                   AND provider_trx_id IS NOT NULL
+                   AND EXTRACT(EPOCH FROM create_time)*1000 BETWEEN %s AND %s
+                """,
+                (frm, to),
+            )
+            seen = {x["id"] for x in txs}
+            for r in cur.fetchall():
+                trx_id = r["provider_trx_id"]
+                if trx_id in seen:
+                    continue
+                state = _state_from_status(r["status"])
                 item = {
                     "id": trx_id,
-                    "time": ctime,
-                    "amount": int(t.get("amount") or 0),
-                    "account": {"order_id": str(t.get("order_id", ""))},
-                    "create_time": ctime,
-                    "perform_time": int(t.get("perform_time") or 0),
-                    "cancel_time": int(t.get("cancel_time") or 0),
+                    "time": int(r["create_ms"] or 0),
+                    "amount": int(r["amount"] or 0),
+                    "account": {"order_id": str(r["order_id"])},
+                    "create_time": int(r["create_ms"] or 0),
+                    "perform_time": int(r["perform_ms"] or 0),
+                    "cancel_time": int(r["cancel_ms"] or 0),
                     "transaction": trx_id,
                     "state": state,
                 }
                 if state in (-1, -2):
-                    item["reason"] = int(t.get("reason") or 0)
+                    item["reason"] = int(r["reason"] or 0)
                 txs.append(item)
+    except Exception:
+        logging.exception("[Payme] DB error in GetStatement")
+        return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (getStatement)")
 
-        # БД
-        try:
-            with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """
-                    SELECT provider_trx_id, order_id, amount, status,
-                           EXTRACT(EPOCH FROM create_time)*1000 AS create_ms,
-                           EXTRACT(EPOCH FROM perform_time)*1000 AS perform_ms,
-                           EXTRACT(EPOCH FROM cancel_time)*1000  AS cancel_ms,
-                           COALESCE(reason,0) AS reason
-                      FROM orders
-                     WHERE provider='payme'
-                       AND provider_trx_id IS NOT NULL
-                       AND EXTRACT(EPOCH FROM create_time)*1000 BETWEEN %s AND %s
-                    """,
-                    (frm, to),
-                )
-                seen = {x["id"] for x in txs}
-                for r in cur.fetchall():
-                    trx_id = r["provider_trx_id"]
-                    if trx_id in seen:
-                        continue
-                    state = _state_from_status(r["status"])
-                    item = {
-                        "id": trx_id,
-                        "time": int(r["create_ms"] or 0),
-                        "amount": int(r["amount"] or 0),
-                        "account": {"order_id": str(r["order_id"])},
-                        "create_time": int(r["create_ms"] or 0),
-                        "perform_time": int(r["perform_ms"] or 0),
-                        "cancel_time": int(r["cancel_ms"] or 0),
-                        "transaction": trx_id,
-                        "state": state,
-                    }
-                    if state in (-1, -2):
-                        item["reason"] = int(r["reason"] or 0)
-                    txs.append(item)
-        except Exception:
-            logging.exception("[Payme] DB error in GetStatement")
-            return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (getStatement)")
-
-        logging.info("[Payme] GetStatement OUT: %d tx(s)", len(txs))
-        return _rpc_ok(rpc_id, {"transactions": txs})
+    logging.info("[Payme] GetStatement OUT: %d tx(s)", len(txs))
+    return _rpc_ok(rpc_id, {"transactions": txs})
 
 # ---- callback (как было) ----
 @app.post("/payme/callback")
