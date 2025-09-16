@@ -36,8 +36,6 @@ from aiogram.types import (
 from aiogram.filters import Command  # aiogram v3.x
 from aiogram.client.default import DefaultBotProperties
 
-from keyboards import get_payme_kb
-
 from psycopg import connect
 from psycopg.rows import dict_row
 
@@ -385,13 +383,14 @@ def set_subscription(user_id: int, status: str):
             (f"sub_{user_id}", status),
         )
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-def get_pay_kb() -> InlineKeyboardMarkup:
+def get_payme_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
                 text="💳 Оплатить через Payme",
-                url="https://checkout.paycom.uz/YOUR_LINK"  # сюда вставь свой реальный Payme-ссылку
+                url="https://checkout.paycom.uz/<ВАШ_ЛИНК_ИЛИ_INVOICE_ID>"
             )]
         ]
     )
