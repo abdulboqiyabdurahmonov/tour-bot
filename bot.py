@@ -115,6 +115,36 @@ PAYME_MERCHANT_KEY = os.getenv("PAYME_MERCHANT_KEY", "")
 def _payme_auth_ok(x_auth: str | None) -> bool:
     return bool(x_auth) and secrets.compare_digest(x_auth, PAYME_MERCHANT_KEY)
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
+LANGS = {"ru": "🇷🇺 Русский", "uz": "🇺🇿 O‘zbekcha", "en": "🇬🇧 English"}
+
+def lang_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=title, callback_data=f"lang:{code}")]
+        for code, title in LANGS.items()
+    ])
+
+async def entry_settings(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Выбрать язык", callback_data="open:lang")],
+        # добавьте другие пункты, если нужно
+    ])
+    await message.answer("⚙️ Настройки", reply_markup=kb)
+
+@dp.callback_query(F.data == "open:lang")
+async def open_lang(cb: CallbackQuery):
+    await cb.message.edit_text("Выберите язык:", reply_markup=lang_keyboard())
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("lang:"))
+async def set_lang(cb: CallbackQuery):
+    code = cb.data.split(":")[1]
+    # TODO: сохраните выбор в БД по user_id
+    # save_user_lang(cb.from_user.id, code)
+    await cb.answer("Язык сохранён ✅", show_alert=True)
+
+
 def _payme_sandbox_ok(req: Request) -> bool:
     ip = req.client.host if req.client else ""
     # IP-адреса песочницы, которые видим в логах
@@ -907,11 +937,54 @@ def extract_meal(text_a: Optional[str], text_b: Optional[str] = None) -> Optiona
 
 # ================= ДБ-ХЕЛПЕРЫ =================
 
+import os
+from urllib.parse import urlparse
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+def is_valid_url(u: str | None) -> bool:
+    if not u:
+        return False
+    u = u.strip()
+    if not u or len(u) > 512:
+        return False
+    p = urlparse(u)
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+async def safe_answer(msg: Message, *args, **kwargs):
+    """Отправка сообщения с graceful-деградацией, если сломана инлайн-кнопка."""
+    try:
+        return await msg.answer(*args, **kwargs)
+    except TelegramBadRequest as e:
+        if "BUTTON_URL_INVALID" in str(e):
+            # убираем клавиатуру и говорим пользователю, что ссылка ещё не настроена
+            kwargs.pop("reply_markup", None)
+            text = (kwargs.get("text") or args[0] if args else "") + "\n\n(Ссылка пока не настроена)"
+            return await msg.answer(text)
+        raise
+
+# === замените вашу get_payme_kb на безопасную ===
+def get_payme_kb() -> InlineKeyboardMarkup:
+    PAYME_URL = os.getenv("PAYME_URL", "").strip()
+    TG_SUPPORT = os.getenv("SUPPORT_USERNAME", "").lstrip("@").strip()
+
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if is_valid_url(PAYME_URL):
+        rows.append([InlineKeyboardButton(text="💳 Оплатить в Payme", url=PAYME_URL)])
+
+    # запасной «живой» канал — написать менеджеру в тг
+    if TG_SUPPORT:
+        rows.append([InlineKeyboardButton(text="👤 Менеджер", url=f"https://t.me/{TG_SUPPORT}")])
+    else:
+        # совсем офлайн — хотя бы заглушка, чтобы не падало
+        rows.append([InlineKeyboardButton(text="👤 Менеджер (скоро)", callback_data="noop:support")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 def is_favorite(user_id: int, tour_id: int) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM favorites WHERE user_id=%s AND tour_id=%s LIMIT 1;", (user_id, tour_id))
         return cur.fetchone() is not None
-
 
 def set_favorite(user_id: int, tour_id: int):
     with get_conn() as conn, conn.cursor() as cur:
@@ -1978,9 +2051,6 @@ async def on_question_text(message: Message):
         reply_markup=main_kb_for(message.from_user.id),
     )
 
-
-# --- Кнопки меню (на любом языке)
-# --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
 async def on_menu_buttons(message: Message):
     uid = message.from_user.id
@@ -1992,9 +2062,10 @@ async def on_menu_buttons(message: Message):
 
     if is_menu_label(txt, "menu_gpt"):
         if not user_has_subscription(uid):
-            await message.answer(
+            await safe_answer(
+                message,
                 "🤖 GPT доступен только по подписке.\nПодключи её здесь:",
-                reply_markup=get_payme_kb(),   # <-- только Payme
+                reply_markup=get_payme_kb(),
             )
             return
         await entry_gpt(message)
@@ -2007,8 +2078,14 @@ async def on_menu_buttons(message: Message):
     if is_menu_label(txt, "menu_settings"):
         await entry_settings(message)
         return
+        
+from aiogram import F
+from aiogram.types import CallbackQuery
 
-# --- Смарт-роутер текста
+@dp.callback_query(F.data.startswith("noop:"))
+async def noop(cb: CallbackQuery):
+    await cb.answer("Ссылка ещё не настроена.", show_alert=True)
+
 # --- Смарт-роутер текста
 @dp.message(F.chat.type == "private", F.text)
 async def smart_router(message: Message):
