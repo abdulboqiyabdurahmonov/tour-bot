@@ -12,12 +12,14 @@ from aiogram.enums import ParseMode
 
 load_dotenv()  # подхватит .env локально
 
-TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+TOKEN = (
+    os.getenv("BOT_TOKEN")
+    or os.getenv("TELEGRAM_BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")   # ← добавили поддержку твоего имени
+)
+
 if not TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN/TELEGRAM_BOT_TOKEN не задан. Укажи токен в переменных окружения."
-    )
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+    raise RuntimeError("BOT_TOKEN/TELEGRAM_BOT_TOKEN/TELEGRAM_TOKEN не задан")
 
 from payments import (
     create_order, build_checkout_link, activate_after_payment,
