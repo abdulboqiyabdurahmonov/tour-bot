@@ -1341,7 +1341,12 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
         await asyncio.sleep(0)
     LAST_RESULTS[user_id] = rows
     LAST_QUERY_AT[user_id] = time.monotonic()
-    await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset))
+    await bot.send_message(
+    chat_id,
+    "Продолжить подборку?",
+    reply_markup=more_kb(token, next_offset, user_id),
+)
+
 
 
 # ===== Общие хелперы для админ-уведомлений =====
