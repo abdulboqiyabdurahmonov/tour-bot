@@ -18,6 +18,7 @@ from collections import defaultdict
 import secrets
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
+from psycopg.rows import dict_row
 
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
@@ -2827,6 +2828,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
 
         txs = []
 
+        # из оперативного стора (если используешь)
         for trx_id, t in (TRX_STORE or {}).items():
             ctime = int(t.get("create_time", 0)) or 0
             if frm <= ctime <= to:
@@ -2846,19 +2848,24 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
                     item["reason"] = int(t.get("reason", 0) or 0)
                 txs.append(item)
 
+        # из БД
         try:
-            with _pay_db() as conn, conn.cursor() as cur:
+            with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
-                    SELECT provider_trx_id, order_id, amount, status,
-                           EXTRACT(EPOCH FROM create_time)*1000 AS create_ms,
-                           EXTRACT(EPOCH FROM perform_time)*1000 AS perform_ms,
-                           EXTRACT(EPOCH FROM cancel_time)*1000  AS cancel_ms,
-                           COALESCE(reason,0) AS reason
-                      FROM orders
-                     WHERE provider='payme'
-                       AND provider_trx_id IS NOT NULL
-                       AND EXTRACT(EPOCH FROM create_time)*1000 BETWEEN %s AND %s
+                    SELECT
+                        provider_trx_id,
+                        order_id,
+                        amount,
+                        status,
+                        FLOOR(EXTRACT(EPOCH FROM create_time)*1000)::bigint AS create_ms,
+                        FLOOR(EXTRACT(EPOCH FROM perform_time)*1000)::bigint AS perform_ms,
+                        FLOOR(EXTRACT(EPOCH FROM cancel_time)*1000)::bigint  AS cancel_ms,
+                        COALESCE(reason,0) AS reason
+                    FROM orders
+                    WHERE provider = 'payme'
+                      AND provider_trx_id IS NOT NULL
+                      AND EXTRACT(EPOCH FROM create_time)*1000 BETWEEN %s AND %s
                     """,
                     (frm, to),
                 )
@@ -2870,12 +2877,12 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
                     state = _state_from_status(r["status"])
                     item = {
                         "id": trx_id,
-                        "time": int(r["create_ms"]) if r["create_ms"] else 0,
+                        "time": int(r["create_ms"] or 0),
                         "amount": int(r["amount"] or 0),
                         "account": {"order_id": str(r["order_id"])},
-                        "create_time": int(r["create_ms"]) if r["create_ms"] else 0,
-                        "perform_time": int(r["perform_ms"]) if r["perform_ms"] else 0,
-                        "cancel_time": int(r["cancel_ms"]) if r["cancel_ms"] else 0,
+                        "create_time": int(r["create_ms"] or 0),
+                        "perform_time": int(r["perform_ms"] or 0),
+                        "cancel_time": int(r["cancel_ms"] or 0),
                         "transaction": trx_id,
                         "state": state,
                     }
