@@ -39,10 +39,6 @@ from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
 
-# --- handlers
-from handlers.settings import entry_settings
-from handlers.settings import router as settings_router
-
 # --- aiogram
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
