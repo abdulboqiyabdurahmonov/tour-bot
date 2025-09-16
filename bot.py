@@ -1999,29 +1999,26 @@ async def on_question_text(message: Message):
 # --- Кнопки меню (на любом языке)
 @dp.message(F.text.func(_is_menu_text))
 async def on_menu_buttons(message: Message):
-    txt = message.text or ""
+    uid = message.from_user.id
+    txt = (message.text or "").strip()
 
-    if is_menu_label(txt, "menu_find"):
-        await entry_find_tours(message)
-        return
+    if txt == t(uid, "menu_find"):
+        await entry_find_tours(message); return
 
-    if is_menu_label(txt, "menu_gpt"):
-        if not user_has_subscription(message.from_user.id):
+    if txt == t(uid, "menu_gpt"):
+        if not user_has_subscription(uid):
             await message.answer(
                 "🤖 GPT доступен только по подписке.\nПодключи её здесь:",
                 reply_markup=get_payme_kb(),  # только Payme
             )
             return
-        await entry_gpt(message)
-        return
+        await entry_gpt(message); return
 
-    if is_menu_label(txt, "menu_sub"):
-        await entry_sub(message)
-        return
+    if txt == t(uid, "menu_sub"):
+        await entry_sub(message); return
 
-    if is_menu_label(txt, "menu_settings"):
-        await entry_settings(message)
-        return
+    if txt == t(uid, "menu_settings"):
+        await entry_settings(message); return
 
 # --- Смарт-роутер текста
 @dp.message(F.chat.type == "private", F.text)
