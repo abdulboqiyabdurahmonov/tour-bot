@@ -2041,6 +2041,7 @@ async def on_menu_buttons(message: Message):
         return
 
 # --- Смарт-роутер текста
+# --- Смарт-роутер текста
 @dp.message(F.chat.type == "private", F.text)
 async def smart_router(message: Message):
     user_text = (message.text or "").strip()
@@ -2068,10 +2069,8 @@ async def smart_router(message: Message):
 
             if not last:
                 q_hint = LAST_QUERY_TEXT.get(message.from_user.id)
-                hint_txt = (
-                    f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл."
-                    if q_hint else "Не вижу последних карточек."
-                )
+                hint_txt = (f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл."
+                            if q_hint else "Не вижу последних карточек.")
                 await message.answer(
                     f"{hint_txt} Нажми «🎒 Найти туры» и выбери вариант — тогда пришлю источник.",
                     reply_markup=filters_inline_kb(),
@@ -2082,8 +2081,10 @@ async def smart_router(message: Message):
             for trow in last[:3]:
                 src = (trow.get("source_url") or "").strip()
                 if is_premium and src:
-                    await message.answer(f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>',
-                                         disable_web_page_preview=True)
+                    await message.answer(
+                        f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>',
+                        disable_web_page_preview=True,
+                    )
                 else:
                     ch = (trow.get("source_chat") or "").lstrip("@")
                     when = localize_dt(trow.get("posted_at"))
@@ -2167,12 +2168,16 @@ async def smart_router(message: Message):
                 }
                 await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
                 return
-                
+
         # fallback → без GPT (предлагаем кнопки)
-                await message.answer(
-                    "Пока не понял запрос. Нажми «🎒 Найти туры» или «🤖 Спросить GPT» (нужна подписка)."
-                )
-                return
+        await message.answer(
+            "Пока не понял запрос. Нажми «🎒 Найти туры» или «🤖 Спросить GPT» (нужна подписка).",
+            reply_markup=main_kb_for(message.from_user.id),
+        )
+        return
+
+    finally:
+        pulse.cancel()
 
 # ---- helpers ----
 def _extract_answer_key_from_message(msg: Message) -> Optional[str]:
