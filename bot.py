@@ -3028,7 +3028,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
             return _rpc_err(rpc_id, -32400, "Внутренняя ошибка (getStatement)")
 
         logging.info("[Payme] GetStatement OUT: %d tx(s)", len(txs))
-        return _rpc_ok(rpc_id, {"transactions": txs})
+        return _rpc_ok(req_id, {"transactions": txs})
 
 # неизвестный метод
     return JSONResponse(_rpc_err(req_id, -32601, "Метод не найден"))
