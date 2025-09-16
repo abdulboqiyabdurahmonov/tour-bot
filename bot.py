@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
+from handlers.settings import entry_settings
 
 from aiogram import Bot, Dispatcher, F
 from handlers.settings import router as settings_router  # <-- импортируем наш новый router
