@@ -6,21 +6,23 @@ import asyncio
 import random
 import time
 import json, base64
-import os
 from dotenv import load_dotenv
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 load_dotenv()  # подхватит .env локально
 
+# --- токен
 TOKEN = (
     os.getenv("BOT_TOKEN")
     or os.getenv("TELEGRAM_BOT_TOKEN")
-    or os.getenv("TELEGRAM_TOKEN")   # ← добавили поддержку твоего имени
+    or os.getenv("TELEGRAM_TOKEN")   # поддержка всех вариантов
 )
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN/TELEGRAM_BOT_TOKEN/TELEGRAM_TOKEN не задан")
 
+# --- сторонние модули
 from payments import (
     create_order, build_checkout_link, activate_after_payment,
     click_handle_callback, payme_handle_callback
@@ -36,15 +38,13 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
+
+# --- handlers
 from handlers.settings import entry_settings
+from handlers.settings import router as settings_router
 
+# --- aiogram
 from aiogram import Bot, Dispatcher, F
-from handlers.settings import router as settings_router  # <-- импортируем наш новый router
-bot = Bot(token=TOKEN, parse_mode="HTML")
-dp = Dispatcher()
-
-# Подключаем наш router
-dp.include_router(settings_router)
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -54,11 +54,20 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 from aiogram.filters import Command  # aiogram v3.x
-from aiogram.client.default import DefaultBotProperties
 
+# создаём бота с поддержкой HTML по умолчанию
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+dp = Dispatcher()
+dp.include_router(settings_router)
+
+# --- psycopg
 from psycopg import connect
 from psycopg.rows import dict_row
 
+# --- httpx и локальные утилиты
 import httpx
 from db_init import init_db, get_config, set_config  # конфиг из БД
 
