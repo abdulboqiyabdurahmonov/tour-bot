@@ -2044,17 +2044,20 @@ async def on_menu_buttons(message: Message):
 @dp.message(F.chat.type == "private", F.text)
 async def smart_router(message: Message):
     user_text = (message.text or "").strip()
+
+    # если нажали кнопку меню — не обрабатываем тут
     if any(is_menu_label(user_text, k) for k in ("menu_find", "menu_gpt", "menu_sub", "menu_settings")):
         return
 
-    # пульс «печатает…» на время всей обработки
+    # пульс «печатает…» на время обработки
     pulse = asyncio.create_task(_typing_pulse(message.chat.id))
     try:
-        # быстрые источники
+        # быстрые источники по фразам «ссылка/источник»
         if re.search(r"\b((дай\s+)?ссылк\w*|источник\w*|link)\b", user_text, flags=re.I):
             last = LAST_RESULTS.get(message.from_user.id) or []
             premium_users = {123456789}
             is_premium = message.from_user.id in premium_users
+
             if not last:
                 guess = _guess_query_from_link_phrase(user_text) or LAST_QUERY_TEXT.get(message.from_user.id)
                 if guess:
@@ -2062,24 +2065,25 @@ async def smart_router(message: Message):
                     if rows:
                         LAST_RESULTS[message.from_user.id] = rows
                         last = rows
+
             if not last:
                 q_hint = LAST_QUERY_TEXT.get(message.from_user.id)
                 hint_txt = (
                     f"По последнему запросу «{escape(q_hint)}» ничего свежего не нашёл."
-                    if q_hint
-                    else "Не вижу последних карточек."
+                    if q_hint else "Не вижу последних карточек."
                 )
                 await message.answer(
                     f"{hint_txt} Нажми «🎒 Найти туры» и выбери вариант — тогда пришлю источник.",
                     reply_markup=filters_inline_kb(),
                 )
                 return
+
             shown = 0
             for trow in last[:3]:
                 src = (trow.get("source_url") or "").strip()
                 if is_premium and src:
-                    text = f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>'
-                    await message.answer(text, disable_web_page_preview=True)
+                    await message.answer(f'🔗 Источник: <a href="{escape(src)}">перейти к посту</a>',
+                                         disable_web_page_preview=True)
                 else:
                     ch = (trow.get("source_chat") or "").lstrip("@")
                     when = localize_dt(trow.get("posted_at"))
@@ -2087,13 +2091,12 @@ async def smart_router(message: Message):
                     hint = " • В Premium покажу прямую ссылку."
                     await message.answer(f"{label}{hint}")
                 shown += 1
+
             if shown == 0:
-                await message.answer(
-                    "Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры."
-                )
+                await message.answer("Для этого набора источников прямых ссылок нет. Попробуй свежие туры через фильтры.")
             return
 
-        # --- Погода ---
+        # погода (быстрый ответ)
         if re.search(r"\bпогод", user_text, flags=re.I):
             place = _extract_place_from_weather_query(user_text)
             await message.answer("Секунду, уточняю погоду…")
@@ -2101,35 +2104,25 @@ async def smart_router(message: Message):
             await message.answer(reply, disable_web_page_preview=True)
             return
 
-        # ===== интент: "актуальные/свежие/горящие туры" =====
+        # ===== «актуальные/свежие/горящие туры» =====
         m_recent = re.search(r"\b(актуальн\w*|свеж\w*|горящ\w*|последн\w*)\s+(туры|предложени\w*)\b", user_text, flags=re.I)
         m_72 = re.search(r"\b(72\s*ч|за\s*72\s*час\w*|за\s*3\s*дн\w*)\b", user_text, flags=re.I)
         m_sort_price = re.search(r"\b(дешевле|дешёвые|по\s*цене|сортировк\w+\s*по\s*цене)\b", user_text, flags=re.I)
 
         if m_recent or m_72:
-            hours = 72  # хотим «свежак»
-            order_by_price = bool(m_sort_price)
-
-            rows = await fetch_tours_page(hours=hours, order_by_price=order_by_price, limit=6, offset=0)
-            header = "🔥 Актуальные за 72 часа" + (" — дешевле → дороже" if order_by_price else "")
+            rows = await fetch_tours_page(hours=72, order_by_price=bool(m_sort_price), limit=6, offset=0)
+            header = "🔥 Актуальные за 72 часа" + (" — дешевле → дороже" if m_sort_price else "")
             await message.answer(f"<b>{header}</b>")
 
             token = _new_token()
             PAGER_STATE[token] = {
-                "chat_id": message.chat.id,
-                "query": None,
-                "country": None,
-                "currency_eq": None,
-                "max_price": None,
-                "hours": hours,
-                "order_by_price": order_by_price,
-                "ts": time.monotonic(),
+                "chat_id": message.chat.id, "query": None, "country": None, "currency_eq": None,
+                "max_price": None, "hours": 72, "order_by_price": bool(m_sort_price), "ts": time.monotonic(),
             }
-
             await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
             return
 
-        # короткие смысловые запросы → сразу подбирать туры
+        # короткие смысловые запросы → подбор туров
         m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
         if m_interest or (len(user_text) <= 30):
             q_raw = m_interest.group(1) if m_interest else user_text
@@ -2151,47 +2144,30 @@ async def smart_router(message: Message):
 
             if rows_all:
                 _remember_query(message.from_user.id, q)
-                header = "Нашёл варианты по запросу: " + escape(q)
-                await message.answer(f"<b>{header}</b>")
+                await message.answer(f"<b>Нашёл варианты по запросу: {escape(q)}</b>")
                 token = _new_token()
                 PAGER_STATE[token] = {
-                    "chat_id": message.chat.id,
-                    "query": q,
-                    "country": None,
-                    "currency_eq": None,
-                    "max_price": None,
-                    "hours": 72,
-                    "order_by_price": False,
-                    "ts": time.monotonic(),
+                    "chat_id": message.chat.id, "query": q, "country": None, "currency_eq": None,
+                    "max_price": None, "hours": 72, "order_by_price": False, "ts": time.monotonic(),
                 }
-                await send_batch_cards(
-                    message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6])
-                )
+                await send_batch_cards(message.chat.id, message.from_user.id, rows_all[:6], token, len(rows_all[:6]))
                 return
 
-        # чуть длиннее — сначала пробуем актуальные 72ч по фразе
+        # чуть длиннее — пробуем «72ч» по фразе
         if len(user_text) <= 40:
             rows, is_recent = await fetch_tours(user_text, hours=72)
             if rows:
                 _remember_query(message.from_user.id, user_text)
-                header = (
-                    "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
-                )
+                header = "🔥 Нашёл актуальные за 72 часа:" if is_recent else "ℹ️ Свежих 72ч нет — вот последние варианты:"
                 await message.answer(f"<b>{header}</b>")
                 token = _new_token()
                 PAGER_STATE[token] = {
-                    "chat_id": message.chat.id,
-                    "query": user_text,
-                    "country": None,
-                    "currency_eq": None,
-                    "max_price": None,
-                    "hours": 72 if is_recent else None,
-                    "order_by_price": False,
-                    "ts": time.monotonic(),
+                    "chat_id": message.chat.id, "query": user_text, "country": None, "currency_eq": None,
+                    "max_price": None, "hours": 72 if is_recent else None, "order_by_price": False, "ts": time.monotonic(),
                 }
                 await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
                 return
-
+                
         # fallback → без GPT (предлагаем кнопки)
                 await message.answer(
                     "Пока не понял запрос. Нажми «🎒 Найти туры» или «🤖 Спросить GPT» (нужна подписка)."
