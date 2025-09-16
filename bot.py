@@ -371,8 +371,10 @@ def set_subscription(user_id: int, status: str):
 def get_pay_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить через Payme", url="https://payme.uz/example-link")],
-            [InlineKeyboardButton(text="💳 Оплатить через Click", url="https://my.click.uz/services/example-link")],
+            [InlineKeyboardButton(
+                text="💳 Оплатить через Payme",
+                url="https://checkout.paycom.uz/YOUR_LINK"  # сюда вставь свой реальный Payme-ссылку
+            )]
         ]
     )
 
@@ -1474,9 +1476,9 @@ async def _typing_pulse(chat_id: int):
 
 
 # ================= ХЕНДЛЕРЫ =================@dp.message(Command("start"), F.chat.type == "private")
+@dp.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
     uid = message.from_user.id
-    # сразу выбор языка
     await message.answer(
         t(uid, "choose_lang"),
         reply_markup=lang_inline_kb()
@@ -1816,18 +1818,9 @@ async def cb_fav_rm(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("lang:"))
 async def cb_lang(call: CallbackQuery):
     uid = call.from_user.id
-    _, lang = call.data.split(":", 1)
-    if get_user_lang(uid) != lang:
-        set_user_lang(uid, lang)
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    try:
-        await call.answer("OK", cache_time=60)
-    except Exception:
-        pass
-    await call.message.answer(t(uid, "lang_saved"))
+    lang = call.data.split(":")[1]
+    set_lang(uid, lang)
+
     text = (
         t(uid, "hello")
         + "\n\n"
@@ -1835,7 +1828,7 @@ async def cb_lang(call: CallbackQuery):
         + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
     )
     await call.message.answer(text, reply_markup=main_kb_for(uid))
-
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
@@ -1988,7 +1981,7 @@ async def on_menu_buttons(message: Message):
         if not user_has_subscription(message.from_user.id):
             await message.answer(
                 "🤖 GPT доступен только по подписке.\nПодключи её здесь:",
-                reply_markup=get_pay_kb(),
+                reply_markup=get_payme_kb(),  # только Payme
             )
             return
         await entry_gpt(message)
