@@ -2614,35 +2614,29 @@ async def payme_mock_new(amount: int = 4900000):
 
 # ---- основной JSON-RPC обработчик ----
 from fastapi import Header
+from fastapi.responses import JSONResponse
 
 @app.post("/payme/merchant")
 async def payme_merchant(request: Request, x_auth: str | None = Header(default=None)):
-    body = await request.json()
-    req_id = body.get("id")
-    method = body.get("method")
-    params = body.get("params", {}) or {}
+    body    = await request.json()
+    req_id  = body.get("id")
+    method  = (body.get("method") or "").strip()
+    params  = body.get("params") or {}
+    account = params.get("account") or {}
 
-    auth_ok = _payme_auth_ok(x_auth)   # <— ВАЖНО: объявляем здесь
-    if not (auth_ok or _payme_sandbox_ok(request)):
-        return {"jsonrpc": "2.0", "id": req_id,
-                "error": {"code": -32504, "message": "Unauthorized"}}
-    
-    headers   = dict(request.headers)
-    rpc_id    = body.get("id")
-    method    = (body.get("method") or "").strip()
-    params    = body.get("params") or {}
-    account   = params.get("account") or {}
+    # --- авторизация (оставляем одну проверку) ---
+    auth_ok = _payme_auth_ok(x_auth) or _payme_sandbox_ok(request)
+    if not auth_ok:
+        return JSONResponse(_rpc_err(req_id, -32504, "Недопустимая авторизация"))
+
     amount_in = params.get("amount")
-    trx_id_in = params.get("id")  # Payme transaction id (для Perform/Check/Cancel)
+    trx_id_in = params.get("id")
     order_id  = account.get("order_id")
 
-    logging.info(f"[Payme] method={method} order_id={order_id} amount_in={amount_in} auth_ok={_payme_auth_check(headers)}")
+    logging.info("[Payme] method=%s order_id=%s amount_in=%s auth_ok=%s",
+                 method, order_id, amount_in, True)
 
-    # 1) Авторизация
-    if not _payme_auth_check(headers):
-        return _rpc_err(rpc_id, -32504, "Недопустимая авторизация", data="auth")
-
-    # 2) Подгружаем заказ там, где нужен
+    # --- ПРЕ-ЗАГРУЗКА ЗАКАЗА (ОТДЕЛЬНЫЙ БЛОК, НЕ ЧАСТЬ СВИЧА!) ---
     order = None
     if method in {"CheckPerformTransaction", "CreateTransaction"}:
         try:
@@ -2652,27 +2646,21 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
             order = None
 
     # ================== METHOD SWITCH ==================
-
-    # -------- CheckPerformTransaction --------
-    elif method == "CheckPerformTransaction":
+    if method == "CheckPerformTransaction":
         if not order:
-            return _rpc_err(rpc_id, -31050, "Заказ не найден")
-
+            return JSONResponse(_rpc_err(req_id, -31050, "Заказ не найден"))
         expected = _order_amount_tiyin(order)
         if expected is None:
-            return _rpc_err(rpc_id, -31008, "Сумма в заказе не задана")
-
+            return JSONResponse(_rpc_err(req_id, -31008, "Сумма в заказе не задана"))
         try:
             sent = int(amount_in)
         except Exception:
-            return _rpc_err(rpc_id, -31001, "Неверная сумма")
-
+            return JSONResponse(_rpc_err(req_id, -31001, "Неверная сумма"))
         if sent != expected:
-            logging.warning(f"[Payme] amount mismatch: sent={sent} expected={expected} order_id={order_id}")
-            return _rpc_err(rpc_id, -31001, "Неверная сумма")
-
-        return _rpc_ok(rpc_id, {"allow": True})
-
+            logging.warning("[Payme] amount mismatch: sent=%s expected=%s order_id=%s", sent, expected, order_id)
+            return JSONResponse(_rpc_err(req_id, -31001, "Неверная сумма"))
+        return JSONResponse(_rpc_ok(req_id, {"allow": True}))
+        
     # -------- CreateTransaction --------
     elif method == "CreateTransaction":
         payme_trx = str(trx_id_in or "").strip()
@@ -2992,6 +2980,9 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
 
         logging.info("[Payme] GetStatement OUT: %d tx(s)", len(txs))
         return _rpc_ok(rpc_id, {"transactions": txs})
+
+# неизвестный метод
+    return JSONResponse(_rpc_err(req_id, -32601, "Метод не найден"))
 
 # ---- callback (как было) ----
 @app.post("/payme/callback")
