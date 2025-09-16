@@ -18,8 +18,6 @@ from collections import defaultdict
 import secrets
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
-from psycopg.rows import dict_row
-
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
@@ -41,8 +39,6 @@ from psycopg.rows import dict_row
 
 import httpx
 from db_init import init_db, get_config, set_config  # конфиг из БД
-
-from typing import Dict
 
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
@@ -613,11 +609,12 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
 
 
 def more_kb(token: str, next_offset: int, uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➡️ Показать ещё", callback_data=f"more:{token}:{next_offset}")],
-        [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
-    ])
-    await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset, user_id))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➡️ Показать ещё", callback_data=f"more:{token}:{next_offset}")],
+            [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
+        ]
+    )
 
 
 def want_contact_kb() -> ReplyKeyboardMarkup:
@@ -1539,11 +1536,9 @@ async def entry_sub(message: Message):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="💳 Click (автопродление)", callback_data="sub:click:recurring"),
                 InlineKeyboardButton(text="💳 Payme (автопродление)", callback_data="sub:payme:recurring"),
             ],
             [
-                InlineKeyboardButton(text="Разовая оплата через Click", callback_data="sub:click:oneoff"),
                 InlineKeyboardButton(text="Разовая оплата через Payme", callback_data="sub:payme:oneoff"),
             ],
             [InlineKeyboardButton(text="ℹ️ Подробнее о тарифах", callback_data="sub:info")],
