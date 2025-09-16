@@ -2055,22 +2055,7 @@ async def smart_router(message: Message):
                 )
             return
 
-        # --- Проверка GPT доступа ---
-        if not user_has_subscription(message.from_user.id):
-            await message.answer(
-                "✨ Персональные ответы GPT доступны только по подписке.\n"
-                "Подключи её здесь:",
-                reply_markup=get_pay_kb(),
-            )
-            return
-
-        # если подписка есть — отправляем текст в GPT
-        await entry_gpt(message)
-
-    finally:
-        pulse.cancel()  
-
-        # погода
+        # --- Погода ---
         if re.search(r"\bпогод", user_text, flags=re.I):
             place = _extract_place_from_weather_query(user_text)
             await message.answer("Секунду, уточняю погоду…")
@@ -2110,7 +2095,6 @@ async def smart_router(message: Message):
         m_interest = re.search(r"^(?:мне\s+)?(.+?)\s+интересует(?:\s*!)?$", user_text, flags=re.I)
         if m_interest or (len(user_text) <= 30):
             q_raw = m_interest.group(1) if m_interest else user_text
-            # «найди туры в Египет» → «Египет»
             q = _guess_query_from_link_phrase(q_raw) or q_raw
 
             queries = _expand_query(q)
@@ -2170,6 +2154,15 @@ async def smart_router(message: Message):
                 await send_batch_cards(message.chat.id, message.from_user.id, rows, token, len(rows))
                 return
 
+        # --- Проверка GPT доступа ---
+        if not user_has_subscription(message.from_user.id):
+            await message.answer(
+                "✨ Персональные ответы GPT доступны только по подписке.\n"
+                "Подключи её здесь:",
+                reply_markup=get_pay_kb(),
+            )
+            return
+
         # fallback → GPT консультация
         _remember_query(message.from_user.id, user_text)
         premium_users = {123456789}
@@ -2177,9 +2170,9 @@ async def smart_router(message: Message):
         replies = await ask_gpt(user_text, user_id=message.from_user.id, premium=is_premium)
         for part in replies:
             await message.answer(part, parse_mode=None)
+
     finally:
         pulse.cancel()
-
 
 # ---- helpers ----
 def _extract_answer_key_from_message(msg: Message) -> Optional[str]:
