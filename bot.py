@@ -1515,6 +1515,131 @@ async def _typing_pulse(chat_id: int):
     except asyncio.CancelledError:
         pass
 
+# ================= I18N (встроено в bot.py) =================
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+
+# Доступные языки: код -> метка в меню
+LANGS: dict[str, str] = {
+    "ru": "Ru Русский",
+    "uz": "Uz O‘zbekcha",
+    "en": "GB English",
+}
+
+# Тексты (ключ -> переводы)
+TEXTS: dict[str, dict[str, str]] = {
+    "hello": {
+        "ru": "Привет! Я помогу найти туры и отвечу на вопросы ✈️",
+        "uz": "Salom! Sizga sayohatlar topishda yordam beraman ✈️",
+        "en": "Hi! I’ll help you find tours and answer questions ✈️",
+    },
+    "choose_lang": {
+        "ru": "Выбери язык интерфейса:",
+        "uz": "Interfeys tilini tanlang:",
+        "en": "Choose your interface language:",
+    },
+    "lang_saved": {
+        "ru": "Язык сохранён ✅",
+        "uz": "Til saqlandi ✅",
+        "en": "Language saved ✅",
+    },
+
+    # Кнопки главного меню
+    "menu_find": {
+        "ru": "🎒 Найти туры",
+        "uz": "🎒 Turlarni topish",
+        "en": "🎒 Find tours",
+    },
+    "menu_gpt": {
+        "ru": "🤖 Спросить GPT",
+        "uz": "🤖 GPT so‘rash",
+        "en": "🤖 Ask GPT",
+    },
+    "menu_sub": {
+        "ru": "💳 Подписка",
+        "uz": "💳 Obuna",
+        "en": "💳 Subscription",
+    },
+    "menu_settings": {
+        "ru": "⚙️ Настройки",
+        "uz": "⚙️ Sozlamalar",
+        "en": "⚙️ Settings",
+    },
+
+    # Подсказки под меню (используются в cb_lang)
+    "desc_find": {
+        "ru": "— быстрый подбор актуальных предложений",
+        "uz": "— tezkor dolzarb takliflar",
+        "en": "— quick picks of fresh deals",
+    },
+    "desc_gpt": {
+        "ru": "— спроси про визы, сезоны, отели, бюджеты",
+        "uz": "— vizalar, mavsumlar, mehmonxonalar haqida so‘ra",
+        "en": "— ask about visas, seasons, hotels, budgets",
+    },
+}
+
+DEFAULT_LANG = "ru"
+
+def get_user_lang(user_id: int) -> str:
+    """Берём язык из конфигурации; если нет — ru."""
+    try:
+        v = get_config(f"lang_{user_id}", None)
+        return v if v in LANGS else DEFAULT_LANG
+    except Exception:
+        return DEFAULT_LANG
+
+def set_user_lang(user_id: int, code: str) -> None:
+    """Сохраняем язык пользователя в конфиг (таблица app_config)."""
+    if code not in LANGS:
+        code = DEFAULT_LANG
+    set_config(f"lang_{user_id}", code)
+
+def t(user_id: int | None, key: str) -> str:
+    """Перевод по ключу с учётом языка пользователя (или ru)."""
+    lang = get_user_lang(user_id) if user_id else DEFAULT_LANG
+    bucket = TEXTS.get(key) or {}
+    return bucket.get(lang) or bucket.get(DEFAULT_LANG) or key
+
+def lang_inline_kb(current: str | None = None) -> InlineKeyboardMarkup:
+    """Инлайн-клавиатура выбора языка."""
+    current = current or DEFAULT_LANG
+    rows: list[list[InlineKeyboardButton]] = []
+    for code, title in LANGS.items():
+        mark = "✅ " if code == current else ""
+        rows.append([InlineKeyboardButton(text=mark + title, callback_data=f"lang:{code}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def main_kb_for(user_id: int) -> ReplyKeyboardMarkup:
+    """Главное меню в ReplyKeyboard (зависит от языка)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=t(user_id, "menu_find")), KeyboardButton(text=t(user_id, "menu_gpt"))],
+            [KeyboardButton(text=t(user_id, "menu_sub")), KeyboardButton(text=t(user_id, "menu_settings"))],
+        ],
+        resize_keyboard=True,
+        selective=True,
+    )
+
+def _all_labels_for(key: str) -> list[str]:
+    """Все варианты текста кнопки для всех языков (для сравнения)."""
+    bucket = TEXTS.get(key, {})
+    return [v for v in bucket.values() if v]
+
+def is_menu_label(user_text: str, key: str) -> bool:
+    """Проверка, что текст равен одной из локализованных меток меню (без регистра/пробелов)."""
+    norm = (user_text or "").strip().lower()
+    for variant in _all_labels_for(key):
+        if norm == variant.strip().lower():
+            return True
+    return False
+
+def _is_menu_text(txt: str) -> bool:
+    """Фильтр aiogram: текст — одна из кнопок главного меню на любом языке."""
+    return any(
+        is_menu_label(txt, key)
+        for key in ("menu_find", "menu_gpt", "menu_sub", "menu_settings")
+    )
+# ================= /I18N =================
 
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"), F.chat.type == "private")
