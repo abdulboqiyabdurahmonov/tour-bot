@@ -41,6 +41,19 @@ from psycopg.rows import dict_row
 import httpx
 from db_init import init_db, get_config, set_config  # конфиг из БД
 
+from typing import Dict
+
+USER_LANG: Dict[int, str] = {}
+
+def set_lang(uid: int, lang: str) -> None:
+    lang = (lang or "ru").lower()
+    if lang not in {"ru", "uz", "en"}:
+        lang = "ru"
+    USER_LANG[uid] = lang
+
+def get_lang(uid: int) -> str:
+    return USER_LANG.get(uid, "ru")
+
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
 
@@ -1815,20 +1828,27 @@ async def cb_fav_rm(call: CallbackQuery):
         await call.message.edit_reply_markup(reply_markup=tour_inline_kb(t, False, call.from_user.id))
 
 
+from aiogram.types import CallbackQuery
+from aiogram import F
+
 @dp.callback_query(F.data.startswith("lang:"))
-async def cb_lang(call: CallbackQuery):
-    uid = call.from_user.id
-    lang = call.data.split(":")[1]
+async def cb_lang(callback: CallbackQuery):
+    uid = callback.from_user.id
+    lang = callback.data.split(":", 1)[1]
     set_lang(uid, lang)
 
-    text = (
-        t(uid, "hello")
-        + "\n\n"
-        + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
-        + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n"
+    # Подтверждаем и убираем инлайн-клавиатуру выбора языка
+    await callback.answer("✅ Язык сохранён")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Приветствие + главное меню на выбранном языке
+    await callback.message.answer(
+        t(uid, "hello"),
+        reply_markup=main_kb_for(uid)
     )
-    await call.message.answer(text, reply_markup=main_kb_for(uid))
-    await call.answer()
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
