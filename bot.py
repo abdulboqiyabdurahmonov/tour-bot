@@ -23,6 +23,12 @@ from fastapi.responses import JSONResponse
 from payments import db as _pay_db  # реиспользуем подключение из слоя платежей
 
 from aiogram import Bot, Dispatcher, F
+from handlers.settings import router as settings_router  # <-- импортируем наш новый router
+bot = Bot(token=TOKEN, parse_mode="HTML")
+dp = Dispatcher()
+
+# Подключаем наш router
+dp.include_router(settings_router)
 from aiogram.types import (
     Message,
     CallbackQuery,
