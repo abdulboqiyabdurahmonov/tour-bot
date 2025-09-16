@@ -44,17 +44,6 @@ from db_init import init_db, get_config, set_config  # конфиг из БД
 
 from typing import Dict
 
-USER_LANG: Dict[int, str] = {}
-
-def set_lang(uid: int, lang: str) -> None:
-    lang = (lang or "ru").lower()
-    if lang not in {"ru", "uz", "en"}:
-        lang = "ru"
-    USER_LANG[uid] = lang
-
-def get_lang(uid: int) -> str:
-    return USER_LANG.get(uid, "ru")
-
 # ================= ЛОГИ =================
 logging.basicConfig(level=logging.INFO)
 
@@ -600,19 +589,6 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# keyboards.py
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-def get_payme_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="💳 Оплатить через Payme",
-                url="https://checkout.paycom.uz/YOUR_REAL_PAYME_LINK"  # подставь свой URL
-            )
-        ]]
-    )
-
 def filters_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -636,13 +612,12 @@ def filters_inline_kb() -> InlineKeyboardMarkup:
     )
 
 
-def more_kb(token: str, next_offset: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➡️ Показать ещё", callback_data=f"more:{token}:{next_offset}")],
-            [InlineKeyboardButton(text=t(0, "back"), callback_data="back_filters")],
-        ]
-    )
+def more_kb(token: str, next_offset: int, uid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➡️ Показать ещё", callback_data=f"more:{token}:{next_offset}")],
+        [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
+    ])
+    await bot.send_message(chat_id, "Продолжить подборку?", reply_markup=more_kb(token, next_offset, user_id))
 
 
 def want_contact_kb() -> ReplyKeyboardMarkup:
@@ -1504,19 +1479,18 @@ async def _typing_pulse(chat_id: int):
         pass
 
 
-# ================= ХЕНДЛЕРЫ =================@dp.message(Command("start"), F.chat.type == "private")
+# ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
     uid = message.from_user.id
-    await message.answer(
-        t(uid, "choose_lang"),
-        reply_markup=lang_inline_kb()
-    )
+    if get_config(f"lang_{uid}", None):            # язык уже выбран
+        await message.answer(t(uid, "hello"), reply_markup=main_kb_for(uid))
+        return
+    await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
 
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: Message):
     await message.reply(f"chat_id: {message.chat.id}\nthread_id: {getattr(message, 'message_thread_id', None)}")
-
 
 @dp.message(Command("setleadgroup"))
 async def cmd_setleadgroup(message: Message):
@@ -1535,7 +1509,6 @@ async def cmd_setleadgroup(message: Message):
         return
     set_config("LEADS_CHAT_ID", new_id)
     await message.reply(f"LEADS_CHAT_ID обновлён: {new_id}")
-
 
 @dp.message(Command("leadstest"))
 async def cmd_leadstest(message: Message):
@@ -1850,20 +1823,16 @@ async def cb_lang(callback: CallbackQuery):
     uid = callback.from_user.id
     lang = callback.data.split(":", 1)[1]
 
-    # 1) сохраняем язык
-    set_lang(uid, lang)
+    # было: set_lang(uid, lang)
+    set_user_lang(uid, lang)  # <- сохраняем в app_config
 
-    # 2) отвечаем на клик и убираем инлайн-кнопки выбора языка
-    await callback.answer(t(uid, "lang_saved"))  # например: "Язык обновлён"
+    await callback.answer(t(uid, "lang_saved"))
     try:
-        # перезаписываем сообщение с выбором языка без клавиатуры,
-        # чтобы не было повторных нажатий
-        await callback.message.edit_text(t(uid, "choose_lang_done"))
+        # было: t(uid, "choose_lang_done") — такого ключа нет
+        await callback.message.edit_text(t(uid, "lang_saved"))
     except Exception:
-        # если нельзя отредактировать (старое/не моё сообщение) — просто игнор
         pass
 
-    # 3) присылаем главное меню уже на новом языке
     await bot.send_message(
         uid,
         t(uid, "hello") + "\n\n"
@@ -1885,7 +1854,7 @@ async def cb_want(call: CallbackQuery):
         await call.message.answer(
             "⚠️ У тебя уже была бесплатная заявка.\n"
             "Для следующих нужно подключить подписку 🔔",
-            reply_markup=get_pay_kb(),
+             reply_markup=get_payme_kb(),
         )
         await call.answer()
         return
@@ -1916,7 +1885,7 @@ async def on_contact(message: Message):
         logging.info(f"Contact came without pending want (user_id={message.from_user.id})")
         await message.answer(
             "Контакт получен. Если нужен подбор, нажми «🎒 Найти туры».",
-            reply_markup=main_kb_for(message.from_user.id),
+            reply_markup=main_kb_for(message.from_user.id)
         )
         return
 
@@ -1948,12 +1917,12 @@ async def on_contact(message: Message):
         append_lead_to_sheet(lead_id, message.from_user, phone, t)
         await message.answer(
             f"Принято! Заявка №{lead_id}. Менеджер скоро свяжется 📞",
-            reply_markup=main_kb_for(message.from_user.id),
+            reply_markup=main_kb_for(message.from_user.id)
         )
     else:
         await message.answer(
             "Контакт получен, но не удалось создать заявку. Попробуй ещё раз или напиши менеджеру.",
-            reply_markup=main_kb,
+            reply_markup=main_kb_for(message.from_user.id)
         )
 
 
@@ -1969,8 +1938,8 @@ async def cb_back_filters(call: CallbackQuery):
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
-    await call.message.answer("Главное меню:", reply_markup=main_kb_for(call.from_user.id))
-
+    await call.message.answer(t(call.from_user.id, "hello"), reply_markup=main_kb_for(call.from_user.id))
+    
 
 # срабатывает ТОЛЬКО если юзер находится в ASK_STATE
 @dp.message(F.chat.type == "private", F.text, lambda m: m.from_user.id in ASK_STATE)
@@ -2533,7 +2502,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
     # ================== METHOD SWITCH ==================
 
     # -------- CheckPerformTransaction --------
-    if method == "CheckPerformTransaction":
+    elif method == "CheckPerformTransaction":
         if not order:
             return _rpc_err(rpc_id, -31050, "Заказ не найден")
 
@@ -2661,7 +2630,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
         return _rpc_ok(rpc_id, {"perform_time": trx["perform_time"], "transaction": payme_trx, "state": 2})
 
     # -------- CancelTransaction --------
-    if method == "CancelTransaction":
+    elif method == "CancelTransaction":
         payme_trx = str(trx_id_in or "").strip()
         if not payme_trx:
             return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
@@ -2830,15 +2799,18 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
             with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
-                    SELECT provider_trx_id, order_id, amount, status,
-                           EXTRACT(EPOCH FROM create_time)*1000 AS create_ms,
+                    SELECT provider_trx_id,
+                           id AS order_id,
+                           amount,
+                           status,
+                           EXTRACT(EPOCH FROM created_at)*1000 AS create_ms,
                            EXTRACT(EPOCH FROM perform_time)*1000 AS perform_ms,
                            EXTRACT(EPOCH FROM cancel_time)*1000  AS cancel_ms,
                            COALESCE(reason,0) AS reason
                       FROM orders
                      WHERE provider='payme'
                        AND provider_trx_id IS NOT NULL
-                       AND EXTRACT(EPOCH FROM create_time)*1000 BETWEEN %s AND %s
+                       AND EXTRACT(EPOCH FROM created_at)*1000 BETWEEN %s AND %s
                     """,
                     (frm, to),
                 )
