@@ -51,14 +51,6 @@ from aiogram.types import (
 )
 from aiogram.filters import Command  # aiogram v3.x
 
-# создаём бота с поддержкой HTML по умолчанию
-bot = Bot(
-    token=TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
-dp = Dispatcher()
-dp.include_router(settings_router)
-
 # --- psycopg
 from psycopg import connect
 from psycopg.rows import dict_row
