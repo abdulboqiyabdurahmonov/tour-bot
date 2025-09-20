@@ -738,34 +738,47 @@ def safe(s: Optional[str]) -> str:
 # ================= ПОГОДА =================
 WEATHER_CACHE: Dict[str, Tuple[float, Dict]] = {}
 WEATHER_TTL = 900
-WMO_RU = {
-    0: "Ясно ☀️",
-    1: "Преимущественно ясно 🌤",
-    2: "Переменная облачность ⛅️",
-    3: "Облачно ☁️",
-    45: "Туман 🌫",
-    48: "Гололёдный туман 🌫❄️",
-    51: "Морось слабая 🌦",
-    53: "Морось умеренная 🌦",
-    55: "Морось сильная 🌧",
-    61: "Дождь слабый 🌦",
-    63: "Дождь умеренный 🌧",
-    65: "Дождь сильный 🌧",
-    66: "Ледяной дождь слабый 🌧❄️",
-    67: "Ледяной дождь сильный 🌧❄️",
-    71: "Снег слабый ❄️",
-    73: "Снег умеренный ❄️",
-    75: "Снег сильный ❄️",
-    77: "Снежная крупа 🌨",
-    80: "Ливни слабые 🌦",
-    81: "Ливни умеренные 🌧",
-    82: "Ливни сильные 🌧",
-    85: "Снегопад слабый 🌨",
-    86: "Снегопад сильный 🌨",
-    95: "Гроза ⛈",
-    96: "Гроза с градом ⛈🧊",
-    99: "Сильная гроза с градом ⛈🧊",
+
+WMO = {
+    "ru": {
+        0: "Ясно ☀️", 1: "Преимущественно ясно 🌤", 2: "Переменная облачность ⛅️", 3: "Облачно ☁️",
+        45: "Туман 🌫", 48: "Гололёдный туман 🌫❄️",
+        51: "Морось слабая 🌦", 53: "Морось умеренная 🌦", 55: "Морось сильная 🌧",
+        61: "Дождь слабый 🌦", 63: "Дождь умеренный 🌧", 65: "Дождь сильный 🌧",
+        66: "Ледяной дождь слабый 🌧❄️", 67: "Ледяной дождь сильный 🌧❄️",
+        71: "Снег слабый ❄️", 73: "Снег умеренный ❄️", 75: "Снег сильный ❄️",
+        77: "Снежная крупа 🌨", 80: "Ливни слабые 🌦", 81: "Ливни умеренные 🌧", 82: "Ливни сильные 🌧",
+        85: "Снегопад слабый 🌨", 86: "Снегопад сильный 🌨",
+        95: "Гроза ⛈", 96: "Гроза с градом ⛈🧊", 99: "Сильная гроза с градом ⛈🧊",
+    },
+    "uz": {
+        0: "Ochiq ☀️", 1: "Asosan ochiq 🌤", 2: "Qisman bulutli ⛅️", 3: "Bulutli ☁️",
+        45: "Tuman 🌫", 48: "Muzli tuman 🌫❄️",
+        51: "Yengil mayda yomg‘ir 🌦", 53: "O‘rtacha mayda yomg‘ir 🌦", 55: "Kuchli mayda yomg‘ir 🌧",
+        61: "Yengil yomg‘ir 🌦", 63: "O‘rtacha yomg‘ir 🌧", 65: "Kuchli yomg‘ir 🌧",
+        66: "Muzli yomg‘ir (yengil) 🌧❄️", 67: "Muzli yomg‘ir (kuchli) 🌧❄️",
+        71: "Yengil qor ❄️", 73: "O‘rtacha qor ❄️", 75: "Kuchli qor ❄️",
+        77: "Qor donachalari 🌨", 80: "Yomg‘ir quyishi (yengil) 🌦", 81: "Yomg‘ir quyishi (o‘rtacha) 🌧", 82: "Yomg‘ir quyishi (kuchli) 🌧",
+        85: "Qor yog‘ishi (yengil) 🌨", 86: "Qor yog‘ishi (kuchli) 🌨",
+        95: "Momaqaldiroq ⛈", 96: "Momaqaldiroq va do‘l ⛈🧊", 99: "Kuchli momaqaldiroq va do‘l ⛈🧊",
+    },
+    "kk": {
+        0: "Аспан ашық ☀️", 1: "Көбіне ашық 🌤", 2: "Аралас бұлтты ⛅️", 3: "Бұлтты ☁️",
+        45: "Тұман 🌫", 48: "Мұзды тұман 🌫❄️",
+        51: "Ұсақ жаңбыр (әлсіз) 🌦", 53: "Ұсақ жаңбыр (орташа) 🌦", 55: "Ұсақ жаңбыр (күшті) 🌧",
+        61: "Жаңбыр (әлсіз) 🌦", 63: "Жаңбыр (орташа) 🌧", 65: "Жаңбыр (күшті) 🌧",
+        66: "Мұзды жаңбыр (әлсіз) 🌧❄️", 67: "Мұзды жаңбыр (күшті) 🌧❄️",
+        71: "Қар (әлсіз) ❄️", 73: "Қар (орташа) ❄️", 75: "Қар (күшті) ❄️",
+        77: "Қар түйіршіктері 🌨", 80: "Құйынды жаңбыр (әлсіз) 🌦", 81: "Құйынды жаңбыр (орташа) 🌧", 82: "Құйынды жаңбыр (күшті) 🌧",
+        85: "Қар жауу (әлсіз) 🌨", 86: "Қар жауу (күшті) 🌨",
+        95: "Найзағай ⛈", 96: "Найзағай, бұршақ ⛈🧊", 99: "Күшті найзағай, бұршақ ⛈🧊",
+    },
 }
+
+def wmo_text(code: int, lang: str) -> str:
+    return WMO.get(lang, WMO["ru"]).get(code, {
+        "ru": "Погода", "uz": "Ob-havo", "kk": "Ауа райы"
+    }[lang if lang in ("ru","uz","kk") else "ru"])
 
 
 def _cleanup_weather_cache():
@@ -777,35 +790,94 @@ def _cleanup_weather_cache():
 
 def _extract_place_from_weather_query(q: str) -> Optional[str]:
     txt = q.strip()
-    txt = re.sub(r"(сегодня|сейчас|завтра|пожалуйста|pls|please)", "", txt, flags=re.I)
-    m = re.search(r"(?:на|в|во|по)\s+([A-Za-zА-Яа-яЁё\-\s]+)", txt, flags=re.I)
-    if not m:
-        m = re.search(r"погод[ауые]\s+([A-Za-zА-Яа-яЁё\-\s]+)", txt, flags=re.I)
+
+    # убрать частые служебные слова на трёх языках
+    txt = re.sub(r"(сегодня|сейчас|завтра|пожалуйста|пж|pls|please|bugun|hozir|ertaga|iltimos|bügіn|qazіr|ертең|өтінемін)",
+                 "", txt, flags=re.I)
+
+    # «погода в/на ...», «ob-havo ...», «ауа райы ...»
+    patterns = [
+        r"(?:на|в|во|по)\s+([A-Za-zА-Яа-яЁёĞğİıŞşÇçÖöÜüҚқҒғҢңӘәӨөҰұҚқҺһʼ'\-\s]+)",
+        r"(?:погод[ауые]\s+)([A-Za-zА-Яа-яЁёĞğİıŞşÇçÖöÜüҚқҒғҢңӘәӨөҰұҚқҺһʼ'\-\s]+)",
+        r"(?:ob[-\s]?havo|obhavo)\s+([A-Za-zА-Яа-яЁёĞğİıŞşÇçÖöÜüʼ'\-\s]+)",
+        r"(?:ауа\s*райы)\s+([A-Za-zА-Яа-яЁёҚқҒғҢңӘәӨөҰұҚқҺһʼ'\-\s]+)",
+    ]
+    m = None
+    for p in patterns:
+        m = re.search(p, txt, flags=re.I)
+        if m:
+            break
     if not m:
         return None
+
     place = m.group(1)
     place = re.sub(r"[?!.,:;]+$", "", place).strip()
-    place = re.sub(r"\b(сегодня|завтра|сейчас)\b", "", place, flags=re.I).strip()
-    place = re.sub(r"^остров[аеуы]?\s+", "", place, flags=re.I)
+    place = re.sub(r"\b(сегодня|завтра|сейчас|bugun|ertaga|hozir|бүгін|ертең|қазір)\b", "", place, flags=re.I).strip()
+    place = re.sub(r"^(остров|oroli|аралы)\s+", "", place, flags=re.I)
     return place or None
 
+async def get_weather_text(place: str, lang: str = "ru") -> str:
+    lang = lang if lang in ("ru", "uz", "kk") else "ru"
 
-async def get_weather_text(place: str) -> str:
+    texts = {
+        "ask_place": {
+            "ru": "Напиши город/место: например, «погода в Стамбуле» или «погода на Бали».",
+            "uz": "Shahar/joyni yozing: masalan, «Istanbulda ob-havo» yoki «Balida ob-havo».",
+            "kk": "Қаланы/орынды жазыңыз: мысалы, «Стамбұлдағы ауа райы» немесе «Балиде ауа райы».",
+        },
+        "not_found": {
+            "ru": "Не нашёл локацию «{q}». Попробуй иначе (город/остров/страна).",
+            "uz": "«{q}» joyi topilmadi. Boshqacha yozib ko‘ring (shahar/orol/mamlakat).",
+            "kk": "«{q}» орны табылмады. Басқа түрде жазыңыз (қала/арал/ел).",
+        },
+        "fetch_fail": {
+            "ru": "Не удалось получить погоду для «{q}». Попробуй позже.",
+            "uz": "«{q}» uchun ob-havo olinmadi. Keyinroq urinib ko‘ring.",
+            "kk": "«{q}» үшін ауа райын алу мүмкін болмады. Кейінірек қайталап көріңіз.",
+        },
+        "label": {"ru": "Погода", "uz": "Ob-havo", "kk": "Ауа райы"},
+        "now": {
+            "ru": "Сейчас", "uz": "Hozir", "kk": "Қазір",
+        },
+        "feels": {
+            "ru": "ощущается как", "uz": "his qilinadi", "kk": "сезіледі",
+        },
+        "humidity": {
+            "ru": "Влажность", "uz": "Namlik", "kk": "Ылғалдылық",
+        },
+        "wind": {
+            "ru": "Жел", "uz": "Shamol", "kk": "Жел",
+        },
+        "precip_prob": {
+            "ru": "Вероятность осадков сегодня",
+            "uz": "Bugun yog‘ingarchilik ehtimoli",
+            "kk": "Бүгінгі жауын-шашын ықтималдығы",
+        },
+        "retry": {
+            "ru": "Не удалось получить данные о погоде. Попробуй ещё раз чуть позже.",
+            "uz": "Ob-havo ma’lumotlarini olish muvaffaqiyatsiz. Birozdan so‘ng qayta urinib ko‘ring.",
+            "kk": "Ауа райы деректерін алу мүмкін болмады. Біраздан соң қайталап көріңіз.",
+        },
+    }
+
     if not place:
-        return "Напиши город/место: например, «погода в Стамбуле» или «погода на Бали»."
-    key = place.lower().strip()
+        return texts["ask_place"][lang]
+
+    key = f"{lang}:{place.lower().strip()}"
     _cleanup_weather_cache()
     if key in WEATHER_CACHE:
         _, cached = WEATHER_CACHE[key]
         return cached["text"]
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             geo_r = await client.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": place, "count": 1, "language": "ru"},
+                params={"name": place, "count": 1, "language": lang},
             )
             if geo_r.status_code != 200 or not geo_r.json().get("results"):
-                return f"Не нашёл локацию «{escape(place)}». Попробуй иначе (город/остров/страна)."
+                return texts["not_found"][lang].format(q=escape(place))
+
             g = geo_r.json()["results"][0]
             lat, lon = g["latitude"], g["longitude"]
             label_parts = [g.get("name")]
@@ -824,12 +896,12 @@ async def get_weather_text(place: str) -> str:
             }
             w_r = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
             if w_r.status_code != 200:
-                return f"Не удалось получить погоду для «{escape(label)}». Попробуй позже."
+                return texts["fetch_fail"][lang].format(q=escape(label))
 
             data = w_r.json()
             cur = data.get("current", {})
             code = int(cur.get("weather_code", 0))
-            desc = WMO_RU.get(code, "Погода")
+            desc = wmo_text(code, lang)
             t = cur.get("temperature_2m")
             feels = cur.get("apparent_temperature")
             rh = cur.get("relative_humidity_2m")
@@ -841,28 +913,27 @@ async def get_weather_text(place: str) -> str:
             probs = hourly.get("precipitation_probability", [])
             if times and probs:
                 today = (datetime.now(timezone.utc).astimezone()).strftime("%Y-%m-%d")
-                prob = max((p for t, p in zip(times, probs) if t.startswith(today)), default=None)
+                prob = max((p for tt, p in zip(times, probs) if tt.startswith(today)), default=None)
 
-            parts = [f"Погода: <b>{escape(label)}</b>", desc]
+            parts = [f"{texts['label'][lang]}: <b>{escape(label)}</b>", desc]
             if t is not None:
                 tmp = f"{t:.0f}°C"
                 if feels is not None and abs(feels - t) >= 1:
-                    tmp += f" (ощущается как {feels:.0f}°C)"
-                parts.append(f"Сейчас: {tmp}")
+                    tmp += f" ({texts['feels'][lang]} {feels:.0f}°C)"
+                parts.append(f"{texts['now'][lang]}: {tmp}")
             if rh is not None:
-                parts.append(f"Влажность: {int(rh)}%")
+                parts.append(f"{texts['humidity'][lang]}: {int(rh)}%")
             if wind is not None:
-                parts.append(f"Ветер: {wind:.1f} м/с")
+                parts.append(f"{texts['wind'][lang]}: {wind:.1f} м/с")
             if prob is not None:
-                parts.append(f"Вероятность осадков сегодня: {int(prob)}%")
+                parts.append(f"{texts['precip_prob'][lang]}: {int(prob)}%")
 
             txt = " | ".join(parts)
             WEATHER_CACHE[key] = (time.time(), {"text": txt})
             return txt
     except Exception as e:
         logging.warning(f"get_weather_text failed: {e}")
-        return "Не удалось получить данные о погоде. Попробуй ещё раз чуть позже."
-
+        return texts["retry"][lang]
 
 def clean_text_basic(s: Optional[str]) -> str:
     if not s:
@@ -1762,10 +1833,9 @@ async def cmd_leadstest(message: Message):
 # Быстрые команды
 async def entry_find_tours(message: Message):
     uid = message.from_user.id
-    lang = _lang(uid)
     await message.answer(
-        TRANSLATIONS[lang]["filters.title"],
-        reply_markup=filters_inline_kb_for(uid)
+        t(uid, "filters.title"),
+        reply_markup=filters_inline_kb_for(uid),
     )
 
 async def entry_gpt(message: Message):
@@ -1800,6 +1870,11 @@ async def entry_settings(message: Message):
 async def cmd_language(message: Message):
     await entry_settings(message)
 
+SETTINGS_TRIGGERS = {TRANSLATIONS[lang]["menu_settings"] for lang in SUPPORTED_LANGS}
+
+@dp.message(F.text.in_(SETTINGS_TRIGGERS))
+async def on_settings_button(message: Message):
+    await entry_settings(message)
 
 @dp.callback_query(F.data.startswith("ask:"))
 async def cb_ask(call: CallbackQuery):
@@ -2135,6 +2210,14 @@ async def cmd_weather(message: Message):
     txt = await get_weather_text(place)
     await message.answer(txt, disable_web_page_preview=True)
 
+@dp.message(F.text.regexp(r"(?i)\b(погод|ob[-\s]?havo|aуа\s*райы|ауа\s*райы)\b"))
+async def handle_weather(message: Message):
+    uid = message.from_user.id
+    lang = _lang(uid)
+    place = _extract_place_from_weather_query(message.text or "")
+    txt = await get_weather_text(place, lang=lang)
+    await message.answer(txt)
+}
 
 @dp.message(F.chat.type == "private", F.contact)
 async def on_contact(message: Message):
