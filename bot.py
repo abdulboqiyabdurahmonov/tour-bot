@@ -1691,7 +1691,7 @@ def _is_menu_text(txt: str) -> bool:
 async def cmd_start(message: Message):
     uid = message.from_user.id
     if get_config(f"lang_{uid}", None):            # язык уже выбран
-        await message.answer(t(uid, "hello"), reply_markup=main_kb_for(message.from_user.id)
+        await message.answer(t(uid, "hello"), reply_markup=main_kb_for(message.from_user.id))
         return
     await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
 
