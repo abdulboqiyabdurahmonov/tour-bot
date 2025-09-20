@@ -314,6 +314,11 @@ TRANSLATIONS["ru"].update({"weather.loading": "Секунду, уточняю п
 TRANSLATIONS["uz"].update({"weather.loading": "Bir soniya, ob-havoni aniqlayapman…"})
 TRANSLATIONS["kk"].update({"weather.loading": "Бір сәт, ауа райын нақтылап жатырмын…"})
 
+TRANSLATIONS["ru"].update({"btn.weather": "🌤 Погода"})
+TRANSLATIONS["uz"].update({"btn.weather": "🌤 Ob-havo"})
+TRANSLATIONS["kk"].update({"btn.weather": "🌤 Ауа райы"})
+
+
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -1256,7 +1261,7 @@ async def fetch_tours(
     country: Optional[str] = None,
     currency_eq: Optional[str] = None,
     max_price: Optional[float] = None,
-    hours: int = 72,
+    hours: int = 24,
     limit_recent: int = 10,
     limit_fallback: int = 5,
 ) -> Tuple[List[dict], bool]:
@@ -1468,31 +1473,38 @@ async def ask_gpt(prompt: str, *, user_id: int, premium: bool = False) -> List[s
 # ================= КАРТОЧКИ/УВЕДОМЛЕНИЯ =================
 
 def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    lang = _lang(user_id) if user_id else DEFAULT_LANG
+    tr = TRANSLATIONS[lang]
     rows = []
 
     # 🔒 ссылку видит только администратор
     url = (tour.get("source_url") or "").strip()
     if url and user_id == ADMIN_USER_ID:
-        rows.append([InlineKeyboardButton(text="🔗 Открыть (админ)", url=url)])
+        rows.append([InlineKeyboardButton(text=tr["btn.admin_open"], url=url)])
 
-    # новая кнопка "вопрос"
-    ask_btn = InlineKeyboardButton(text="✍️ Вопрос по туру", callback_data=f"ask:{tour['id']}")
+    # кнопки
+    ask_btn = InlineKeyboardButton(text=tr["btn.ask"], callback_data=f"ask:{tour['id']}")
 
     fav_btn = InlineKeyboardButton(
-        text=("❤️ В избранном" if is_fav else "🤍 В избранное"),
+        text=(tr["btn.fav.rm"] if is_fav else tr["btn.fav.add"]),
         callback_data=f"fav:{'rm' if is_fav else 'add'}:{tour['id']}",
     )
-    want_btn = InlineKeyboardButton(text="📝 Хочу этот тур", callback_data=f"want:{tour['id']}")
 
-    lang = _lang(user_id) if user_id else DEFAULT_LANG
-    back_text = TRANSLATIONS[lang]["back"]
+    want_btn = InlineKeyboardButton(text=tr["btn.want"], callback_data=f"want:{tour['id']}")
 
+    # новая кнопка "погода"
+    place = tour.get("city") or tour.get("country") or ""
+    wx_btn = InlineKeyboardButton(text=tr["btn.weather"], callback_data=f"wx:{place}")
+
+    back_btn = InlineKeyboardButton(text=tr["back"], callback_data="back_filters")
+
+    # собираем ряды
     rows.append([ask_btn])
     rows.append([fav_btn, want_btn])
-    rows.append([InlineKeyboardButton(text=back_text, callback_data="back_filters")])
+    rows.append([wx_btn])
+    rows.append([back_btn])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 def build_card_text(t: dict, lang: str = "ru") -> str:
     # базовые поля
@@ -2077,6 +2089,13 @@ async def cb_more(call: CallbackQuery):
     _touch_state(token)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, offset + len(rows))
 
+@dp.callback_query(F.data.startswith("wx:"))
+async def cb_weather(call: CallbackQuery):
+    uid = call.from_user.id
+    place = (call.data.split(":", 1)[1] or "").strip() or "Ташкент"
+    await call.answer("⏳")
+    txt = await get_weather_text(place)
+    await call.message.answer(txt, disable_web_page_preview=True)
 
 @dp.callback_query(F.data.startswith("fav:add:"))
 async def cb_fav_add(call: CallbackQuery):
@@ -2112,29 +2131,24 @@ async def cb_fav_rm(call: CallbackQuery):
 
 from aiogram.types import CallbackQuery, ReplyKeyboardRemove
 
-from aiogram.types import CallbackQuery
-
 @dp.callback_query(F.data.startswith("lang:"))
 async def cb_lang(call: CallbackQuery):
     uid = call.from_user.id
     lang = call.data.split(":", 1)[1]
 
-    # сохраняем язык пользователя
+    # 1) Сохраняем язык пользователя
     set_user_lang(uid, lang)
 
-    # попробуем переотрисовать меню быстрых фильтров (если мы сейчас в нём)
+    # 2) Если сейчас открыт экран быстрых фильтров — просто заменим ИНЛАЙН-клавиатуру,
+    #    не меняя текста (убираем «filters.title», как вы просили).
     try:
-        await call.message.edit_text(
-            t(uid, "filters.title"),
-            reply_markup=filters_inline_kb_for(uid)
-        )
+        await call.message.edit_reply_markup(reply_markup=filters_inline_kb_for(uid))
         await call.answer(t(uid, "lang_saved"))
         return
     except Exception:
-        # если текущее сообщение — не меню фильтров, идём дальше
-        pass
+        pass  # сообщение было не с фильтрами — идём дальше
 
-    # если в контексте есть последняя карточка тура — обновим её
+    # 3) Если последнее сообщение — карточка тура, обновим её текст и кнопки под новый язык
     last_tours = LAST_RESULTS.get(uid, [])
     if last_tours:
         tour = last_tours[0]
@@ -2144,19 +2158,26 @@ async def cb_lang(call: CallbackQuery):
         try:
             await call.message.edit_text(caption, reply_markup=kb)
         except Exception:
+            # если это было фото с подписью
             await call.message.edit_caption(caption, reply_markup=kb)
         await call.answer(t(uid, "lang_saved"))
         return
 
-    # общий фоллбек: отправим привет и обновлённое главное меню
+    # 4) Фоллбек: убираем старую reply-клавиатуру и присылаем привет + новое главное меню
+    try:
+        await bot.send_message(uid, "…", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
+
     await bot.send_message(
         uid,
         t(uid, "hello") + "\n\n"
         + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
         + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n",
-        reply_markup=main_kb_for(uid),   # <-- тут был баг с call.from_user.id
+        reply_markup=main_kb_for(uid),  # важно: новое меню на нужном языке
     )
     await call.answer(t(uid, "lang_saved"))
+
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
