@@ -310,6 +310,9 @@ TRANSLATIONS["kk"].update({
     "btn.admin_open": "🔗 Ашуу (админ)",
 })
 
+TRANSLATIONS["ru"].update({"weather.loading": "Секунду, уточняю погоду…"})
+TRANSLATIONS["uz"].update({"weather.loading": "Bir soniya, ob-havoni aniqlayapman…"})
+TRANSLATIONS["kk"].update({"weather.loading": "Бір сәт, ауа райын нақтылап жатырмын…"})
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
