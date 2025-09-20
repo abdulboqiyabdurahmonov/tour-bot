@@ -2027,58 +2027,51 @@ async def cb_fav_rm(call: CallbackQuery):
 
 from aiogram.types import CallbackQuery, ReplyKeyboardRemove
 
+from aiogram.types import CallbackQuery
+
 @dp.callback_query(F.data.startswith("lang:"))
-async def cb_lang(callback: CallbackQuery):
-    uid = callback.from_user.id
-    lang = callback.data.split(":", 1)[1]
+async def cb_lang(call: CallbackQuery):
+    uid = call.from_user.id
+    lang = call.data.split(":", 1)[1]
 
-    # было: set_lang(uid, lang)
-    set_user_lang(uid, lang)  # <- сохраняем в app_config
+    # сохраняем язык пользователя
+    set_user_lang(uid, lang)
 
-    await callback.answer(t(uid, "lang_saved"))
+    # попробуем переотрисовать меню быстрых фильтров (если мы сейчас в нём)
     try:
-        # было: t(uid, "choose_lang_done") — такого ключа нет
-        await callback.message.edit_text(t(uid, "lang_saved"))
+        await call.message.edit_text(
+            t(uid, "filters.title"),
+            reply_markup=filters_inline_kb_for(uid)
+        )
+        await call.answer(t(uid, "lang_saved"))
+        return
     except Exception:
+        # если текущее сообщение — не меню фильтров, идём дальше
         pass
 
+    # если в контексте есть последняя карточка тура — обновим её
+    last_tours = LAST_RESULTS.get(uid, [])
+    if last_tours:
+        tour = last_tours[0]
+        caption = build_card_text(tour, lang=lang)
+        fav = is_favorite(uid, tour["id"])
+        kb = tour_inline_kb(tour, fav, uid)
+        try:
+            await call.message.edit_text(caption, reply_markup=kb)
+        except Exception:
+            await call.message.edit_caption(caption, reply_markup=kb)
+        await call.answer(t(uid, "lang_saved"))
+        return
+
+    # общий фоллбек: отправим привет и обновлённое главное меню
     await bot.send_message(
         uid,
         t(uid, "hello") + "\n\n"
         + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
         + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n",
-        reply_markup=main_kb_for(call.from_user.id),
+        reply_markup=main_kb_for(uid),   # <-- тут был баг с call.from_user.id
     )
-
-@dp.callback_query(F.data.startswith("lang:"))
-async def change_lang(call: CallbackQuery):
-    lang = call.data.split(":")[1]
-    set_user_lang(call.from_user.id, lang)
-
-    # 1) Переотрисуем фильтры (универсально — это безопасно)
-    try:
-        await call.message.edit_text(
-            TRANSLATIONS[lang]["filters.title"],
-            reply_markup=filters_inline_kb_for(call.from_user.id)
-        )
-        await call.answer(TRANSLATIONS[lang]["lang_saved"])
-        return
-    except Exception:
-        pass
-
-    # 2) Если текущее сообщение — карточка тура, обновим её
-    last_tours = LAST_RESULTS.get(call.from_user.id, [])
-    if last_tours:
-        tour = last_tours[0]
-        caption = build_card_text(tour, lang=lang)
-        fav = is_favorite(call.from_user.id, tour["id"])
-        kb = tour_inline_kb(tour, fav, call.from_user.id)
-        try:
-            await call.message.edit_text(caption, reply_markup=kb)
-        except:
-            await call.message.edit_caption(caption, reply_markup=kb)
-
-    await call.answer(TRANSLATIONS[lang]["lang_saved"])
+    await call.answer(t(uid, "lang_saved"))
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
