@@ -195,6 +195,7 @@ def _select_tours_clause() -> str:
 
 # ====== ЯЗЫКИ / ЛОКАЛИЗАЦИЯ ======
 SUPPORTED_LANGS = ("ru", "uz", "kk")
+DEFAULT_LANG = "ru"  # язык по умолчанию
 
 TRANSLATIONS = {
     "ru": {
@@ -235,52 +236,54 @@ TRANSLATIONS = {
     },
 }
 
-    TRANSLATIONS["ru"].update({
-        "filters.title": "Выбери подборку:",
-        "filters.recent": "🔥 Актуальные 72ч",
-        "filters.country.turkiye": "🌴 Турция",
-        "filters.country.uae": "🇦🇪 ОАЭ",
-        "filters.country.th": "🇹🇭 Таиланд",
-        "filters.country.vn": "🇻🇳 Вьетнам",
-        "filters.budget.500": "💸 ≤ $500",
-        "filters.budget.800": "💸 ≤ $800",
-        "filters.budget.1000": "💸 ≤ $1000",
-        "filters.sort.price": "↕️ Сортировка по цене",
-        "filters.more": "➕ Ещё фильтры скоро",
-        "more.title": "Продолжить подборку?",
-        "more.next": "➡️ Показать ещё",
-    })
-    TRANSLATIONS["uz"].update({
-        "filters.title": "Tanlovni belgilang:",
-        "filters.recent": "🔥 So‘nggi 72 soat",
-        "filters.country.turkiye": "🌴 Turkiya",
-        "filters.country.uae": "🇦🇪 BAA",
-        "filters.country.th": "🇹🇭 Tailand",
-        "filters.country.vn": "🇻🇳 Vetnam",
-        "filters.budget.500": "💸 ≤ $500",
-        "filters.budget.800": "💸 ≤ $800",
-        "filters.budget.1000": "💸 ≤ $1000",
-        "filters.sort.price": "↕️ Narx bo‘yicha",
-        "filters.more": "➕ Yaqinda qo‘shamiz",
-        "more.title": "Tanlovni davom ettiraymi?",
-        "more.next": "➡️ Yana ko‘rsat",
-    })
-    TRANSLATIONS["kk"].update({
-        "filters.title": "Таңдаңыз:",
-        "filters.recent": "🔥 Соңғы 72 сағ",
-        "filters.country.turkiye": "🌴 Түркия",
-        "filters.country.uae": "🇦🇪 БАӘ",
-        "filters.country.th": "🇹🇭 Тайланд",
-        "filters.country.vn": "🇻🇳 Вьетнам",
-        "filters.budget.500": "💸 ≤ $500",
-        "filters.budget.800": "💸 ≤ $800",
-        "filters.budget.1000": "💸 ≤ $1000",
-        "filters.sort.price": "↕️ Баға бойыншa",
-        "filters.more": "➕ Жақында",
-        "more.title": "Жалғастырайық па?",
-        "more.next": "➡️ Тағы көрсету",
-    })
+# Дополнительные ключи для фильтров/«показать ещё»
+TRANSLATIONS["ru"].update({
+    "filters.title": "Выбери подборку:",
+    "filters.recent": "🔥 Актуальные 72ч",
+    "filters.country.turkiye": "🌴 Турция",
+    "filters.country.uae": "🇦🇪 ОАЭ",
+    "filters.country.th": "🇹🇭 Таиланд",
+    "filters.country.vn": "🇻🇳 Вьетнам",
+    "filters.budget.500": "💸 ≤ $500",
+    "filters.budget.800": "💸 ≤ $800",
+    "filters.budget.1000": "💸 ≤ $1000",
+    "filters.sort.price": "↕️ Сортировка по цене",
+    "filters.more": "➕ Ещё фильтры скоро",
+    "more.title": "Продолжить подборку?",
+    "more.next": "➡️ Показать ещё",
+})
 
+TRANSLATIONS["uz"].update({
+    "filters.title": "Tanlovni belgilang:",
+    "filters.recent": "🔥 So‘nggi 72 soat",
+    "filters.country.turkiye": "🌴 Turkiya",
+    "filters.country.uae": "🇦🇪 BAA",
+    "filters.country.th": "🇹🇭 Tailand",
+    "filters.country.vn": "🇻🇳 Vetnam",
+    "filters.budget.500": "💸 ≤ $500",
+    "filters.budget.800": "💸 ≤ $800",
+    "filters.budget.1000": "💸 ≤ $1000",
+    "filters.sort.price": "↕️ Narx bo‘yicha",
+    "filters.more": "➕ Yaqinda qo‘shamiz",
+    "more.title": "Tanlovni davom ettiraymi?",
+    "more.next": "➡️ Yana ko‘rsat",
+})
+
+TRANSLATIONS["kk"].update({
+    "filters.title": "Таңдаңыз:",
+    "filters.recent": "🔥 Соңғы 72 сағ",
+    "filters.country.turkiye": "🌴 Түркия",
+    "filters.country.uae": "🇦🇪 БАӘ",
+    "filters.country.th": "🇹🇭 Тайланд",
+    "filters.country.vn": "🇻🇳 Вьетнам",
+    "filters.budget.500": "💸 ≤ $500",
+    "filters.budget.800": "💸 ≤ $800",
+    "filters.budget.1000": "💸 ≤ $1000",
+    "filters.sort.price": "↕️ Баға бойыншa",
+    "filters.more": "➕ Жақында",
+    "more.title": "Жалғастырайық па?",
+    "more.next": "➡️ Тағы көрсету",
+})
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
