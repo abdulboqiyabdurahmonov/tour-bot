@@ -1348,7 +1348,7 @@ def build_card_text(t: dict, lang: str = "ru") -> str:
 async def send_tour_card(chat_id: int, user_id: int, tour: dict):
     fav = is_favorite(user_id, tour["id"]) 
     kb = tour_inline_kb(tour, fav, user_id)
-    caption = build_card_text(tour)
+    caption = build_card_text(tour, lang=_lang(user_id))
     await bot.send_message(chat_id, caption, reply_markup=kb, disable_web_page_preview=True)
 
 
