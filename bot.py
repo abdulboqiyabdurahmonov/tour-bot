@@ -1311,9 +1311,9 @@ def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> I
     )
     want_btn = InlineKeyboardButton(text="📝 Хочу этот тур", callback_data=f"want:{tour['id']}")
 
-    back_text = t(user_id, "back") if user_id is not None else TRANSLATIONS["ru"]["back"]
+    lang = _lang(user_id) if user_id else DEFAULT_LANG
+    back_text = TRANSLATIONS[lang]["back"]
 
-    # порядок кнопок: Вопрос • Избранное • Хочу • Назад
     rows.append([ask_btn])
     rows.append([fav_btn, want_btn])
     rows.append([InlineKeyboardButton(text=back_text, callback_data="back_filters")])
@@ -1321,36 +1321,29 @@ def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> I
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_card_text(t: dict) -> str:
-    price_str = fmt_price(t.get("price"), t.get("currency"))
-    hotel_text = t.get("hotel") or derive_hotel_from_description(t.get("description"))
-    hotel_clean = (
-        clean_text_basic(strip_trailing_price_from_hotel(hotel_text)) if hotel_text else "Пакетный тур"
-    )
+def build_card_text(t: dict, lang: str = "ru") -> str:
+    hotel = clean_text_basic(strip_trailing_price_from_hotel(
+        t.get("hotel") or derive_hotel_from_description(t.get("description")) or "—"
+    ))
+    country = t.get("country") or "—"
+    city = t.get("city") or "—"
+    price = fmt_price(t.get("price"), t.get("currency"))
+    dates = normalize_dates_for_display(t.get("dates")) if t.get("dates") else "—"
     board = (t.get("board") or "").strip()
-    if not board:
-        board = extract_meal(t.get("hotel"), t.get("description")) or ""
     includes = (t.get("includes") or "").strip()
-    dates_norm = normalize_dates_for_display(t.get("dates"))
-    time_str = localize_dt(t.get("posted_at"))
-    url = (t.get("source_url") or "").strip()
 
     parts = [
-        f"🌍 {safe(t.get('country'))} — {safe(t.get('city'))}",
-        f"🏨 {safe(hotel_clean)}",
-        f"💵 {price_str}",
-        f"📅 {dates_norm}",
+        f"🏨 <b>{hotel}</b>",
+        f"📍 {country} — {city}",
+        f"🗓 {dates}",
+        f"💵 {price}",
     ]
     if board:
-        parts.append(f"🍽 Питание: <b>{escape(board)}</b>")
+        parts.append(f"🍽 Питание: {board}")
     if includes:
-        parts.append(f"✅ Включено: {escape(includes)}")
-    if not url:
-        parts.append("ℹ️ Источник без прямой ссылки. Могу прислать краткую справку по посту.")
-    if time_str:
-        parts.append(time_str)
-    return "\n".join(parts)
+        parts.append(f"✅ Включено: {includes}")
 
+    return "\n".join(parts)
 
 async def send_tour_card(chat_id: int, user_id: int, tour: dict):
     fav = is_favorite(user_id, tour["id"]) 
@@ -1569,7 +1562,7 @@ TEXTS: dict[str, dict[str, str]] = {
 
 DEFAULT_LANG = "ru"
 
-def get_user_lang(user_id: int) -> str:
+def _lang(user_id: int) -> str:
     """Берём язык из конфигурации; если нет — ru."""
     try:
         v = get_config(f"lang_{user_id}", None)
@@ -1585,7 +1578,7 @@ def set_user_lang(user_id: int, code: str) -> None:
 
 def t(user_id: int | None, key: str) -> str:
     """Перевод по ключу с учётом языка пользователя (или ru)."""
-    lang = get_user_lang(user_id) if user_id else DEFAULT_LANG
+    lang = _lang(user_id) if user_id else DEFAULT_LANG
     bucket = TEXTS.get(key) or {}
     return bucket.get(lang) or bucket.get(DEFAULT_LANG) or key
 
@@ -1989,6 +1982,29 @@ async def cb_lang(callback: CallbackQuery):
         + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n",
         reply_markup=main_kb_for(uid),
     )
+
+@dp.callback_query(F.data.startswith("lang:"))
+async def change_lang(call: CallbackQuery):
+    lang = call.data.split(":")[1]
+    set_user_lang(call.from_user.id, lang)
+
+    # возьми последний тур (или из контекста)
+    last_tours = LAST_RESULTS.get(call.from_user.id, [])
+    if not last_tours:
+        return await call.answer("Язык обновлён")
+
+    tour = last_tours[0]  # пример: первый тур из последних
+    caption = build_card_text(tour, lang=lang)
+    fav = is_favorite(call.from_user.id, tour["id"])
+    kb = tour_inline_kb(tour, fav, call.from_user.id)
+
+    # если тур карточкой (без фото) → edit_message_text
+    try:
+        await call.message.edit_text(caption, reply_markup=kb)
+    except:
+        await call.message.edit_caption(caption, reply_markup=kb)
+
+    await call.answer("Язык сохранён")
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
