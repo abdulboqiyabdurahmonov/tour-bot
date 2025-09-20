@@ -1688,103 +1688,12 @@ async def _typing_pulse(chat_id: int):
     except asyncio.CancelledError:
         pass
 
-# ================= I18N (единый с TRANSLATIONS) =================
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-
-# Показатели языков в меню выбора (метки)
-LANG_TITLES: dict[str, str] = {
-    "ru": "Ru Русский",
-    "uz": "Uz O‘zbekcha",
-    "kk": "KZ Қазақша",
-}
-
-DEFAULT_LANG = "ru"  # уже объявлен выше; оставляем на месте
-
-def _lang(user_id: int | None) -> str:
-    """Текущий язык пользователя из app_config; если нет — DEFAULT_LANG."""
-    if not user_id:
-        return DEFAULT_LANG
-    try:
-        v = get_config(f"lang_{user_id}", None)
-        return v if v in SUPPORTED_LANGS else DEFAULT_LANG
-    except Exception:
-        return DEFAULT_LANG
-
-def set_user_lang(user_id: int, code: str) -> None:
-    """Сохранить язык пользователя в app_config (жёсткая валидация)."""
-    if code not in SUPPORTED_LANGS:
-        code = DEFAULT_LANG
-    set_config(f"lang_{user_id}", code)
-
-def t(user_id: int | None, key: str) -> str:
-    """
-    Достать перевод по ключу из общего словаря TRANSLATIONS.
-    Порядок фолбэков: язык пользователя -> ru -> сам ключ.
-    """
-    lang = _lang(user_id)
-    # основной словарь уже существует выше: TRANSLATIONS = {"ru": {...}, "uz": {...}, "kk": {...}}
-    return (
-        TRANSLATIONS.get(lang, {}).get(key)
-        or TRANSLATIONS.get("ru", {}).get(key)
-        or key
-    )
-
-def lang_inline_kb(current: str | None = None) -> InlineKeyboardMarkup:
-    """Инлайн-клавиатура выбора языка."""
-    current = current or DEFAULT_LANG
-    rows: list[list[InlineKeyboardButton]] = []
-    for code in SUPPORTED_LANGS:
-        title = LANG_TITLES.get(code, code)
-        mark = "✅ " if code == current else ""
-        rows.append([InlineKeyboardButton(text=mark + title, callback_data=f"lang:{code}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-def main_kb_for(user_id: int) -> ReplyKeyboardMarkup:
-    """Главное меню (ReplyKeyboard) на языке пользователя."""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=t(user_id, "menu_find")), KeyboardButton(text=t(user_id, "menu_gpt"))],
-            [KeyboardButton(text=t(user_id, "menu_sub")),  KeyboardButton(text=t(user_id, "menu_settings"))],
-        ],
-        resize_keyboard=True,
-        selective=True,
-    )
-
-# --- Хелперы для распознавания текстов кнопок меню на любом языке ---
-def _all_labels_for(key: str) -> list[str]:
-    """Все варианты текста кнопки для всех поддерживаемых языков (для сравнения)."""
-    vals: list[str] = []
-    for code in SUPPORTED_LANGS:
-        v = TRANSLATIONS.get(code, {}).get(key)
-        if v:
-            vals.append(v)
-    return vals
-
-def is_menu_label(user_text: str, key: str) -> bool:
-    """
-    Проверка, что входной текст равен одной из локализованных меток меню (без учёта регистра/пробелов).
-    Удобно использовать в фильтрах aiogram.
-    """
-    norm = (user_text or "").strip().lower()
-    for variant in _all_labels_for(key):
-        if norm == variant.strip().lower():
-            return True
-    return False
-
-def _is_menu_text(txt: str) -> bool:
-    """Фильтр: текст — одна из кнопок главного меню на любом языке."""
-    return any(
-        is_menu_label(txt, key)
-        for key in ("menu_find", "menu_gpt", "menu_sub", "menu_settings")
-    )
-# ================= /I18N ======================================================
-
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
     uid = message.from_user.id
     if get_config(f"lang_{uid}", None):            # язык уже выбран
-        await message.answer(t(uid, "hello"), reply_markup=main_kb_for(message.from_user.id))
+        await message.answer(t(uid, "hello"), reply_markup=main_menu_kb(message.from_user.id))
         return
     await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
 
@@ -1831,8 +1740,7 @@ async def entry_find_tours(message: Message):
     uid = message.from_user.id
     await message.answer(
         t(uid, "filters.title"),
-        reply_markup=filters_inline_kb_for(uid),
-    )
+        reply_markup=filters_inline_kb_for(message.from_user.id))
 
 async def entry_gpt(message: Message):
     await message.answer("Спроси что угодно про путешествия (отели, сезоны, визы, бюджеты).")
