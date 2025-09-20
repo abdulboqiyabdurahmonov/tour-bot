@@ -235,6 +235,53 @@ TRANSLATIONS = {
     },
 }
 
+    TRANSLATIONS["ru"].update({
+        "filters.title": "Выбери подборку:",
+        "filters.recent": "🔥 Актуальные 72ч",
+        "filters.country.turkiye": "🌴 Турция",
+        "filters.country.uae": "🇦🇪 ОАЭ",
+        "filters.country.th": "🇹🇭 Таиланд",
+        "filters.country.vn": "🇻🇳 Вьетнам",
+        "filters.budget.500": "💸 ≤ $500",
+        "filters.budget.800": "💸 ≤ $800",
+        "filters.budget.1000": "💸 ≤ $1000",
+        "filters.sort.price": "↕️ Сортировка по цене",
+        "filters.more": "➕ Ещё фильтры скоро",
+        "more.title": "Продолжить подборку?",
+        "more.next": "➡️ Показать ещё",
+    })
+    TRANSLATIONS["uz"].update({
+        "filters.title": "Tanlovni belgilang:",
+        "filters.recent": "🔥 So‘nggi 72 soat",
+        "filters.country.turkiye": "🌴 Turkiya",
+        "filters.country.uae": "🇦🇪 BAA",
+        "filters.country.th": "🇹🇭 Tailand",
+        "filters.country.vn": "🇻🇳 Vetnam",
+        "filters.budget.500": "💸 ≤ $500",
+        "filters.budget.800": "💸 ≤ $800",
+        "filters.budget.1000": "💸 ≤ $1000",
+        "filters.sort.price": "↕️ Narx bo‘yicha",
+        "filters.more": "➕ Yaqinda qo‘shamiz",
+        "more.title": "Tanlovni davom ettiraymi?",
+        "more.next": "➡️ Yana ko‘rsat",
+    })
+    TRANSLATIONS["kk"].update({
+        "filters.title": "Таңдаңыз:",
+        "filters.recent": "🔥 Соңғы 72 сағ",
+        "filters.country.turkiye": "🌴 Түркия",
+        "filters.country.uae": "🇦🇪 БАӘ",
+        "filters.country.th": "🇹🇭 Тайланд",
+        "filters.country.vn": "🇻🇳 Вьетнам",
+        "filters.budget.500": "💸 ≤ $500",
+        "filters.budget.800": "💸 ≤ $800",
+        "filters.budget.1000": "💸 ≤ $1000",
+        "filters.sort.price": "↕️ Баға бойыншa",
+        "filters.more": "➕ Жақында",
+        "more.title": "Жалғастырайық па?",
+        "more.next": "➡️ Тағы көрсету",
+    })
+
+
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -556,7 +603,6 @@ def resolve_leads_chat_id() -> int:
     except Exception:
         return 0
 
-
 # ================= КЛАВИАТУРЫ =================
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -566,37 +612,37 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-def filters_inline_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔥 Актуальные 72ч", callback_data="tours_recent")],
-            [
-                InlineKeyboardButton(text="🌴 Турция", callback_data="country:Турция"),
-                InlineKeyboardButton(text="🇦🇪 ОАЭ", callback_data="country:ОАЭ"),
-            ],
-            [
-                InlineKeyboardButton(text="🇹🇭 Таиланд", callback_data="country:Таиланд"),
-                InlineKeyboardButton(text="🇻🇳 Вьетнам", callback_data="country:Вьетнам"),
-            ],
-            [
-                InlineKeyboardButton(text="💸 ≤ $500", callback_data="budget:USD:500"),
-                InlineKeyboardButton(text="💸 ≤ $800", callback_data="budget:USD:800"),
-                InlineKeyboardButton(text="💸 ≤ $1000", callback_data="budget:USD:1000"),
-            ],
-            [InlineKeyboardButton(text="↕️ Сортировка по цене", callback_data="sort:price_asc")],
-            [InlineKeyboardButton(text="➕ Ещё фильтры скоро", callback_data="noop")],
-        ]
-    )
-
+def filters_inline_kb_for(user_id: int) -> InlineKeyboardMarkup:
+    lang = _lang(user_id)
+    tr = TRANSLATIONS[lang]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr["filters.recent"], callback_data="tours_recent")],
+        [
+            InlineKeyboardButton(text=tr["filters.country.turkiye"], callback_data="country:Турция"),
+            InlineKeyboardButton(text=tr["filters.country.uae"], callback_data="country:ОАЭ"),
+        ],
+        [
+            InlineKeyboardButton(text=tr["filters.country.th"], callback_data="country:Таиланд"),
+            InlineKeyboardButton(text=tr["filters.country.vn"], callback_data="country:Вьетнам"),
+        ],
+        [
+            InlineKeyboardButton(text=tr["filters.budget.500"],  callback_data="budget:USD:500"),
+            InlineKeyboardButton(text=tr["filters.budget.800"],  callback_data="budget:USD:800"),
+            InlineKeyboardButton(text=tr["filters.budget.1000"], callback_data="budget:USD:1000"),
+        ],
+        [InlineKeyboardButton(text=tr["filters.sort.price"], callback_data="sort:price_asc")],
+        [InlineKeyboardButton(text=tr["filters.more"], callback_data="noop")],
+    ])
 
 def more_kb(token: str, next_offset: int, uid: int) -> InlineKeyboardMarkup:
+    lang = _lang(uid)
+    tr = TRANSLATIONS[lang]
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➡️ Показать ещё", callback_data=f"more:{token}:{next_offset}")],
-            [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
+            [InlineKeyboardButton(text=tr["more.next"], callback_data=f"more:{token}:{next_offset}")],
+            [InlineKeyboardButton(text=TRANSLATIONS[lang]["back"], callback_data="back_filters")],
         ]
     )
-
 
 def want_contact_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -1322,28 +1368,34 @@ def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> I
 
 
 def build_card_text(t: dict, lang: str = "ru") -> str:
+    # базовые поля
     hotel = clean_text_basic(strip_trailing_price_from_hotel(
         t.get("hotel") or derive_hotel_from_description(t.get("description")) or "—"
     ))
     country = t.get("country") or "—"
-    city = t.get("city") or "—"
-    price = fmt_price(t.get("price"), t.get("currency"))
-    dates = normalize_dates_for_display(t.get("dates")) if t.get("dates") else "—"
-    board = (t.get("board") or "").strip()
-    includes = (t.get("includes") or "").strip()
+    city    = t.get("city") or "—"
+    price   = fmt_price(t.get("price"), t.get("currency"))
+    dates   = normalize_dates_for_display(t.get("dates")) if t.get("dates") else "—"
+    board   = (t.get("board") or "").strip()
+    inc     = (t.get("includes") or "").strip()
+    when    = localize_dt(t.get("posted_at"))  # уже есть утилита:contentReference[oaicite:1]{index=1}
 
-    parts = [
+    # простой вытяг из description первой осмысленной строки (если нет hotel/board/inc)
+    if hotel == "—":
+        hotel = derive_hotel_from_description(t.get("description")) or "—"
+
+    lines = [
         f"🏨 <b>{hotel}</b>",
         f"📍 {country} — {city}",
         f"🗓 {dates}",
         f"💵 {price}",
     ]
-    if board:
-        parts.append(f"🍽 Питание: {board}")
-    if includes:
-        parts.append(f"✅ Включено: {includes}")
+    if board: lines.append(f"🍽 Питание: {board}")
+    if inc:   lines.append(f"✅ Включено: {inc}")
+    if when:  lines.append(when)  # «🕒 23.07.2025 13:00 (TST)»
 
-    return "\n".join(parts)
+    return "\n".join(lines)
+
 
 async def send_tour_card(chat_id: int, user_id: int, tour: dict):
     fav = is_favorite(user_id, tour["id"]) 
@@ -1988,23 +2040,30 @@ async def change_lang(call: CallbackQuery):
     lang = call.data.split(":")[1]
     set_user_lang(call.from_user.id, lang)
 
-    # возьми последний тур (или из контекста)
-    last_tours = LAST_RESULTS.get(call.from_user.id, [])
-    if not last_tours:
-        return await call.answer("Язык обновлён")
-
-    tour = last_tours[0]  # пример: первый тур из последних
-    caption = build_card_text(tour, lang=lang)
-    fav = is_favorite(call.from_user.id, tour["id"])
-    kb = tour_inline_kb(tour, fav, call.from_user.id)
-
-    # если тур карточкой (без фото) → edit_message_text
+    # 1) Переотрисуем фильтры (универсально — это безопасно)
     try:
-        await call.message.edit_text(caption, reply_markup=kb)
-    except:
-        await call.message.edit_caption(caption, reply_markup=kb)
+        await call.message.edit_text(
+            TRANSLATIONS[lang]["filters.title"],
+            reply_markup=filters_inline_kb_for(call.from_user.id)
+        )
+        await call.answer(TRANSLATIONS[lang]["lang_saved"])
+        return
+    except Exception:
+        pass
 
-    await call.answer("Язык сохранён")
+    # 2) Если текущее сообщение — карточка тура, обновим её
+    last_tours = LAST_RESULTS.get(call.from_user.id, [])
+    if last_tours:
+        tour = last_tours[0]
+        caption = build_card_text(tour, lang=lang)
+        fav = is_favorite(call.from_user.id, tour["id"])
+        kb = tour_inline_kb(tour, fav, call.from_user.id)
+        try:
+            await call.message.edit_text(caption, reply_markup=kb)
+        except:
+            await call.message.edit_caption(caption, reply_markup=kb)
+
+    await call.answer(TRANSLATIONS[lang]["lang_saved"])
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
@@ -2097,9 +2156,13 @@ async def cb_noop(call: CallbackQuery):
 
 
 @dp.callback_query(F.data == "back_filters")
-async def cb_back_filters(call: CallbackQuery):
-    await call.message.answer("Вернулся к фильтрам:", reply_markup=filters_inline_kb())
-
+async def back_filters(call: CallbackQuery):
+    lang = _lang(call.from_user.id)
+    await call.message.edit_text(
+        TRANSLATIONS[lang]["filters.title"],
+        reply_markup=filters_inline_kb_for(call.from_user.id)
+    )
+    await call.answer()
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
