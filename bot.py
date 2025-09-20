@@ -318,6 +318,31 @@ TRANSLATIONS["ru"].update({"btn.weather": "🌤 Погода"})
 TRANSLATIONS["uz"].update({"btn.weather": "🌤 Ob-havo"})
 TRANSLATIONS["kk"].update({"btn.weather": "🌤 Ауа райы"})
 
+# --- i18n helpers для схемы TRANSLATIONS ---
+DEFAULT_LANG = DEFAULT_LANG  # уже объявлен выше
+
+def t(user_id: int | None, key: str) -> str:
+    """
+    Вернёт перевод по ключу из TRANSLATIONS с учётом языка пользователя.
+    Если в выбранном языке ключа нет — берём из языка по умолчанию,
+    иначе возвращаем сам ключ (чтобы не падать).
+    """
+    lang = _lang(user_id) if user_id else DEFAULT_LANG
+    # сначала пробуем язык пользователя
+    if lang in TRANSLATIONS and key in TRANSLATIONS[lang]:
+        return TRANSLATIONS[lang][key]
+    # потом дефолтный язык
+    if key in TRANSLATIONS.get(DEFAULT_LANG, {}):
+        return TRANSLATIONS[DEFAULT_LANG][key]
+    # фоллбек: сам ключ
+    return key
+
+# (опционально) шимы для совместимости со старыми названиями функций
+def main_kb_for(user_id: int):
+    return main_menu_kb(user_id)
+
+def filters_inline_kb(user_id: int | None = None):
+    return filters_inline_kb_for(user_id or 0)
 
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
