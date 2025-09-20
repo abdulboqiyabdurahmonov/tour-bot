@@ -285,6 +285,32 @@ TRANSLATIONS["kk"].update({
     "more.next": "➡️ Тағы көрсету",
 })
 
+# --- Тексты кнопок карточки тура (i18n) ---
+TRANSLATIONS["ru"].update({
+    "btn.ask": "✍️ Вопрос по туру",
+    "btn.fav.add": "🤍 В избранное",
+    "btn.fav.rm":  "❤️ В избранном",
+    "btn.want": "📝 Хочу этот тур",
+    "btn.admin_open": "🔗 Открыть (админ)",
+})
+
+TRANSLATIONS["uz"].update({
+    "btn.ask": "✍️ Tur bo‘yicha savol",
+    "btn.fav.add": "🤍 Sevimlilarga",
+    "btn.fav.rm":  "❤️ Sevimlilarda",
+    "btn.want": "📝 Ushbu turni xohlayman",
+    "btn.admin_open": "🔗 Ochish (admin)",
+})
+
+TRANSLATIONS["kk"].update({
+    "btn.ask": "✍️ Тур туралы сұрақ",
+    "btn.fav.add": "🤍 Таңдаулыға",
+    "btn.fav.rm":  "❤️ Таңдаулыларда",
+    "btn.want": "📝 Осы турды қалаймын",
+    "btn.admin_open": "🔗 Ашуу (админ)",
+})
+
+
 # ================= БОТ / APP =================
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
