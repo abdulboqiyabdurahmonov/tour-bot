@@ -1691,7 +1691,7 @@ def _is_menu_text(txt: str) -> bool:
 async def cmd_start(message: Message):
     uid = message.from_user.id
     if get_config(f"lang_{uid}", None):            # язык уже выбран
-        await message.answer(t(uid, "hello"), reply_markup=main_kb_for(uid))
+        await message.answer(t(uid, "hello"), reply_markup=main_kb_for(message.from_user.id)
         return
     await message.answer(t(uid, "choose_lang"), reply_markup=lang_inline_kb())
 
@@ -2047,7 +2047,7 @@ async def cb_lang(callback: CallbackQuery):
         t(uid, "hello") + "\n\n"
         + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
         + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n",
-        reply_markup=main_kb_for(uid),
+        reply_markup=main_kb_for(call.from_user.id),
     )
 
 @dp.callback_query(F.data.startswith("lang:"))
