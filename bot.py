@@ -626,7 +626,7 @@ def filters_inline_kb_for(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=tr["filters.recent"], callback_data="tours_recent")],
         [
             InlineKeyboardButton(text=tr["filters.country.turkiye"], callback_data="country:Турция"),
-            InlineKeyboardButton(text=tr["filters.country.uae"], callback_data="country:ОАЭ"),
+            InlineKeyboardButton(text=tr["filters.country.uae"],      callback_data="country:ОАЭ"),
         ],
         [
             InlineKeyboardButton(text=tr["filters.country.th"], callback_data="country:Таиланд"),
@@ -638,8 +638,12 @@ def filters_inline_kb_for(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=tr["filters.budget.1000"], callback_data="budget:USD:1000"),
         ],
         [InlineKeyboardButton(text=tr["filters.sort.price"], callback_data="sort:price_asc")],
-        [InlineKeyboardButton(text=tr["filters.more"], callback_data="noop")],
+        [InlineKeyboardButton(text=tr["filters.more"],       callback_data="noop")],
     ])
+
+# ШИМ: чтобы старые вызовы не падали
+def filters_inline_kb(user_id: int | None = None) -> InlineKeyboardMarkup:
+    return filters_inline_kb_for(user_id or 0)
 
 def more_kb(token: str, next_offset: int, uid: int) -> InlineKeyboardMarkup:
     lang = _lang(uid)
