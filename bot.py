@@ -2202,22 +2202,30 @@ async def cb_want(call: CallbackQuery):
     await call.answer()
 
 
-@dp.message(Command("weather"), F.chat.type == "private")
+# === ПОГОДА: команды/триггеры ===
+@dp.message(Command("weather"))
 async def cmd_weather(message: Message):
+    uid = message.from_user.id
+    lang = _lang(uid)
+
     ask = (message.text or "").partition(" ")[2].strip()
-    place = ask or "Ташкент"
-    await message.answer("Секунду, уточняю погоду…")
-    txt = await get_weather_text(place)
+    place = ask or None  # не подставляем жёстко «Ташкент», пусть парсится из текста или спросим явнее
+
+    await message.answer(TRANSLATIONS[lang].get("weather.loading", "Секунду, уточняю погоду…"))
+
+    txt = await get_weather_text(place, lang=lang)  # <- обязательно передаём lang
     await message.answer(txt, disable_web_page_preview=True)
 
-@dp.message(F.text.regexp(r"(?i)\b(погод|ob[-\s]?havo|aуа\s*райы|ауа\s*райы)\b"))
+
+# Триггер по словам «погода / ob-havo / ауа райы» на разных языках
+@dp.message(F.text.regexp(r"(?iu)\b(погод|ob[-\s]?havo|ауа\s*райы)\b"))
 async def handle_weather(message: Message):
     uid = message.from_user.id
     lang = _lang(uid)
+
     place = _extract_place_from_weather_query(message.text or "")
     txt = await get_weather_text(place, lang=lang)
-    await message.answer(txt)
-}
+    await message.answer(txt, disable_web_page_preview=True)
 
 @dp.message(F.chat.type == "private", F.contact)
 async def on_contact(message: Message):
