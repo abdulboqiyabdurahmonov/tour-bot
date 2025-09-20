@@ -607,13 +607,17 @@ def resolve_leads_chat_id() -> int:
         return 0
 
 # ================= КЛАВИАТУРЫ =================
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🎒 Найти туры"), KeyboardButton(text="🤖 Спросить GPT")],
-        [KeyboardButton(text="🔔 Подписка"), KeyboardButton(text="⚙️ Настройки")],
-    ],
-    resize_keyboard=True,
-)
+def main_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
+    lang = _lang(user_id)
+    tr = TRANSLATIONS[lang]
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=tr["menu_find"]), KeyboardButton(text=tr["menu_gpt"])],
+            [KeyboardButton(text=tr["menu_sub"]),  KeyboardButton(text=tr["menu_settings"])],  # «🌐 Выбор языка»
+        ],
+        resize_keyboard=True,
+    )
+
 
 def filters_inline_kb_for(user_id: int) -> InlineKeyboardMarkup:
     lang = _lang(user_id)
