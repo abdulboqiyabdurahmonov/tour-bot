@@ -1735,8 +1735,12 @@ async def cmd_leadstest(message: Message):
 
 # Быстрые команды
 async def entry_find_tours(message: Message):
-    await message.answer("Выбери быстрый фильтр:", reply_markup=filters_inline_kb())
-
+    uid = message.from_user.id
+    lang = _lang(uid)
+    await message.answer(
+        TRANSLATIONS[lang]["filters.title"],
+        reply_markup=filters_inline_kb_for(uid)
+    )
 
 async def entry_gpt(message: Message):
     await message.answer("Спроси что угодно про путешествия (отели, сезоны, визы, бюджеты).")
