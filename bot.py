@@ -1359,6 +1359,34 @@ def _payme_sandbox_ok(request) -> bool:
 
 # ================= ПОИСК ТУРОВ =================
 
+# --- Импорты должны быть выше в файле ---
+# from typing import Optional, List, Tuple
+# from datetime import datetime, timedelta, timezone
+# import logging
+
+# Мини-сторожок по «явно неверным» ценам (чтобы не ловить 5 USD за "друга")
+MIN_PRICE_BY_CURRENCY = {
+    "USD": 30,   # не показываем цены ниже 30 USD
+    "EUR": 30,
+    "RUB": 3000,
+}
+
+# Канонические названия стран (и как они лежат в БД)
+CANON_COUNTRY = {
+    "Турция": "Турция",
+    "ОАЭ": "ОАЭ",
+    "Таиланд": "Таиланд",
+    "Вьетнам": "Вьетнам",
+    "Грузия": "Грузия",
+    "Мальдивы": "Мальдивы",
+    "Китай": "Китай",
+    # при желании: "Turkiye": "Турция", "UAE": "ОАЭ", ...
+}
+
+def normalize_country(name: str) -> str:
+    name = (name or "").strip()
+    return CANON_COUNTRY.get(name, name)
+
 async def fetch_tours(
     query: Optional[str] = None,
     *,
@@ -1367,10 +1395,15 @@ async def fetch_tours(
     max_price: Optional[float] = None,
     hours: int = 24,
     limit: int = 10,
-    strict_recent: bool = True,   # <— новенькое
+    strict_recent: bool = True,
 ) -> Tuple[List[dict], bool]:
+    """
+    Возвращает (rows, is_recent).
+    Если за последние `hours` ничего не нашли и strict_recent=False — делаем мягкий фолбэк без ограничения по времени.
+    """
     try:
-        where_clauses, params = [], []
+        where_clauses: List[str] = []
+        params: List = []
 
         if query:
             where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
@@ -1388,12 +1421,17 @@ async def fetch_tours(
             where_clauses.append("price IS NOT NULL AND price <= %s")
             params.append(max_price)
 
+        # Ограничение по времени (всегда последним, чтобы легко делать фолбэк)
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         where_clauses.append("posted_at >= %s")
         params.append(cutoff)
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
-        order_clause = "ORDER BY posted_at DESC" if max_price is None else "ORDER BY price ASC NULLS LAST, posted_at DESC"
+        order_clause = (
+            "ORDER BY posted_at DESC"
+            if max_price is None
+            else "ORDER BY price ASC NULLS LAST, posted_at DESC"
+        )
 
         select_list = _select_tours_clause()
         sql = f"""
@@ -1407,47 +1445,30 @@ async def fetch_tours(
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params + [limit])
             rows = cur.fetchall()
+
+            # если что-то нашли, или просили строго свежие — возвращаем
             if rows or strict_recent:
                 return rows, True
-    
-            # фолбэк: снимаем только ограничение по времени
+
+            # фолбэк: убираем только ограничение по времени
             fallback_clauses = [c for c in where_clauses if "posted_at" not in c]
-            fallback_where = ("WHERE " + " AND ".join(fallback_clauses)) if fallback_clauses else ""
-            cur.execute(
-                f"SELECT {select_list} FROM tours {fallback_where} {order_clause} LIMIT %s",
-                [limit],
-            )
+            fallback_params = params[:-1]  # posted_at мы добавляли последним
+            fb_where = "WHERE " + " AND ".join(fallback_clauses) if fallback_clauses else ""
+            sql_fb = f"SELECT {select_list} FROM tours {fb_where} {order_clause} LIMIT %s"
+            cur.execute(sql_fb, fallback_params + [limit])
             return cur.fetchall(), False
 
-CANON_COUNTRY = {
-    # то, что летит в callback → как хранится в БД
-    "Турция": "Турция",
-    "ОАЭ": "ОАЭ",
-    "Таиланд": "Таиланд",
-    "Вьетнам": "Вьетнам",
-    "Грузия": "Грузия",
-    "Мальдивы": "Мальдивы",
-    "Китай": "Китай",
-    # при желании добавь синонимы: "Turkiye": "Турция", "UAE": "ОАЭ", и т.д.
-}
+    except Exception:
+        logging.exception("Ошибка при fetch_tours")
+        return [], True
 
-def normalize_country(name: str) -> str:
-    return {
-        "Турция": "Турция",
-        "ОАЭ": "ОАЭ",
-        "Таиланд": "Таиланд",
-        "Вьетнам": "Вьетнам",
-        "Грузия": "Грузия",
-        "Мальдивы": "Мальдивы",
-        "Китай": "Китай",
-    }.get(name.strip(), name.strip())
-    
+
 async def fetch_tours_page(
     query: Optional[str] = None,
     *,
     country: Optional[str] = None,
-    country_terms: Optional[list[str]] = None,  # <— НОВОЕ
-    any_terms: Optional[list[str]] = None,
+    country_terms: Optional[list[str]] = None,   # список терминов по стране
+    any_terms: Optional[list[str]] = None,       # синонимы/теги для любой колонки
     currency_eq: Optional[str] = None,
     max_price: Optional[float] = None,
     hours: Optional[int] = None,
@@ -1455,6 +1476,10 @@ async def fetch_tours_page(
     limit: int = 10,
     offset: int = 0,
 ) -> List[dict]:
+    """
+    Пагинация по турам. Если задан order_by_price=True — сортируем сперва по цене (NULLS LAST), затем по дате.
+    Можно передать country_terms/any_terms для расширенного поиска.
+    """
     try:
         where_clauses: List[str] = []
         params: List = []
@@ -1465,7 +1490,7 @@ async def fetch_tours_page(
             )
             params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
 
-        # --- страна: либо один шаблон, либо список синонимов
+        # страна: либо список терминов, либо одна маска
         if country_terms:
             ors = []
             for term in country_terms:
@@ -1476,36 +1501,42 @@ async def fetch_tours_page(
             where_clauses.append("country ILIKE %s")
             params.append(f"%{country}%")
 
+        if any_terms:
+            blocks = []
+            for term in any_terms:
+                blocks.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
+                params += [f"%{term}%", f"%{term}%", f"%{term}%", f"%{term}%"]
+            where_clauses.append("(" + " OR ".join(blocks) + ")")
+
         if currency_eq:
             where_clauses.append("currency = %s")
             params.append(currency_eq)
 
+        # защита от «мусорных» маленьких цен в выбранной валюте
         min_guard = None
         if order_by_price and currency_eq and currency_eq in MIN_PRICE_BY_CURRENCY:
             min_guard = MIN_PRICE_BY_CURRENCY[currency_eq]
-        
+
         if max_price is not None:
-            clause = "price IS NOT NULL AND price <= %s"
-            params.append(max_price)
+            price_clause = "price IS NOT NULL AND price <= %s"
+            clause_params = [max_price]
             if min_guard is not None:
-                clause = f"({clause} AND price >= %s)"
-                params.append(min_guard)
-            where_clauses.append(clause)
+                price_clause = f"({price_clause} AND price >= %s)"
+                clause_params.append(min_guard)
+            where_clauses.append(price_clause)
+            params += clause_params
 
         if hours is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             where_clauses.append("posted_at >= %s")
             params.append(cutoff)
 
-        if any_terms:
-            or_blocks = []
-            for term in any_terms:
-                or_blocks.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
-                params += [f"%{term}%", f"%{term}%", f"%{term}%", f"%{term}%"]
-            where_clauses.append("(" + " OR ".join(or_blocks) + ")")
-
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
+        order_clause = (
+            "ORDER BY price ASC NULLS LAST, posted_at DESC"
+            if order_by_price else
+            "ORDER BY posted_at DESC"
+        )
 
         select_list = _select_tours_clause()
         sql = f"""
@@ -1518,10 +1549,10 @@ async def fetch_tours_page(
 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params + [limit, offset])
-            rows = cur.fetchall()
-            return rows
-    except Exception as e:
-        logging.error(f"Ошибка fetch_tours_page: {e}")
+            return cur.fetchall()
+
+    except Exception:
+        logging.exception("Ошибка fetch_tours_page")
         return []
 
 # ================= GPT =================
