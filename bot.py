@@ -2101,51 +2101,82 @@ async def cb_sub_info(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("budget:"))
 async def cb_budget(call: CallbackQuery):
-    _, cur, limit_str = call.data.split(":", 2)
-    try:
-        limit_val = float(limit_str)
-    except Exception:
-        limit_val = None
+    uid = call.from_user.id
+    _, cur, limit_s = call.data.split(":")
+    limit_val = int(limit_s)
 
-    await bot.send_chat_action(call.message.chat.id, "typing")
-
-    rows, is_recent = await fetch_tours(
-        None,
-        currency_eq=cur,
-        max_price=limit_val,
-        hours=120,          # «свежие» 5 суток
-        strict_recent=True, # сначала ищем только в пределах hours
-        limit=6             # размер выборки
+    # Заголовок
+    await call.message.answer(
+        f"<b>💸 Бюджет: ≤ {limit_val} {cur}</b>\n"
+        f"В этом диапазоне найдены следующие туры за последние 5 суток:"
     )
 
-    if is_recent:
-        hdr = (
-            f"💸 Бюджет: ≤ {int(limit_val)} {cur}\n"
-            f"В этом диапазоне найдены следующие туры за последние 5 суток:"
-        )
-    else:
-        hdr = (
-            f"💸 Бюджет: ≤ {int(limit_val)} {cur}\n"
-            f"Свежих за 5 суток мало — показываю последние туры в этом диапазоне:"
-        )
-
-    await call.message.answer(f"<b>{escape(hdr.splitlines()[0])}</b>\n{escape(hdr.splitlines()[1])}")
-
+    # Сначала пробуем строго по валюте
     token = _new_token()
     PAGER_STATE[token] = {
         "chat_id": call.message.chat.id,
         "query": None,
         "country": None,
-        "currency_eq": cur,
+        "currency_eq": cur,       # строгая валюта
         "max_price": limit_val,
-        "hours": 120 if is_recent else None,
-        "order_by_price": True,
+        "hours": 120,
+        "order_by_price": True,   # для бюджетного режима сортируем по цене
         "ts": time.monotonic(),
     }
 
-    _remember_query(call.from_user.id, f"≤ {int(limit_val) if limit_val is not None else ''} {cur}".strip())
-    await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
+    rows = await fetch_tours_page(
+        country=None,
+        currency_eq=cur,
+        max_price=limit_val,
+        hours=120,
+        limit=6,
+        offset=0,
+        order_by_price=True,
+    )
 
+    # Фолбэк: если пусто по валюте — берем любой currency
+    if not rows:
+        # обновим токен/состояние под "любой валютой"
+        token = _new_token()
+        PAGER_STATE[token] = {
+            "chat_id": call.message.chat.id,
+            "query": None,
+            "country": None,
+            "currency_eq": None,   # любой currency
+            "max_price": limit_val,
+            "hours": 120,
+            "order_by_price": True,
+            "ts": time.monotonic(),
+        }
+        rows = await fetch_tours_page(
+            country=None,
+            currency_eq=None,
+            max_price=limit_val,
+            hours=120,
+            limit=6,
+            offset=0,
+            order_by_price=True,
+        )
+        if rows:
+            # поясним пользователю, что показываем без учета валюты
+            await call.message.answer(
+                "Свежих предложений в выбранной валюте не нашлось — показываю подходящие по любой валюте."
+            )
+
+    # Если совсем пусто — аккуратно выходим
+    if not rows:
+        await call.message.answer(
+            f"В пределах бюджета ≤ {limit_val} {cur} за последние 5 суток ничего не нашли.",
+            reply_markup=filters_inline_kb_for(uid),
+        )
+        await call.answer()
+        return
+
+    # Отправляем карточки + пагинацию
+    await send_batch_cards(call.message.chat.id, uid, rows, token, len(rows))
+    await call.message.answer("Продолжить подборку?",
+                              reply_markup=more_kb(token, len(rows), uid))
+    await call.answer()
 
 @dp.callback_query(F.data == "sort:price_asc")
 async def cb_sort_price_asc(call: CallbackQuery):
