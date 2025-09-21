@@ -1676,21 +1676,22 @@ async def send_tour_card(chat_id: int, user_id: int, tour: dict):
 import asyncio
 from typing import List
 
-async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
-    """Шлёт пачку карточек + в конце сообщение с кнопкой 'Показать ещё'."""
-    for tour in rows:
-        await send_tour_card(chat_id, user_id, tour)
+async def send_batch_cards(chat_id: int, user_id: int, rows: list[dict], token: str, next_offset: int):
+    if not rows:
+        return False
+    for t in rows:
+        await send_tour_card(chat_id, user_id, t)
         await asyncio.sleep(0)
 
     LAST_RESULTS[user_id] = rows
     LAST_QUERY_AT[user_id] = time.monotonic()
 
-    # финальное сообщение + кнопка "ещё"
     await bot.send_message(
         chat_id,
-        t(user_id, "more.title"),              # "Продолжить подборку?"
+        "Продолжить подборку?",
         reply_markup=more_kb(token, next_offset, user_id),
     )
+    return True
 
 # ===== Общие хелперы для админ-уведомлений =====
 
@@ -2107,7 +2108,6 @@ async def cb_sub_info(call: CallbackQuery):
     )
     await call.answer()
 
-
 @dp.callback_query(F.data.startswith("budget:"))
 async def cb_budget(call: CallbackQuery):
     uid = call.from_user.id
@@ -2173,7 +2173,7 @@ async def cb_budget(call: CallbackQuery):
                 "Свежих предложений в выбранной валюте не нашлось — показываю подходящие по любой валюте."
             )
 
-    # Если совсем пусто — аккуратно выходим
+        # Если совсем пусто — аккуратно выходим
     if not rows:
         await call.message.answer(
             f"В пределах бюджета ≤ {limit_val} {cur} за последние 5 суток ничего не нашли.",
@@ -2182,11 +2182,13 @@ async def cb_budget(call: CallbackQuery):
         await call.answer()
         return
 
-    # Отправляем карточки + пагинацию
+    # Немного логов для проверки
+    logging.info("budget <= %s %s: rows=%d, token=%s", limit_val, cur, len(rows), token)
+
+    # Отправляем карточки + пагинацию (сама функция показывает «Продолжить подборку?»)
     await send_batch_cards(call.message.chat.id, uid, rows, token, len(rows))
-    await call.message.answer("Продолжить подборку?",
-                              reply_markup=more_kb(token, len(rows), uid))
     await call.answer()
+
 
 @dp.callback_query(F.data == "sort:price_asc")
 async def cb_sort_price_asc(call: CallbackQuery):
