@@ -328,6 +328,22 @@ TRANSLATIONS["kk"].update({
     "hello_again": "Мәзір таңдалған тілге жаңартылды ✅",
 })
 
+TRANSLATIONS["ru"].update({
+    "filters.country.ge": "🇬🇪 Грузия",
+    "filters.country.mv": "🏝 Мальдивы",
+    "filters.country.cn": "🇨🇳 Китай",
+})
+TRANSLATIONS["uz"].update({
+    "filters.country.ge": "🇬🇪 Gruziya",
+    "filters.country.mv": "🏝 Maldiv orollari",
+    "filters.country.cn": "🇨🇳 Xitoy",
+})
+TRANSLATIONS["kk"].update({
+    "filters.country.ge": "🇬🇪 Грузия",
+    "filters.country.mv": "🏝 Мальдив аралдары",
+    "filters.country.cn": "🇨🇳 Қытай",
+})
+
 REQUIRED_KEYS = {"menu_find","menu_gpt","menu_sub","menu_settings","lang_saved","hello_again","desc_find","desc_gpt"}
 def _validate_i18n():
     import logging
@@ -696,24 +712,41 @@ def main_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
     )
 
 def filters_inline_kb_for(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+    # Удобнее держать структуру списком пар (label_key, callback_country)
+    countries = [
+        ("filters.country.turkiye", "Турция"),
+        ("filters.country.uae",      "ОАЭ"),
+        ("filters.country.th",       "Таиланд"),
+        ("filters.country.vn",       "Вьетнам"),
+        # новые:
+        ("filters.country.ge",       "Грузия"),
+        ("filters.country.mv",       "Мальдивы"),
+        ("filters.country.cn",       "Китай"),
+    ]
+
+    rows = [
         [InlineKeyboardButton(text=t(user_id, "filters.recent"), callback_data="tours_recent")],
-        [
-            InlineKeyboardButton(text=t(user_id, "filters.country.turkiye"), callback_data="country:Турция"),
-            InlineKeyboardButton(text=t(user_id, "filters.country.uae"),      callback_data="country:ОАЭ"),
-        ],
-        [
-            InlineKeyboardButton(text=t(user_id, "filters.country.th"), callback_data="country:Таиланд"),
-            InlineKeyboardButton(text=t(user_id, "filters.country.vn"), callback_data="country:Вьетнам"),
-        ],
-        [
-            InlineKeyboardButton(text=t(user_id, "filters.budget.500"),  callback_data="budget:USD:500"),
-            InlineKeyboardButton(text=t(user_id, "filters.budget.800"),  callback_data="budget:USD:800"),
-            InlineKeyboardButton(text=t(user_id, "filters.budget.1000"), callback_data="budget:USD:1000"),
-        ],
-        [InlineKeyboardButton(text=t(user_id, "filters.sort.price"), callback_data="sort:price_asc")],
-        [InlineKeyboardButton(text=t(user_id, "filters.more"),       callback_data="noop")],
+    ]
+
+    # Размещаем по два в ряд
+    row = []
+    for key, country in countries:
+        row.append(InlineKeyboardButton(text=t(user_id, key), callback_data=f"country:{country}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+
+    # Бюджеты + сортировка + more
+    rows.append([
+        InlineKeyboardButton(text=t(user_id, "filters.budget.500"),  callback_data="budget:USD:500"),
+        InlineKeyboardButton(text=t(user_id, "filters.budget.800"),  callback_data="budget:USD:800"),
+        InlineKeyboardButton(text=t(user_id, "filters.budget.1000"), callback_data="budget:USD:1000"),
     ])
+    rows.append([InlineKeyboardButton(text=t(user_id, "filters.sort.price"), callback_data="sort:price_asc")])
+    rows.append([InlineKeyboardButton(text=t(user_id, "filters.more"),       callback_data="noop")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def more_kb(token: str, next_offset: int, uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -1280,59 +1313,70 @@ async def fetch_tours(
     currency_eq: Optional[str] = None,
     max_price: Optional[float] = None,
     hours: int = 24,
-    limit_recent: int = 10,
-    limit_fallback: int = 5,
+    limit: int = 10,
+    strict_recent: bool = True,   # <— новенькое
 ) -> Tuple[List[dict], bool]:
     try:
-        where_clauses = []
-        params = []
+        where_clauses, params = [], []
+
         if query:
             where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
             params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
+
         if country:
-            where_clauses.append("country ILIKE %s")
-            params.append(f"%{country}%")
+            where_clauses.append("country = %s")
+            params.append(normalize_country(country))
+
         if currency_eq:
             where_clauses.append("currency = %s")
             params.append(currency_eq)
+
         if max_price is not None:
             where_clauses.append("price IS NOT NULL AND price <= %s")
             params.append(max_price)
 
-        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        order_clause = (
-            "ORDER BY price ASC NULLS LAST, posted_at DESC" if max_price is not None else "ORDER BY posted_at DESC"
-        )
+        where_clauses.append("posted_at >= %s")
+        params.append(cutoff)
+
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        order_clause = "ORDER BY posted_at DESC" if max_price is None else "ORDER BY price ASC NULLS LAST, posted_at DESC"
 
         select_list = _select_tours_clause()
-        with get_conn() as conn, conn.cursor() as cur:
-            sql_recent = f"""
-                SELECT {select_list}
-                FROM tours
-                {where_sql} {('AND' if where_sql else 'WHERE')} posted_at >= %s
-                {order_clause}
-                LIMIT %s
-            """
-            cur.execute(sql_recent, params + [cutoff, limit_recent])
-            rows = cur.fetchall()
-            if rows:
-                return rows, True
+        sql = f"""
+            SELECT {select_list}
+            FROM tours
+            {where_sql}
+            {order_clause}
+            LIMIT %s
+        """
 
-            sql_fb = f"""
-                SELECT {select_list}
-                FROM tours
-                {where_sql}
-                {order_clause}
-                LIMIT %s
-            """
-            cur.execute(sql_fb, params + [limit_fallback])
-            fb_rows = cur.fetchall()
-            return fb_rows, False
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, params + [limit])
+            rows = cur.fetchall()
+            if rows or strict_recent:
+                return rows, True  # True = «выдача свежая»
+            # если strict_recent=False, можно мягко упасть на старые (не советую для стран)
+            cur.execute(f"SELECT {select_list} FROM tours {('WHERE ' + ' AND '.join(where_clauses[:-2])) if where_clauses else ''} {order_clause} LIMIT %s", [limit])
+            return cur.fetchall(), False
     except Exception as e:
         logging.error(f"Ошибка при fetch_tours: {e}")
-        return [], False
+        return [], True
 
+CANON_COUNTRY = {
+    # то, что летит в callback → как хранится в БД
+    "Турция": "Турция",
+    "ОАЭ": "ОАЭ",
+    "Таиланд": "Таиланд",
+    "Вьетнам": "Вьетнам",
+    "Грузия": "Грузия",
+    "Мальдивы": "Мальдивы",
+    "Китай": "Китай",
+    # при желании добавь синонимы: "Turkiye": "Турция", "UAE": "ОАЭ", и т.д.
+}
+
+def normalize_country(name: str) -> str:
+    return CANON_COUNTRY.get(name.strip(), name.strip())
 
 async def fetch_tours_page(
     query: Optional[str] = None,
@@ -1340,24 +1384,21 @@ async def fetch_tours_page(
     country: Optional[str] = None,
     currency_eq: Optional[str] = None,
     max_price: Optional[float] = None,
-    hours: Optional[int] = None,
+    hours: Optional[int] = None,   # передавать 24!
     order_by_price: bool = False,
     limit: int = 10,
     offset: int = 0,
 ) -> List[dict]:
     try:
-        where_clauses: List[str] = []
-        params: List = []
+        where_clauses, params = [], []
 
         if query:
-            where_clauses.append(
-                "(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)"
-            )
-            params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
+            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
+            params += [f\"%{query}%\", f\"%{query}%\", f\"%{query}%\", f\"%{query}%\"]
 
         if country:
-            where_clauses.append("country ILIKE %s")
-            params.append(f"%{country}%")
+            where_clauses.append("country = %s")
+            params.append(normalize_country(country))
 
         if currency_eq:
             where_clauses.append("currency = %s")
@@ -1372,10 +1413,8 @@ async def fetch_tours_page(
             where_clauses.append("posted_at >= %s")
             params.append(cutoff)
 
-        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        order_clause = (
-            "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
-        )
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
 
         select_list = _select_tours_clause()
         sql = f"""
@@ -1388,8 +1427,7 @@ async def fetch_tours_page(
 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params + [limit, offset])
-            rows = cur.fetchall()
-            return rows
+            return cur.fetchall()
     except Exception as e:
         logging.error(f"Ошибка fetch_tours_page: {e}")
         return []
@@ -1905,26 +1943,30 @@ async def cb_recent(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
-    await bot.send_chat_action(call.message.chat.id, "typing")
+    uid = call.from_user.id
     country = call.data.split(":", 1)[1]
-    rows, is_recent = await fetch_tours(None, country=country, hours=120, limit_recent=6, limit_fallback=6)
-    header = (
-        f"🇺🇳 Страна: {country} — актуальные" if is_recent else f"🇺🇳 Страна: {country} — последние найденные"
-    )
-    await call.message.answer(f"<b>{escape(header)}</b>")
+
+    # сбрасываем кэш/пагинацию
+    LAST_RESULTS[uid] = []
+    PAGING[uid] = {"country": country, "offset": 0, "hours": 24}
+
+    rows = await fetch_tours_page(country=country, hours=24, limit=PAGE_SIZE, offset=0)
+    if not rows:
+        await call.message.answer(f"За 24 часа по стране «{country}» нет новых туров.", reply_markup=filters_inline_kb_for(uid))
+        return
 
     token = _new_token()
     PAGER_STATE[token] = {
         "chat_id": call.message.chat.id,
         "query": None,
-        "country": country,
+        "country": country,        # <— конкретная страна
         "currency_eq": None,
         "max_price": None,
-        "hours": 120 if is_recent else None,
+        "hours": 24,               # <— ЖЁСТКО 24 часа
         "order_by_price": False,
         "ts": time.monotonic(),
     }
-
+    
     _remember_query(call.from_user.id, country)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
 
@@ -2036,6 +2078,7 @@ async def cb_sort_price_asc(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("more:"))
+@dp.callback_query(F.data.startswith("more:"))
 async def cb_more(call: CallbackQuery):
     try:
         _, token, offset_str = call.data.split(":", 2)
@@ -2050,12 +2093,18 @@ async def cb_more(call: CallbackQuery):
         await call.answer("Эта подборка уже неактивна.", show_alert=False)
         return
 
+    # <-- вот это добавь
+    hours = state.get("hours") or 24
+    country = state.get("country")
+    if country:
+        country = normalize_country(country)  # чтобы выборка была строгой
+
     rows = await fetch_tours_page(
         query=state.get("query"),
-        country=state.get("country"),
+        country=country,
         currency_eq=state.get("currency_eq"),
         max_price=state.get("max_price"),
-        hours=state.get("hours"),
+        hours=hours,                           # <— всегда передаём число
         order_by_price=state.get("order_by_price", False),
         limit=6,
         offset=offset,
@@ -2066,6 +2115,7 @@ async def cb_more(call: CallbackQuery):
 
     _touch_state(token)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, offset + len(rows))
+
 
 @dp.callback_query(F.data.startswith("wx:"))
 async def cb_weather(call: CallbackQuery):
