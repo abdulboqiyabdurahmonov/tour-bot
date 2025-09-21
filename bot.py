@@ -2118,12 +2118,18 @@ async def cb_budget(call: CallbackQuery):
         limit=6             # размер выборки
     )
 
-    hdr = (
-        f"💸 Бюджет: ≤ {int(limit_val)} {cur} — актуальные"
-        if is_recent
-        else f"💸 Бюджет: ≤ {int(limit_val)} {cur} — последние найденные"
-    )
-    await call.message.answer(f"<b>{escape(hdr)}</b>")
+    if is_recent:
+        hdr = (
+            f"💸 Бюджет: ≤ {int(limit_val)} {cur}\n"
+            f"В этом диапазоне найдены следующие туры за последние 5 суток:"
+        )
+    else:
+        hdr = (
+            f"💸 Бюджет: ≤ {int(limit_val)} {cur}\n"
+            f"Свежих за 5 суток мало — показываю последние туры в этом диапазоне:"
+        )
+
+    await call.message.answer(f"<b>{escape(hdr.splitlines()[0])}</b>\n{escape(hdr.splitlines()[1])}")
 
     token = _new_token()
     PAGER_STATE[token] = {
