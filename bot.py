@@ -1095,6 +1095,15 @@ def normalize_dates_for_display(s: Optional[str]) -> str:
 
     return f"{_norm(d1, m1, y1)}–{_norm(d2, m2, y2)}"
 
+def normalize_currency(cur: str) -> str:
+    cur = cur.strip().upper().replace("＄", "$").replace("€", "EUR")
+    if cur in {"$", "USD"}:
+        return "USD"
+    if cur in {"EUR"}:
+        return "EUR"
+    if cur in {"SUM", "UZ", "UZS"}:
+        return "UZS"
+    return cur
 
 def localize_dt(dt: Optional[datetime]) -> str:
     if not isinstance(dt, datetime):
@@ -2103,6 +2112,7 @@ async def cb_sub_info(call: CallbackQuery):
 async def cb_budget(call: CallbackQuery):
     uid = call.from_user.id
     _, cur, limit_s = call.data.split(":")
+    cur = normalize_currency(cur)
     limit_val = int(limit_s)
 
     # Заголовок
