@@ -1480,14 +1480,29 @@ async def fetch_tours_page(
             where_clauses.append("currency = %s")
             params.append(currency_eq)
 
+        min_guard = None
+        if order_by_price and currency_eq and currency_eq in MIN_PRICE_BY_CURRENCY:
+            min_guard = MIN_PRICE_BY_CURRENCY[currency_eq]
+        
         if max_price is not None:
-            where_clauses.append("price IS NOT NULL AND price <= %s")
+            clause = "price IS NOT NULL AND price <= %s"
             params.append(max_price)
+            if min_guard is not None:
+                clause = f"({clause} AND price >= %s)"
+                params.append(min_guard)
+            where_clauses.append(clause)
 
         if hours is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             where_clauses.append("posted_at >= %s")
             params.append(cutoff)
+
+        if any_terms:
+            or_blocks = []
+            for term in any_terms:
+                or_blocks.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
+                params += [f"%{term}%", f"%{term}%", f"%{term}%", f"%{term}%"]
+            where_clauses.append("(" + " OR ".join(or_blocks) + ")")
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
@@ -1508,8 +1523,6 @@ async def fetch_tours_page(
     except Exception as e:
         logging.error(f"Ошибка fetch_tours_page: {e}")
         return []
-
-
 
 # ================= GPT =================
 last_gpt_call = defaultdict(float)
