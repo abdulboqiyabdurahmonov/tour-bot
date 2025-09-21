@@ -1971,7 +1971,7 @@ async def cb_country(call: CallbackQuery):
         "country": country,
         "currency_eq": None,
         "max_price": None,
-        "hours": 24,               # только свежак за 24ч
+        "hours": 24,
         "order_by_price": False,
         "ts": time.monotonic(),
     }
@@ -1985,9 +1985,14 @@ async def cb_country(call: CallbackQuery):
         await call.answer()
         return
 
-    _remember_query(uid, country)  # если нужно для истории/аналитики
-    # отправляем пачку карточек; next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, uid, rows, token, len(rows))
+
+    kb_more = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(uid, "more.next"),
+                              callback_data=f"more:{token}:{len(rows)}")],
+        [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
+    ])
+    await call.message.answer(t(uid, "more.title"), reply_markup=kb_more)   # ← тут ей место
     await call.answer()
 
 
