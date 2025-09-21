@@ -1608,27 +1608,24 @@ async def send_tour_card(chat_id: int, user_id: int, tour: dict):
     caption = build_card_text(tour, lang=_lang(user_id))
     await bot.send_message(chat_id, caption, reply_markup=kb, disable_web_page_preview=True)
 
+import asyncio
+from typing import List
 
 async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: str, next_offset: int):
-    for t in rows:
-        await send_tour_card(chat_id, user_id, t)
+    """Шлёт пачку карточек + в конце сообщение с кнопкой 'Показать ещё'."""
+    for tour in rows:
+        await send_tour_card(chat_id, user_id, tour)
         await asyncio.sleep(0)
+
     LAST_RESULTS[user_id] = rows
     LAST_QUERY_AT[user_id] = time.monotonic()
+
+    # финальное сообщение + кнопка "ещё"
     await bot.send_message(
-    chat_id,
-    "Продолжить подборку?",
-    reply_markup=more_kb(token, next_offset, user_id),
-)
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-kb_more = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text=t(uid, "more.next"),
-                          callback_data=f"more:{token}:{len(rows)}")],
-    [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
-])
-await call.message.answer(t(uid, "more.title"), reply_markup=kb_more)
+        chat_id,
+        t(user_id, "more.title"),              # "Продолжить подборку?"
+        reply_markup=more_kb(token, next_offset, user_id),
+    )
 
 # ===== Общие хелперы для админ-уведомлений =====
 
