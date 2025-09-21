@@ -328,6 +328,15 @@ TRANSLATIONS["kk"].update({
     "hello_again": "Мәзір таңдалған тілге жаңартылды ✅",
 })
 
+REQUIRED_KEYS = {"menu_find","menu_gpt","menu_sub","menu_settings","lang_saved","hello_again","desc_find","desc_gpt"}
+def _validate_i18n():
+    import logging
+    for lang, d in TRANSLATIONS.items():
+        miss = REQUIRED_KEYS - set(d.keys())
+        if miss:
+            logging.warning("i18n: %s missing keys: %s", lang, ", ".join(sorted(miss)))
+_validate_i18n()
+
 # --- i18n helpers для схемы TRANSLATIONS ---
 DEFAULT_LANG = DEFAULT_LANG  # уже объявлен выше
 
