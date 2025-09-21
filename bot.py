@@ -119,6 +119,18 @@ def _guess_query_from_link_phrase(text: str) -> Optional[str]:
     frag = re.sub(r"[.,;:!?]+$", "", frag).strip()
     return frag or None
 
+# Расширения стран (используются в cb_country)
+COUNTRY_EXPAND_ANY = {
+    "Китай": ["Китай", "Хайнань", "Hainan", "Sanya", "三亚", "Haikou", "海口"],
+    "Индонезия": ["Индонезия", "Бали", "Bali", "Denpasar"],
+    "Таиланд": ["Таиланд", "Пхукет", "Phuket", "Самуи", "Koh Samui"],
+    "Турция": ["Турция", "Анталья", "Antalya", "Аланья", "Alanya"],
+    "ОАЭ": ["ОАЭ", "Дубай", "Dubai", "Абу-Даби", "Abu Dhabi"],
+    "Вьетнам": ["Вьетнам", "Нячанг", "Nha Trang", "Фукуок", "Phu Quoc"],
+    "Мальдивы": ["Мальдивы", "Мале", "Male"],
+    "Грузия": ["Грузия", "Батуми", "Batumi", "Тбилиси", "Tbilisi"],
+}
+
 # ================= ENV =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
