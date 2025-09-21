@@ -2111,81 +2111,73 @@ async def cb_sub_info(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("budget:"))
 async def cb_budget(call: CallbackQuery):
     uid = call.from_user.id
-    _, cur, limit_s = call.data.split(":")
-    cur = normalize_currency(cur)
+    _, cur_raw, limit_s = call.data.split(":")
+    cur = normalize_currency(cur_raw)
     limit_val = int(limit_s)
 
-    # Заголовок
     await call.message.answer(
         f"<b>💸 Бюджет: ≤ {limit_val} {cur}</b>\n"
-        f"В этом диапазоне найдены следующие туры за последние 5 суток:"
+        f"В этом диапазоне ищу свежие предложения за последние 24 часа…"
     )
 
-    # Сначала пробуем строго по валюте
+    # 1) строго по валюте, последние 24 часа
     token = _new_token()
     PAGER_STATE[token] = {
         "chat_id": call.message.chat.id,
         "query": None,
         "country": None,
-        "currency_eq": cur,       # строгая валюта
+        "currency_eq": cur,
         "max_price": limit_val,
-        "hours": 120,
-        "order_by_price": True,   # для бюджетного режима сортируем по цене
+        "hours": 24,
+        "order_by_price": True,   # бюджетный режим — сортируем по цене
         "ts": time.monotonic(),
     }
-
     rows = await fetch_tours_page(
         country=None,
         currency_eq=cur,
         max_price=limit_val,
-        hours=120,
+        hours=24,
         limit=6,
         offset=0,
         order_by_price=True,
     )
 
-    # Фолбэк: если пусто по валюте — берем любой currency
+    # 2) фолбэк: та же валюта, но без ограничения по времени
     if not rows:
-        # обновим токен/состояние под "любой валютой"
         token = _new_token()
         PAGER_STATE[token] = {
             "chat_id": call.message.chat.id,
             "query": None,
             "country": None,
-            "currency_eq": None,   # любой currency
+            "currency_eq": cur,
             "max_price": limit_val,
-            "hours": 120,
+            "hours": None,          # если ваша функция не принимает None — поставьте большое число, напр. 24*365
             "order_by_price": True,
             "ts": time.monotonic(),
         }
         rows = await fetch_tours_page(
             country=None,
-            currency_eq=None,
+            currency_eq=cur,
             max_price=limit_val,
-            hours=120,
+            hours=None,             # или 24*365
             limit=6,
             offset=0,
             order_by_price=True,
         )
         if rows:
-            # поясним пользователю, что показываем без учета валюты
             await call.message.answer(
-                "Свежих предложений в выбранной валюте не нашлось — показываю подходящие по любой валюте."
+                "За последние 24 часа ничего не нашлось — показываю подходящие из базы."
             )
 
-        # Если совсем пусто — аккуратно выходим
     if not rows:
         await call.message.answer(
-            f"В пределах бюджета ≤ {limit_val} {cur} за последние 5 суток ничего не нашли.",
+            f"В пределах бюджета ≤ {limit_val} {cur} ничего не нашли.",
             reply_markup=filters_inline_kb_for(uid),
         )
         await call.answer()
         return
 
-    # Немного логов для проверки
-    logging.info("budget <= %s %s: rows=%d, token=%s", limit_val, cur, len(rows), token)
-
-    # Отправляем карточки + пагинацию (сама функция показывает «Продолжить подборку?»)
+    # Отправляем карточки (send_batch_cards уже добавит «Показать ещё»)
     await send_batch_cards(call.message.chat.id, uid, rows, token, len(rows))
     await call.answer()
 
