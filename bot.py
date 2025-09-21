@@ -78,6 +78,8 @@ ALIASES = {
     "шарм": ["шарм", "sharm", "sharm el sheikh", "sharm-el-sheikh", "шарм-эль-шейх"],
     "дубай": ["дубай", "dubai", "dxб"],
     "нячанг": ["нячанг", "nha trang", "nhatrang"],
+    "Китай": ["Хайнань", "Hainan", "Sanya", "三亚", "Haikou", "海口"],
+    "Индонезия": ["Бали", "Bali", "Denpasar"],
 }
 
 def _expand_query(q: str) -> list[str]:
@@ -1408,6 +1410,7 @@ async def fetch_tours_page(
     *,
     country: Optional[str] = None,
     country_terms: Optional[list[str]] = None,  # <— НОВОЕ
+    any_terms: Optional[list[str]] = None,
     currency_eq: Optional[str] = None,
     max_price: Optional[float] = None,
     hours: Optional[int] = None,
@@ -1989,6 +1992,7 @@ async def cb_country(call: CallbackQuery):
     country_raw = call.data.split(":", 1)[1]
     country = normalize_country(country_raw)
     terms = country_terms_for(country)  # ← берём синонимы (RU/EN и т.д.)
+    terms_any = COUNTRY_EXPAND_ANY.get(country, [])
 
     token = _new_token()
     PAGER_STATE[token] = {
