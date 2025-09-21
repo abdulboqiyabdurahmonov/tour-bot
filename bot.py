@@ -415,6 +415,19 @@ bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 app = FastAPI()
 
+# --- Динамическая проверка колонок схемы
+SCHEMA_COLS: set[str] = set()
+
+def _has_cols(*names: str) -> bool:
+    return all(n in SCHEMA_COLS for n in names)
+
+def _select_tours_clause() -> str:
+    base = "id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description"
+    extras = []
+    extras.append("board" if _has_cols("board") else "NULL AS board")
+    extras.append("includes" if _has_cols("includes") else "NULL AS includes")
+    return f"{base}, {', '.join(extras)}"
+
 # ================= БД =================
 
 def get_conn():
