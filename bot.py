@@ -1713,6 +1713,58 @@ async def _typing_pulse(chat_id: int):
     except asyncio.CancelledError:
         pass
 
+# ==== ЯЗЫК/LOCALE ХЕЛПЕРЫ ====
+
+# безопасный геттер языка пользователя
+def _lang(user_id: int | None) -> str:
+    try:
+        # читаем из key-value стора, который у тебя уже есть
+        code = get_config(f"lang_{int(user_id)}", None) if user_id else None
+    except Exception:
+        code = None
+    # гарантируем валидность и откат к дефолту
+    return code if code in SUPPORTED_LANGS else DEFAULT_LANG
+
+# сохранить выбранный язык
+def set_user_lang(user_id: int, lang: str) -> None:
+    save = lang if lang in SUPPORTED_LANGS else DEFAULT_LANG
+    set_config(f"lang_{user_id}", save)
+
+# универсальный переводчик (если твоё t() уже есть — оставь его; если нет, используй этот)
+def t(user_id: int | None, key: str) -> str:
+    lang = _lang(user_id)
+    return TRANSLATIONS.get(lang, {}).get(key, TRANSLATIONS[DEFAULT_LANG].get(key, key))
+
+# инлайн-клавиатура выбора языка
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+
+def lang_inline_kb() -> InlineKeyboardMarkup:
+    # подписи человекочитаемые — можешь изменить под себя
+    names = {
+        "ru": "Русский 🇷🇺",
+        "uz": "Oʻzbekcha 🇺🇿",
+        "kk": "Қазақша 🇰🇿",
+        # если в SUPPORTED_LANGS есть ещё — добавь сюда
+    }
+    rows = []
+    row = []
+    for code in SUPPORTED_LANGS:
+        text = names.get(code, code.upper())
+        row.append(InlineKeyboardButton(text=text, callback_data=f"lang:{code}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# алиас, чтобы старые вызовы не падали
+def main_kb_for(user_id: int) -> ReplyKeyboardMarkup:
+    return main_menu_kb(user_id)
+
+# ещё один алиас: версия без user_id — берём дефолтный язык (русский)
+def want_contact_kb() -> ReplyKeyboardMarkup:
+    # используем уже существующую i18n-клавиатуру, но с user_id=0 => DEFAULT_LANG
+    return want_contact_kb_for(0)
+
 # ================= ХЕНДЛЕРЫ =================
 @dp.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
