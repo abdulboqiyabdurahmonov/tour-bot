@@ -1621,7 +1621,14 @@ async def send_batch_cards(chat_id: int, user_id: int, rows: List[dict], token: 
     reply_markup=more_kb(token, next_offset, user_id),
 )
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+kb_more = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text=t(uid, "more.next"),
+                          callback_data=f"more:{token}:{len(rows)}")],
+    [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
+])
+await call.message.answer(t(uid, "more.title"), reply_markup=kb_more)
 
 # ===== Общие хелперы для админ-уведомлений =====
 
@@ -1964,31 +1971,24 @@ async def cb_country(call: CallbackQuery):
         "country": country,
         "currency_eq": None,
         "max_price": None,
-        "hours": 24,               # ← жёстко 24ч для стран
+        "hours": 24,               # только свежак за 24ч
         "order_by_price": False,
         "ts": time.monotonic(),
     }
-    USER_LAST_TOKEN[uid] = token
 
     rows = await fetch_tours_page(country=country, hours=24, limit=6, offset=0)
     if not rows:
-        await call.message.answer(f"За 24 часа по стране «{country}» нет новых туров.", reply_markup=filters_inline_kb_for(uid))
+        await call.message.answer(
+            f"За 24 часа по стране «{country}» нет новых туров.",
+            reply_markup=filters_inline_kb_for(uid),
+        )
+        await call.answer()
         return
 
-    token = _new_token()
-    PAGER_STATE[token] = {
-        "chat_id": call.message.chat.id,
-        "query": None,
-        "country": country,        # <— конкретная страна
-        "currency_eq": None,
-        "max_price": None,
-        "hours": 24,               # <— ЖЁСТКО 24 часа
-        "order_by_price": False,
-        "ts": time.monotonic(),
-    }
-    
-    _remember_query(call.from_user.id, country)
-    await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
+    _remember_query(uid, country)  # если нужно для истории/аналитики
+    # отправляем пачку карточек; next_offset = len(rows)
+    await send_batch_cards(call.message.chat.id, uid, rows, token, len(rows))
+    await call.answer()
 
 
 @dp.callback_query(F.data.startswith("sub:"))
