@@ -1394,7 +1394,7 @@ async def fetch_tours_page(
 
         if query:
             where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
-            params += [f\"%{query}%\", f\"%{query}%\", f\"%{query}%\", f\"%{query}%\"]
+            params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
 
         if country:
             where_clauses.append("country = %s")
