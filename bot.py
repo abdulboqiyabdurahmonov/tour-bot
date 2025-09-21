@@ -318,6 +318,16 @@ TRANSLATIONS["ru"].update({"btn.weather": "🌤 Погода"})
 TRANSLATIONS["uz"].update({"btn.weather": "🌤 Ob-havo"})
 TRANSLATIONS["kk"].update({"btn.weather": "🌤 Ауа райы"})
 
+TRANSLATIONS["ru"].update({
+    "hello_again": "МЕНЮ обновлено под выбранный язык ✅",
+})
+TRANSLATIONS["uz"].update({
+    "hello_again": "Menyu tanlangan tilga yangilandi ✅",
+})
+TRANSLATIONS["kk"].update({
+    "hello_again": "Мәзір таңдалған тілге жаңартылды ✅",
+})
+
 # --- i18n helpers для схемы TRANSLATIONS ---
 DEFAULT_LANG = DEFAULT_LANG  # уже объявлен выше
 
@@ -665,79 +675,53 @@ def resolve_leads_chat_id() -> int:
     except Exception:
         return 0
 
-# ================= КЛАВИАТУРЫ =================
 def main_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
-    """Главное меню (ReplyKeyboard) на языке пользователя."""
-    lang = _lang(user_id)
-    tr = TRANSLATIONS[lang]
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=tr["menu_find"]), KeyboardButton(text=tr["menu_gpt"])],
-            [KeyboardButton(text=tr["menu_sub"]),  KeyboardButton(text=tr["menu_settings"])],  # «🌐 Выбор языка»
+            [KeyboardButton(text=t(user_id, "menu_find")),
+             KeyboardButton(text=t(user_id, "menu_gpt"))],
+            [KeyboardButton(text=t(user_id, "menu_sub")),
+             KeyboardButton(text=t(user_id, "menu_settings"))],
         ],
         resize_keyboard=True,
     )
 
-
 def filters_inline_kb_for(user_id: int) -> InlineKeyboardMarkup:
-    """Инлайн-фильтры под подбор (i18n)."""
-    lang = _lang(user_id)
-    tr = TRANSLATIONS[lang]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=tr["filters.recent"], callback_data="tours_recent")],
+        [InlineKeyboardButton(text=t(user_id, "filters.recent"), callback_data="tours_recent")],
         [
-            InlineKeyboardButton(text=tr["filters.country.turkiye"], callback_data="country:Турция"),
-            InlineKeyboardButton(text=tr["filters.country.uae"],      callback_data="country:ОАЭ"),
+            InlineKeyboardButton(text=t(user_id, "filters.country.turkiye"), callback_data="country:Турция"),
+            InlineKeyboardButton(text=t(user_id, "filters.country.uae"),      callback_data="country:ОАЭ"),
         ],
         [
-            InlineKeyboardButton(text=tr["filters.country.th"], callback_data="country:Таиланд"),
-            InlineKeyboardButton(text=tr["filters.country.vn"], callback_data="country:Вьетнам"),
+            InlineKeyboardButton(text=t(user_id, "filters.country.th"), callback_data="country:Таиланд"),
+            InlineKeyboardButton(text=t(user_id, "filters.country.vn"), callback_data="country:Вьетнам"),
         ],
         [
-            InlineKeyboardButton(text=tr["filters.budget.500"],  callback_data="budget:USD:500"),
-            InlineKeyboardButton(text=tr["filters.budget.800"],  callback_data="budget:USD:800"),
-            InlineKeyboardButton(text=tr["filters.budget.1000"], callback_data="budget:USD:1000"),
+            InlineKeyboardButton(text=t(user_id, "filters.budget.500"),  callback_data="budget:USD:500"),
+            InlineKeyboardButton(text=t(user_id, "filters.budget.800"),  callback_data="budget:USD:800"),
+            InlineKeyboardButton(text=t(user_id, "filters.budget.1000"), callback_data="budget:USD:1000"),
         ],
-        [InlineKeyboardButton(text=tr["filters.sort.price"], callback_data="sort:price_asc")],
-        [InlineKeyboardButton(text=tr["filters.more"],       callback_data="noop")],
+        [InlineKeyboardButton(text=t(user_id, "filters.sort.price"), callback_data="sort:price_asc")],
+        [InlineKeyboardButton(text=t(user_id, "filters.more"),       callback_data="noop")],
     ])
 
-
-# ШИМ: чтобы старые вызовы не падали
-def filters_inline_kb(user_id: int | None = None) -> InlineKeyboardMarkup:
-    return filters_inline_kb_for(user_id or 0)
-
-
 def more_kb(token: str, next_offset: int, uid: int) -> InlineKeyboardMarkup:
-    """Инлайн-кнопки 'Показать ещё' + 'Назад' (i18n)."""
-    lang = _lang(uid)
-    tr = TRANSLATIONS[lang]
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=tr["more.next"], callback_data=f"more:{token}:{next_offset}")],
-            [InlineKeyboardButton(text=tr["back"], callback_data="back_filters")],
+            [InlineKeyboardButton(text=t(uid, "more.next"), callback_data=f"more:{token}:{next_offset}")],
+            [InlineKeyboardButton(text=t(uid, "back"),      callback_data="back_filters")],
         ]
     )
 
-
 def want_contact_kb_for(user_id: int) -> ReplyKeyboardMarkup:
-    """ReplyKeyboard для запроса контакта (i18n)."""
-    lang = _lang(user_id)
-    tr = TRANSLATIONS[lang]
-    # если ключа нет в словаре — безопасно падаем на русский текст по умолчанию
-    share_txt = tr.get("share_phone", "📲 Поделиться номером")
+    share_txt = t(user_id, "share_phone")  # если нет — t() вернёт русский дефолт или сам ключ
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=share_txt, request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
         selective=True,
     )
-
-
-# ШИМ-обёртка для обратной совместимости
-def want_contact_kb(user_id: int | None = None) -> ReplyKeyboardMarkup:
-    return want_contact_kb_for(user_id or 0)
-
 
 # ================= ПАГИНАЦИЯ =================
 
