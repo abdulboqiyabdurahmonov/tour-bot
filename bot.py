@@ -195,6 +195,21 @@ def _cleanup_pager_state() -> None:
     for t in dead:
         PAGER_STATE.pop(t, None)
 
+# ================= СИНОНИМЫ СТРАН =================
+COUNTRY_SYNONYMS = {
+    "Турция":   ["Турция", "Turkey", "Türkiye"],
+    "ОАЭ":      ["ОАЭ", "UAE", "United Arab Emirates", "Dubai", "Abu Dhabi"],
+    "Таиланд":  ["Таиланд", "Thailand"],
+    "Вьетнам":  ["Вьетнам", "Vietnam"],
+    "Грузия":   ["Грузия", "Georgia", "Sakartvelo"],
+    "Мальдивы": ["Мальдивы", "Maldives"],
+    "Китай":    ["Китай", "China", "PRC", "People's Republic of China", "PR China", "КНР"],
+}
+
+def country_terms_for(user_pick: str) -> list[str]:
+    base = normalize_country(user_pick)
+    return COUNTRY_SYNONYMS.get(base, [base])
+
 # ====== ЯЗЫКИ / ЛОКАЛИЗАЦИЯ ======
 SUPPORTED_LANGS = ("ru", "uz", "kk")
 DEFAULT_LANG = "ru"  # язык по умолчанию
@@ -1392,23 +1407,34 @@ async def fetch_tours_page(
     query: Optional[str] = None,
     *,
     country: Optional[str] = None,
+    country_terms: Optional[list[str]] = None,  # <— НОВОЕ
     currency_eq: Optional[str] = None,
     max_price: Optional[float] = None,
-    hours: Optional[int] = None,   # передавать 24!
+    hours: Optional[int] = None,
     order_by_price: bool = False,
     limit: int = 10,
     offset: int = 0,
 ) -> List[dict]:
     try:
-        where_clauses, params = [], []
+        where_clauses: List[str] = []
+        params: List = []
 
         if query:
-            where_clauses.append("(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)")
+            where_clauses.append(
+                "(country ILIKE %s OR city ILIKE %s OR hotel ILIKE %s OR description ILIKE %s)"
+            )
             params += [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
 
-        if country:
-            where_clauses.append("country = %s")
-            params.append(normalize_country(country))
+        # --- страна: либо один шаблон, либо список синонимов
+        if country_terms:
+            ors = []
+            for term in country_terms:
+                ors.append("country ILIKE %s")
+                params.append(f"%{term}%")
+            where_clauses.append("(" + " OR ".join(ors) + ")")
+        elif country:
+            where_clauses.append("country ILIKE %s")
+            params.append(f"%{country}%")
 
         if currency_eq:
             where_clauses.append("currency = %s")
@@ -1423,7 +1449,7 @@ async def fetch_tours_page(
             where_clauses.append("posted_at >= %s")
             params.append(cutoff)
 
-        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         order_clause = "ORDER BY price ASC NULLS LAST, posted_at DESC" if order_by_price else "ORDER BY posted_at DESC"
 
         select_list = _select_tours_clause()
@@ -1437,10 +1463,12 @@ async def fetch_tours_page(
 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params + [limit, offset])
-            return cur.fetchall()
+            rows = cur.fetchall()
+            return rows
     except Exception as e:
         logging.error(f"Ошибка fetch_tours_page: {e}")
         return []
+
 
 
 # ================= GPT =================
@@ -1960,6 +1988,7 @@ async def cb_country(call: CallbackQuery):
     uid = call.from_user.id
     country_raw = call.data.split(":", 1)[1]
     country = normalize_country(country_raw)
+    terms = country_terms_for(country)  # ← берём синонимы (RU/EN и т.д.)
 
     token = _new_token()
     PAGER_STATE[token] = {
@@ -1973,7 +2002,8 @@ async def cb_country(call: CallbackQuery):
         "ts": time.monotonic(),
     }
 
-    rows = await fetch_tours_page(country=country, hours=24, limit=6, offset=0)
+    # Фильтруем по 24ч + по любому синониму
+    rows = await fetch_tours_page(country_terms=terms, hours=24, limit=6, offset=0)
     if not rows:
         await call.message.answer(
             f"За 24 часа по стране «{country}» нет новых туров.",
@@ -1991,7 +2021,6 @@ async def cb_country(call: CallbackQuery):
     ])
     await call.message.answer(t(uid, "more.title"), reply_markup=kb_more)
     await call.answer()
-
 
 @dp.callback_query(F.data.startswith("sub:"))
 async def cb_sub(call: CallbackQuery):
