@@ -2110,8 +2110,14 @@ async def cb_budget(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
 
     rows, is_recent = await fetch_tours(
-        None, currency_eq=cur, max_price=limit_val, hours=120, limit_recent=6, limit_fallback=6
+        None,
+        currency_eq=cur,
+        max_price=limit_val,
+        hours=120,          # «свежие» 5 суток
+        strict_recent=True, # сначала ищем только в пределах hours
+        limit=6             # размер выборки
     )
+
     hdr = (
         f"💸 Бюджет: ≤ {int(limit_val)} {cur} — актуальные"
         if is_recent
