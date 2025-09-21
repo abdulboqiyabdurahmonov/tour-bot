@@ -2121,20 +2121,22 @@ async def cb_lang(call: CallbackQuery):
     uid = call.from_user.id
     lang = call.data.split(":", 1)[1]
 
-    # 1) Сохраняем язык пользователя
+    # 1) Сохраняем язык
     set_user_lang(uid, lang)
 
-    # 2) Если сейчас открыт экран быстрых фильтров — просто заменим ИНЛАЙН-клавиатуру,
-    #    не меняя текста (убираем «filters.title», как вы просили).
+    # 2) Пытаемся обновить ИНЛАЙН-клавиатуру фильтров (если сейчас открыт «подбор»)
+    edited_inline = False
     try:
         await call.message.edit_reply_markup(reply_markup=filters_inline_kb_for(uid))
-        await call.answer(t(uid, "lang_saved"))
-        return
+        edited_inline = True
     except Exception:
-        pass  # сообщение было не с фильтрами — идём дальше
+        pass  # не тот экран — ок
 
-    # 3) Если последнее сообщение — карточка тура, обновим её текст и кнопки под новый язык
-    last_tours = LAST_RESULTS.get(uid, [])
+    # 3) Если есть последняя карточка тура — обновим её текст/кнопки под новый язык
+    try:
+        last_tours = LAST_RESULTS.get(uid, [])
+    except Exception:
+        last_tours = []
     if last_tours:
         tour = last_tours[0]
         caption = build_card_text(tour, lang=lang)
@@ -2143,12 +2145,12 @@ async def cb_lang(call: CallbackQuery):
         try:
             await call.message.edit_text(caption, reply_markup=kb)
         except Exception:
-            # если это было фото с подписью
-            await call.message.edit_caption(caption, reply_markup=kb)
-        await call.answer(t(uid, "lang_saved"))
-        return
+            try:
+                await call.message.edit_caption(caption, reply_markup=kb)
+            except Exception:
+                pass  # не критично — всё равно перешлём новое меню ниже
 
-    # 4) Фоллбек: убираем старую reply-клавиатуру и присылаем привет + новое главное меню
+    # 4) ВСЕГДА переотправляем reply-клавиатуру (иначе меню не сменит язык)
     try:
         await bot.send_message(uid, "…", reply_markup=ReplyKeyboardRemove())
     except Exception:
@@ -2156,13 +2158,12 @@ async def cb_lang(call: CallbackQuery):
 
     await bot.send_message(
         uid,
-        t(uid, "hello") + "\n\n"
-        + f"{t(uid, 'menu_find')} {t(uid, 'desc_find')}\n"
-        + f"{t(uid, 'menu_gpt')} {t(uid, 'desc_gpt')}\n",
-        reply_markup=main_kb_for(uid),  # важно: новое меню на нужном языке
+        t(uid, "hello_again"),
+        reply_markup=main_menu_kb(uid)  # <-- принципиально: свежая клавиатура
     )
-    await call.answer(t(uid, "lang_saved"))
 
+    # 5) Однократно отвечаем на callback
+    await call.answer(t(uid, "lang_saved") if (edited_inline or last_tours) else t(uid, "lang_saved"))
 
 @dp.callback_query(F.data.startswith("want:"))
 async def cb_want(call: CallbackQuery):
