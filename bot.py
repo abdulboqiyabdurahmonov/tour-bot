@@ -1408,13 +1408,16 @@ async def fetch_tours(
             cur.execute(sql, params + [limit])
             rows = cur.fetchall()
             if rows or strict_recent:
-                return rows, True  # True = «выдача свежая»
-            # если strict_recent=False, можно мягко упасть на старые (не советую для стран)
-            cur.execute(f"SELECT {select_list} FROM tours {('WHERE ' + ' AND '.join(where_clauses[:-2])) if where_clauses else ''} {order_clause} LIMIT %s", [limit])
+                return rows, True
+    
+            # фолбэк: снимаем только ограничение по времени
+            fallback_clauses = [c for c in where_clauses if "posted_at" not in c]
+            fallback_where = ("WHERE " + " AND ".join(fallback_clauses)) if fallback_clauses else ""
+            cur.execute(
+                f"SELECT {select_list} FROM tours {fallback_where} {order_clause} LIMIT %s",
+                [limit],
+            )
             return cur.fetchall(), False
-    except Exception as e:
-        logging.error(f"Ошибка при fetch_tours: {e}")
-        return [], True
 
 CANON_COUNTRY = {
     # то, что летит в callback → как хранится в БД
@@ -1638,34 +1641,51 @@ def tour_inline_kb(tour: dict, is_fav: bool, user_id: Optional[int] = None) -> I
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def build_card_text(t: dict, lang: str = "ru") -> str:
-    # базовые поля
-    hotel = clean_text_basic(strip_trailing_price_from_hotel(
-        t.get("hotel") or derive_hotel_from_description(t.get("description")) or "—"
-    ))
-    country = t.get("country") or "—"
-    city    = t.get("city") or "—"
+    hotel   = safe_title(t)  # ← вся логика заголовка внутри safe_title
+    country = (t.get("country") or "—").strip()
+    city    = (t.get("city") or "—").strip()
     price   = fmt_price(t.get("price"), t.get("currency"))
     dates   = normalize_dates_for_display(t.get("dates")) if t.get("dates") else "—"
     board   = (t.get("board") or "").strip()
     inc     = (t.get("includes") or "").strip()
-    when    = localize_dt(t.get("posted_at"))  # уже есть утилита:contentReference[oaicite:1]{index=1}
-
-    # простой вытяг из description первой осмысленной строки (если нет hotel/board/inc)
-    if hotel == "—":
-        hotel = derive_hotel_from_description(t.get("description")) or "—"
+    when_dt = t.get("posted_at")
+    when    = f"🕒 {localize_dt(when_dt)}" if when_dt else ""
 
     lines = [
         f"🏨 <b>{hotel}</b>",
         f"📍 {country} — {city}",
-        f"🗓 {dates}",
         f"💵 {price}",
+        f"🗓 {dates}",
     ]
-    if board: lines.append(f"🍽 Питание: {board}")
-    if inc:   lines.append(f"✅ Включено: {inc}")
-    if when:  lines.append(when)  # «🕒 23.07.2025 13:00 (TST)»
+    if board:
+        lines.append(f"🍽 Питание: {board}")
+    if inc:
+        lines.append(f"✅ Включено: {inc}")
+    if when:
+        lines.append(when)
 
     return "\n".join(lines)
 
+
+def _letters_digits_ratio(s: str) -> float:
+    import re
+    if not s:
+        return 0.0
+    alnum = len(re.findall(r"[A-Za-zА-Яа-я0-9]", s))
+    return alnum / max(1, len(s))
+
+
+def safe_title(t: dict) -> str:
+    h = clean_text_basic(strip_trailing_price_from_hotel(t.get("hotel") or ""))
+    if _letters_digits_ratio(h) < 0.25 or len(h.strip()) < 3:
+        alt = derive_hotel_from_description(t.get("description"))
+        if alt:
+            h = clean_text_basic(strip_trailing_price_from_hotel(alt))
+    if _letters_digits_ratio(h) < 0.25 or len(h.strip()) < 3:
+        ctry = (t.get("country") or "").strip()
+        city = (t.get("city") or "").strip()
+        h = (f"{ctry} — {city}".strip(" —") or "Тур")
+    return h
 
 async def send_tour_card(chat_id: int, user_id: int, tour: dict):
     fav = is_favorite(user_id, tour["id"]) 
