@@ -1992,7 +1992,7 @@ async def cb_country(call: CallbackQuery):
                               callback_data=f"more:{token}:{len(rows)}")],
         [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_filters")],
     ])
-    await call.message.answer(t(uid, "more.title"), reply_markup=kb_more)   # ← тут ей место
+    await call.message.answer(t(uid, "more.title"), reply_markup=kb_more)
     await call.answer()
 
 
