@@ -173,25 +173,27 @@ def build_payme_checkout_url(merchant_id: str, amount_tiyin: int, order_id: int,
     token = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
     return f"https://checkout.paycom.uz/{token}"
 
-# ================= КОНСТАНТЫ =================
-TZ = ZoneInfo("Asia/Tashkent")
-PAGER_STATE: Dict[str, Dict] = {}
-PAGER_TTL_SEC = 3600
-WANT_STATE: Dict[int, Dict] = {}
+# ================= ПАГИНАЦИЯ / ПОДБОРКИ =================
+import time, secrets
+from typing import Dict, Any, Optional
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- Динамическая проверка колонок схемы
-SCHEMA_COLS: set[str] = set()
+PAGER_STATE: Dict[str, Dict[str, Any]] = {}   # token -> state (у тебя уже объявлен)
+PAGER_TTL_SEC = 3600                          # 1 час (у тебя уже объявлен)
 
-def _has_cols(*names: str) -> bool:
-    return all(n in SCHEMA_COLS for n in names)
+def _new_token() -> str:
+    return secrets.token_urlsafe(8)
 
+def _touch_state(token: str) -> None:
+    st = PAGER_STATE.get(token)
+    if st is not None:
+        st["ts"] = time.monotonic()
 
-def _select_tours_clause() -> str:
-    base = "id, country, city, hotel, price, currency, dates, source_url, posted_at, photo_url, description"
-    extras = []
-    extras.append("board" if _has_cols("board") else "NULL AS board")
-    extras.append("includes" if _has_cols("includes") else "NULL AS includes")
-    return f"{base}, {', '.join(extras)}"
+def _cleanup_pager_state() -> None:
+    now = time.monotonic()
+    dead = [t for t, st in PAGER_STATE.items() if (now - st.get("ts", now)) > PAGER_TTL_SEC]
+    for t in dead:
+        PAGER_STATE.pop(t, None)
 
 # ====== ЯЗЫКИ / ЛОКАЛИЗАЦИЯ ======
 SUPPORTED_LANGS = ("ru", "uz", "kk")
@@ -1376,8 +1378,16 @@ CANON_COUNTRY = {
 }
 
 def normalize_country(name: str) -> str:
-    return CANON_COUNTRY.get(name.strip(), name.strip())
-
+    return {
+        "Турция": "Турция",
+        "ОАЭ": "ОАЭ",
+        "Таиланд": "Таиланд",
+        "Вьетнам": "Вьетнам",
+        "Грузия": "Грузия",
+        "Мальдивы": "Мальдивы",
+        "Китай": "Китай",
+    }.get(name.strip(), name.strip())
+    
 async def fetch_tours_page(
     query: Optional[str] = None,
     *,
@@ -1944,13 +1954,23 @@ async def cb_recent(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
     uid = call.from_user.id
-    country = call.data.split(":", 1)[1]
+    country_raw = call.data.split(":", 1)[1]
+    country = normalize_country(country_raw)
 
-    # сбрасываем кэш/пагинацию
-    LAST_RESULTS[uid] = []
-    PAGING[uid] = {"country": country, "offset": 0, "hours": 24}
+    token = _new_token()
+    PAGER_STATE[token] = {
+        "chat_id": call.message.chat.id,
+        "query": None,
+        "country": country,
+        "currency_eq": None,
+        "max_price": None,
+        "hours": 24,               # ← жёстко 24ч для стран
+        "order_by_price": False,
+        "ts": time.monotonic(),
+    }
+    USER_LAST_TOKEN[uid] = token
 
-    rows = await fetch_tours_page(country=country, hours=24, limit=PAGE_SIZE, offset=0)
+    rows = await fetch_tours_page(country=country, hours=24, limit=6, offset=0)
     if not rows:
         await call.message.answer(f"За 24 часа по стране «{country}» нет новых туров.", reply_markup=filters_inline_kb_for(uid))
         return
@@ -2076,8 +2096,6 @@ async def cb_sort_price_asc(call: CallbackQuery):
     _remember_query(call.from_user.id, "актуальные за 72ч (сорт. по цене)")
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, len(rows))
 
-
-@dp.callback_query(F.data.startswith("more:"))
 @dp.callback_query(F.data.startswith("more:"))
 async def cb_more(call: CallbackQuery):
     try:
@@ -2093,18 +2111,15 @@ async def cb_more(call: CallbackQuery):
         await call.answer("Эта подборка уже неактивна.", show_alert=False)
         return
 
-    # <-- вот это добавь
-    hours = state.get("hours") or 24
-    country = state.get("country")
-    if country:
-        country = normalize_country(country)  # чтобы выборка была строгой
+    hours = state.get("hours") or (24 if state.get("country") else 72)
+    country = normalize_country(state["country"]) if state.get("country") else None
 
     rows = await fetch_tours_page(
         query=state.get("query"),
         country=country,
         currency_eq=state.get("currency_eq"),
         max_price=state.get("max_price"),
-        hours=hours,                           # <— всегда передаём число
+        hours=hours,  # ← всегда число
         order_by_price=state.get("order_by_price", False),
         limit=6,
         offset=offset,
@@ -2115,6 +2130,7 @@ async def cb_more(call: CallbackQuery):
 
     _touch_state(token)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, offset + len(rows))
+
 
 
 @dp.callback_query(F.data.startswith("wx:"))
