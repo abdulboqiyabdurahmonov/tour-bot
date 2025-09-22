@@ -3307,61 +3307,61 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
             return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (cancel)"))
     
     elif method == "CheckTransaction":
-    try:
-        payme_trx = str(params.get("id") or "").strip()
-        if not payme_trx:
-            return JSONResponse(_rpc_err(req_id, -32602, "Invalid params"))
-
-        # 1) ПЕРВЫМ делом — кэш (идентичен между вызовами)
-        trx = TRX_STORE.get(payme_trx)
-        if trx:
+        try:
+            payme_trx = str(params.get("id") or "").strip()
+            if not payme_trx:
+                return JSONResponse(_rpc_err(req_id, -32602, "Invalid params"))
+    
+            # 1) ПЕРВЫМ делом — кэш (идентичен между вызовами)
+            trx = TRX_STORE.get(payme_trx)
+            if trx:
+                payload = {
+                    "create_time": int(trx.get("create_time") or 0),
+                    "perform_time": int(trx.get("perform_time") or 0),
+                    "cancel_time": int(trx.get("cancel_time") or 0),
+                    "transaction": payme_trx,
+                    "state": int(trx.get("state") or 1),
+                }
+                if payload["state"] < 0:
+                    payload["reason"] = int(trx.get("reason") or 0)
+                return JSONResponse(_rpc_ok(req_id, payload))
+    
+            # 2) Фолбэк — БД (кэш не найден, например после рестарта)
+            with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""
+                    SELECT
+                        ROUND(EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS create_ms,
+                        ROUND(EXTRACT(EPOCH FROM perform_time) * 1000)::BIGINT AS perform_ms,
+                        ROUND(EXTRACT(EPOCH FROM cancel_time)  * 1000)::BIGINT AS cancel_ms,
+                        status,
+                        COALESCE(reason,0) AS reason
+                      FROM orders
+                     WHERE provider='payme' AND provider_trx_id=%s
+                     LIMIT 1
+                """, (payme_trx,))
+                r = cur.fetchone()
+    
+            if not r:
+                return JSONResponse(_rpc_err(req_id, -31003, "Transaction not found"))
+    
+            s = (r["status"] or "").strip().lower()
+            state = 2 if s in ("paid", "performed", "done") else (-1 if s in ("canceled_after_perform","refunded","canceled") else 1)
+    
             payload = {
-                "create_time": int(trx.get("create_time") or 0),
-                "perform_time": int(trx.get("perform_time") or 0),
-                "cancel_time": int(trx.get("cancel_time") or 0),
+                "create_time": int(r.get("create_ms") or 0),
+                "perform_time": int(r.get("perform_ms") or 0),
+                "cancel_time": int(r.get("cancel_ms") or 0),
                 "transaction": payme_trx,
-                "state": int(trx.get("state") or 1),
+                "state": state,
             }
-            if payload["state"] < 0:
-                payload["reason"] = int(trx.get("reason") or 0)
+            if state < 0:
+                payload["reason"] = int(r.get("reason") or 0)
+    
             return JSONResponse(_rpc_ok(req_id, payload))
-
-        # 2) Фолбэк — БД (кэш не найден, например после рестарта)
-        with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
-                SELECT
-                    ROUND(EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS create_ms,
-                    ROUND(EXTRACT(EPOCH FROM perform_time) * 1000)::BIGINT AS perform_ms,
-                    ROUND(EXTRACT(EPOCH FROM cancel_time)  * 1000)::BIGINT AS cancel_ms,
-                    status,
-                    COALESCE(reason,0) AS reason
-                  FROM orders
-                 WHERE provider='payme' AND provider_trx_id=%s
-                 LIMIT 1
-            """, (payme_trx,))
-            r = cur.fetchone()
-
-        if not r:
-            return JSONResponse(_rpc_err(req_id, -31003, "Transaction not found"))
-
-        s = (r["status"] or "").strip().lower()
-        state = 2 if s in ("paid", "performed", "done") else (-1 if s in ("canceled_after_perform","refunded","canceled") else 1)
-
-        payload = {
-            "create_time": int(r.get("create_ms") or 0),
-            "perform_time": int(r.get("perform_ms") or 0),
-            "cancel_time": int(r.get("cancel_ms") or 0),
-            "transaction": payme_trx,
-            "state": state,
-        }
-        if state < 0:
-            payload["reason"] = int(r.get("reason") or 0)
-
-        return JSONResponse(_rpc_ok(req_id, payload))
-
-    except Exception:
-        logging.exception("[Payme] CheckTransaction fatal")
-        return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (check)"))
+    
+        except Exception:
+            logging.exception("[Payme] CheckTransaction fatal")
+            return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (check)"))
     
     # -------- GetStatement --------
     elif method == "GetStatement":
