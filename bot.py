@@ -3362,7 +3362,6 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
     except Exception:
         logging.exception("[Payme] CheckTransaction fatal")
         return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (check)"))
-
     
     # -------- GetStatement --------
     elif method == "GetStatement":
