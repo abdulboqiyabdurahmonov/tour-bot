@@ -2918,7 +2918,7 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 def _rpc_ok(rpc_id, payload: dict):
-    return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": payload})
+    return {"jsonrpc": "2.0", "id": rpc_id, "result": payload}
 
 def _rpc_err(rpc_id, code: int, ru: str, uz: str | None = None, en: str | None = None, data: str | None = None):
     return {
@@ -3301,6 +3301,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
             payme_trx = str(params.get("id") or "").strip()
             if not payme_trx:
                 return JSONResponse(_rpc_err(req_id, -32602, "Invalid params"))
+
     
             trx = TRX_STORE.get(payme_trx)
     
