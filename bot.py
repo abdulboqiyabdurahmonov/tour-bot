@@ -3297,84 +3297,77 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
 
 
     elif method == "CheckTransaction":
-        try:
-            payme_trx = str(params.get("id") or "").strip()
-            if not payme_trx:
-                return JSONResponse(_rpc_err(req_id, -31003, "Транзакция не найдена"))
-    
-            # 1) берём из памяти, если есть
-            trx = TRX_STORE.get(payme_trx)
-    
-            # 2) иначе пытаемся подтянуть из БД (без падений)
-            if trx is None:
-                try:
-                    with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
-                        cur.execute(
-                            """
-                            SELECT amount,
-                                   status,
-                                   EXTRACT(EPOCH FROM created_at)*1000 AS create_ms,
-                                   EXTRACT(EPOCH FROM perform_time)*1000 AS perform_ms,
-                                   EXTRACT(EPOCH FROM cancel_time)*1000  AS cancel_ms,
-                                   COALESCE(reason,0) as reason
-                              FROM orders
-                             WHERE provider='payme' AND provider_trx_id=%s
-                             LIMIT 1
-                            """,
-                            (payme_trx,),
-                        )
-                        r = cur.fetchone()
-                    if r:
-                        # статус -> state Payme
-                        s = (r["status"] or "").strip().lower()
-                        if s in ("paid", "performed", "done"):
-                            state = 2
-                        elif s in ("canceled_after_perform", "refunded"):
-                            state = -2
-                        elif s in ("canceled", "rejected"):
-                            state = -1
-                        else:
-                            state = 1
-    
-                        trx = {
-                            "amount": int(r.get("amount") or 0),
-                            "create_time": int(r.get("create_ms") or 0),
-                            "perform_time": int(r.get("perform_ms") or 0),
-                            "cancel_time": int(r.get("cancel_ms") or 0),
-                            "state": state,
-                            "reason": int(r.get("reason") or 0),
-                        }
+    try:
+        payme_trx = str(params.get("id") or "").strip()
+        if not payme_trx:
+            return JSONResponse(_rpc_err(req_id, -32602, "Invalid params"))
+
+        trx = TRX_STORE.get(payme_trx)
+
+        if trx is None:
+            try:
+                with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        """
+                        SELECT amount,
+                               status,
+                               EXTRACT(EPOCH FROM created_at)*1000 AS create_ms,
+                               EXTRACT(EPOCH FROM perform_time)*1000 AS perform_ms,
+                               EXTRACT(EPOCH FROM cancel_time)*1000  AS cancel_ms,
+                               COALESCE(reason,0) as reason
+                          FROM orders
+                         WHERE provider='payme' AND provider_trx_id=%s
+                         LIMIT 1
+                        """,
+                        (payme_trx,),
+                    )
+                    r = cur.fetchone()
+                if r:
+                    s = (r["status"] or "").strip().lower()
+                    if s in ("paid", "performed", "done"):
+                        state = 2
+                    elif s in ("canceled_after_perform", "refunded"):
+                        state = -1     # <-- было -2, теперь -1 по спецификации
                     else:
-                        trx = None
-                except Exception:
-                    logging.exception("[Payme] CheckTransaction DB error")
-                    return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (check/db)"))
-    
-            if not trx:
-                return JSONResponse(_rpc_err(req_id, -31003, "Транзакция не найдена"))
-    
-            # Нормализуем поля и собираем ответ строго по спецификации
-            create_time  = int(trx.get("create_time") or 0)
-            perform_time = int(trx.get("perform_time") or 0)
-            cancel_time  = int(trx.get("cancel_time") or 0)
-            state        = int(trx.get("state") or 0)
-    
-            payload = {
-                "create_time": create_time,
-                "perform_time": perform_time,
-                "cancel_time": cancel_time,
-                "transaction": payme_trx,
-                "state": state,
-            }
-            # reason отдаём только для отрицательных состояний
-            if state in (-1, -2):
-                payload["reason"] = int(trx.get("reason") or 0)
-    
-            return JSONResponse(_rpc_ok(req_id, payload))
-    
-        except Exception:
-            logging.exception("[Payme] CheckTransaction fatal")
-            return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (check)"))
+                        state = 1
+
+                    trx = {
+                        "amount": int(r.get("amount") or 0),
+                        "create_time": int(r.get("create_ms") or 0),
+                        "perform_time": int(r.get("perform_ms") or 0),
+                        "cancel_time": int(r.get("cancel_ms") or 0),
+                        "state": int(state),
+                        "reason": int(r.get("reason") or 0),
+                    }
+                else:
+                    trx = None
+            except Exception:
+                logging.exception("[Payme] CheckTransaction DB error")
+                return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (check/db)"))
+
+        if not trx:
+            return JSONResponse(_rpc_err(req_id, -31003, "Transaction not found"))
+
+        create_time  = int(trx.get("create_time") or 0)
+        perform_time = int(trx.get("perform_time") or 0)
+        cancel_time  = int(trx.get("cancel_time") or 0)
+        state        = int(trx.get("state") or 0)
+
+        payload = {
+            "create_time": create_time,
+            "perform_time": perform_time,
+            "cancel_time": cancel_time,
+            "transaction": payme_trx,
+            "state": state,
+        }
+        if state < 0:
+            payload["reason"] = int(trx.get("reason") or 0)
+
+        return JSONResponse(_rpc_ok(req_id, payload))
+    except Exception:
+        logging.exception("[Payme] CheckTransaction fatal")
+        return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (check)"))
+
         
     # -------- GetStatement --------
     elif method == "GetStatement":
