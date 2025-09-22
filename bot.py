@@ -3059,8 +3059,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
     params  = body.get("params") or {}
     account = params.get("account") or {}
 
-    # --- авторизация (оставляем одну проверку) ---
-    auth_ok = _payme_auth_ok(x_auth) or _payme_sandbox_ok(request)
+    auth_ok = _payme_auth_check(request.headers)
     if not auth_ok:
         return JSONResponse(_rpc_err(req_id, -32504, "Недопустимая авторизация"))
 
@@ -3177,7 +3176,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
         payme_trx = str(trx_id_in or "").strip()
         trx = TRX_STORE.get(payme_trx) or _trx_from_db(payme_trx)
         if not trx:
-            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+            return _rpc_err(req_id, -31003, "Транзакция не найдена")
 
         if trx["state"] == 2:
             return _rpc_ok(rpc_id, {"perform_time": trx["perform_time"], "transaction": payme_trx, "state": 2})
@@ -3203,7 +3202,7 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
     elif method == "CancelTransaction":
         payme_trx = str(trx_id_in or "").strip()
         if not payme_trx:
-            return _rpc_err(rpc_id, -31003, "Транзакция не найдена")
+            return _rpc_err(req_id, -31003, "Транзакция не найдена")
 
         # reason из Payme (int | None)
         cancel_reason = params.get("reason")
