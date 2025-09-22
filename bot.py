@@ -3137,15 +3137,18 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
             logging.warning(f"[Payme] Create mismatch: sent={sent} expected={expected} order_id={order_id}")
             return JSONResponse(_rpc_err(req_id, -31001, "Неверная сумма"))
     
-        # 3) запись trx — фиксируем created_at из client_ms
-        create_time = client_ms
+        # 3) запись trx — фиксируем created_at из client_ms (params.time)
+        create_time = int(params.get("time") or 0)
+        if create_time <= 0:
+            return JSONResponse(_rpc_err(req_id, -32602, "Invalid params"))
+        
         try:
             with _pay_db() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute("SELECT provider_trx_id FROM orders WHERE id=%s;", (int(order_id),))
                 row = cur.fetchone()
                 if row and row.get("provider_trx_id") and row["provider_trx_id"] != payme_trx:
                     return JSONResponse(_rpc_err(req_id, -31099, "Транзакция уже существует для этого заказа"))
-    
+        
                 cur.execute(
                     """
                     UPDATE orders
@@ -3156,27 +3159,40 @@ async def payme_merchant(request: Request, x_auth: str | None = Header(default=N
                     """,
                     (payme_trx, "created", create_time, int(order_id)),
                 )
+                # ← читаем create_ms из БД с округлением, чтобы везде был ОДИНАКОВЫЙ int
+                cur.execute(
+                    """
+                    SELECT ROUND(EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS create_ms
+                      FROM orders
+                     WHERE provider_trx_id=%s
+                     LIMIT 1
+                    """,
+                    (payme_trx,),
+                )
+                row2 = cur.fetchone()
+                db_create_ms = int(row2["create_ms"] or create_time)
                 conn.commit()
         except Exception:
             logging.exception("[Payme] DB error in CreateTransaction")
             return JSONResponse(_rpc_err(req_id, -32400, "Внутренняя ошибка (create)"))
-    
+        
+        # синхронизируем кэш ровно этим же значением
         TRX_STORE[payme_trx] = {
             "order_id": int(order_id),
             "amount": sent,
             "state": 1,
-            "create_time": create_time,
+            "create_time": db_create_ms,
             "perform_time": 0,
             "cancel_time": 0,
             "reason": None,
         }
-        logging.info(f"[Payme] CreateTransaction saved trx_id={payme_trx} for order_id={order_id}")
-    
+        
         return JSONResponse(_rpc_ok(req_id, {
-            "create_time": create_time,
+            "create_time": db_create_ms,
             "transaction": payme_trx,
             "state": 1
         }))
+
     
     # -------- PerformTransaction --------
     elif method == "PerformTransaction":
