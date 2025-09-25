@@ -1407,7 +1407,7 @@ async def fetch_tours(
 ) -> Tuple[List[dict], bool]:
     """
     Возвращает (rows, is_recent_window_used).
-    Свежесть считаем по RECENT_EXPR (у тебя сейчас это posted_at).
+    Свежесть считаем по RECENT_EXPR (posted_at и т.п.).
     Если strict_recent=False: сначала H часов → 72ч → без окна.
     Параметры limit_recent/limit_fallback (если переданы) перекрывают общий limit.
     """
@@ -1421,7 +1421,7 @@ async def fetch_tours(
             params += [q, q, q, q]
 
         if country:
-            # не точное равенство — терпим вариации (Таиланд/Thailand/🇹🇭)
+            # допускаем вариации (Таиланд/Thailand/🇹🇭)
             where.append("country ILIKE %s")
             params.append(f"%{normalize_country(country)}%")
 
@@ -1437,42 +1437,53 @@ async def fetch_tours(
         lim_recent = limit_recent if limit_recent is not None else limit
         lim_fb     = limit_fallback if limit_fallback is not None else limit
 
-        # окно свежести
-        recent_where = list(where) + [f"{RECENT_EXPR} >= %s"]
-        recent_params = params + [cutoff_utc(hours)]
-
+        # ORDER BY
         order_clause = (
             "ORDER BY price ASC NULLS LAST, posted_at DESC NULLS LAST"
             if max_price is not None
             else "ORDER BY posted_at DESC NULLS LAST"
         )
+
         select_list = _select_tours_clause()
 
-        # 1) пробуем H часов
-        sql_recent = f"SELECT {select_list} FROM tours " + \
-                     ("WHERE " + " AND ".join(recent_where) if recent_where else "") + \
-                     f" {order_clause} LIMIT %s"
+        # -------- 1) окно H часов (recent) ----------
+        recent_cond = f"{RECENT_EXPR} >= %s"
+        recent_where = where + [recent_cond]
+        recent_params = params + [cutoff_utc(hours)]
 
-        from psycopg import errors  # на всякий
+        sql_recent = (
+            f"SELECT {select_list} FROM tours "
+            + ("WHERE " + " AND ".join(recent_where) if recent_where else "")
+            + f" {order_clause} LIMIT %s"
+        )
+
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql_recent, recent_params + [lim_recent])
             rows = cur.fetchall()
             if rows or strict_recent:
                 return rows, True
 
-            # 2) пробуем 72 часа
-            sql72 = f"SELECT {select_list} FROM tours " + \
-                    ("WHERE " + " AND ".join(where + [f\"{RECENT_EXPR} >= %s\"]) if where else f\"WHERE {RECENT_EXPR} >= %s\") + \
-                    f" {order_clause} LIMIT %s"
-            cur.execute(sql72, params + [cutoff_utc(72), lim_recent])
+            # -------- 2) окно 72 часа ----------
+            cond72 = f"{RECENT_EXPR} >= %s"
+            where72 = where + [cond72]
+            params72 = params + [cutoff_utc(72)]
+
+            sql72 = (
+                f"SELECT {select_list} FROM tours "
+                + ("WHERE " + " AND ".join(where72) if where72 else "")
+                + f" {order_clause} LIMIT %s"
+            )
+            cur.execute(sql72, params72 + [lim_recent])
             rows72 = cur.fetchall()
             if rows72:
                 return rows72, False
 
-            # 3) без окна (фолбэк)
-            sql_fb = f"SELECT {select_list} FROM tours " + \
-                     ("WHERE " + " AND ".join(where) if where else "") + \
-                     f" {order_clause} LIMIT %s"
+            # -------- 3) без окна (fallback) ----------
+            sql_fb = (
+                f"SELECT {select_list} FROM tours "
+                + ("WHERE " + " AND ".join(where) if where else "")
+                + f" {order_clause} LIMIT %s"
+            )
             cur.execute(sql_fb, params + [lim_fb])
             return cur.fetchall(), False
 
