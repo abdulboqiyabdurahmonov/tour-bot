@@ -1387,10 +1387,29 @@ def normalize_country(name: str) -> str:
     name = (name or "").strip()
     return CANON_COUNTRY.get(name, name)
 
-# === FETCH (совместимо со старыми вызовами) ===
-# Требуются: get_conn, _select_tours_clause, normalize_country, RECENT_EXPR, cutoff_utc
+# ===================== TOURS FETCH CORE =====================
+# Требуются извне:
+#   - get_conn() -> контекстный менеджер psycopg connection
+#   - _select_tours_clause() -> str со списком выбираемых колонок (например: "id, country, city, ...")
+#   - normalize_country(name: str) -> str нормализованное имя страны
+# Таблица:
+#   - tours (..., posted_at timestamptz, ...)
+#
+# Возвращает: Tuple[List[tuple|dict], bool]
+#   rows, is_recent_window_used
+# ===========================================================
+
 from typing import Optional, Tuple, List
+from datetime import datetime, timedelta, timezone
 import logging
+
+# По какой колонке считаем «свежесть»:
+RECENT_EXPR = "posted_at"
+
+def cutoff_utc(hours: int) -> datetime:
+    """Момент времени 'сейчас - hours' в UTC (tz-aware)."""
+    return datetime.now(timezone.utc) - timedelta(hours=hours)
+
 
 async def fetch_tours(
     query: Optional[str] = None,
@@ -1404,12 +1423,16 @@ async def fetch_tours(
     # 👇 совместимость со старыми хэндлерами:
     limit_recent: Optional[int] = None,
     limit_fallback: Optional[int] = None,
+    # 👇 проглатываем неожиданные старые параметры из кода
+    **_,
 ) -> Tuple[List[dict], bool]:
     """
+    Универсальный выборщик туров.
+    Алгоритм:
+      1) окно H часов (recent)
+      2) если пусто и strict_recent=False → окно 72ч
+      3) если всё ещё пусто → без окна (fallback)
     Возвращает (rows, is_recent_window_used).
-    Свежесть считаем по RECENT_EXPR (posted_at и т.п.).
-    Если strict_recent=False: сначала H часов → 72ч → без окна.
-    Параметры limit_recent/limit_fallback (если переданы) перекрывают общий limit.
     """
     try:
         where: List[str] = []
@@ -1437,20 +1460,18 @@ async def fetch_tours(
         lim_recent = limit_recent if limit_recent is not None else limit
         lim_fb     = limit_fallback if limit_fallback is not None else limit
 
-        # ORDER BY
+        # ORDER BY: сначала цена (если был price-фильтр), затем свежесть
         order_clause = (
-            "ORDER BY price ASC NULLS LAST, posted_at DESC NULLS LAST"
+            f"ORDER BY price ASC NULLS LAST, {RECENT_EXPR} DESC NULLS LAST"
             if max_price is not None
-            else "ORDER BY posted_at DESC NULLS LAST"
+            else f"ORDER BY {RECENT_EXPR} DESC NULLS LAST"
         )
 
         select_list = _select_tours_clause()
 
         # -------- 1) окно H часов (recent) ----------
-        recent_cond = f"{RECENT_EXPR} >= %s"
-        recent_where = where + [recent_cond]
+        recent_where = where + [f"{RECENT_EXPR} >= %s"]
         recent_params = params + [cutoff_utc(hours)]
-
         sql_recent = (
             f"SELECT {select_list} FROM tours "
             + ("WHERE " + " AND ".join(recent_where) if recent_where else "")
@@ -1464,10 +1485,8 @@ async def fetch_tours(
                 return rows, True
 
             # -------- 2) окно 72 часа ----------
-            cond72 = f"{RECENT_EXPR} >= %s"
-            where72 = where + [cond72]
+            where72 = where + [f"{RECENT_EXPR} >= %s"]
             params72 = params + [cutoff_utc(72)]
-
             sql72 = (
                 f"SELECT {select_list} FROM tours "
                 + ("WHERE " + " AND ".join(where72) if where72 else "")
@@ -1489,7 +1508,9 @@ async def fetch_tours(
 
     except Exception:
         logging.exception("Ошибка при fetch_tours")
+        # is_recent=True оставим, чтобы UI не считал, что это «старые» данные
         return [], True
+
 
 # === ПАГИНАЦИЯ ===
 async def fetch_tours_page(
