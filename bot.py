@@ -2092,7 +2092,18 @@ async def cb_ask(call: CallbackQuery):
 @dp.callback_query(F.data == "tours_recent")
 async def cb_recent(call: CallbackQuery):
     await bot.send_chat_action(call.message.chat.id, "typing")
-    rows, is_recent = await fetch_tours(None, hours=72, limit_recent=6, limit_fallback=6)
+    # важно: strict_recent=False — разрешаем фолбэки
+    rows, is_recent = await fetch_tours(
+        None, hours=72, limit_recent=6, limit_fallback=6, strict_recent=False
+    )
+    if not rows:
+        await call.message.answer(
+            "За 72 часа ничего свежего не нашёл. Покажу фильтры — выбери страну или бюджет 👇",
+            reply_markup=filters_inline_kb_for(call.from_user.id),
+        )
+        await call.answer()
+        return
+
     header = "🔥 Актуальные за 72 часа" if is_recent else "ℹ️ Свежих 72ч мало — показываю последние"
     await call.message.answer(f"<b>{header}</b>")
 
@@ -2103,7 +2114,7 @@ async def cb_recent(call: CallbackQuery):
         "country": None,
         "currency_eq": None,
         "max_price": None,
-        "hours": 72 if is_recent else None,
+        "hours": 72 if is_recent else None,  # если делали фолбэк — без ограничения
         "order_by_price": False,
         "ts": time.monotonic(),
     }
@@ -2111,7 +2122,6 @@ async def cb_recent(call: CallbackQuery):
     _remember_query(call.from_user.id, "актуальные за 72ч")
     next_offset = len(rows)
     await send_batch_cards(call.message.chat.id, call.from_user.id, rows, token, next_offset)
-
 
 @dp.callback_query(F.data.startswith("country:"))
 async def cb_country(call: CallbackQuery):
